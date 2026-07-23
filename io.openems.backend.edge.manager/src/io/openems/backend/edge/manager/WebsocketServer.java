@@ -20,6 +20,7 @@ public class WebsocketServer extends AbstractWebsocketServer<WsData> {
 		super(name, port, poolSize);
 		this.parent = parent;
 		this.onOpen = new OnOpen(//
+				parent.metadata::getEdgeIdForApikey, //
 				parent.metadata::generateUpdateMetadataCacheNotification, //
 				parent::logInfo);
 		this.onRequest = new OnRequest(//
