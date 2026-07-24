@@ -1,8 +1,45 @@
-= OpenEMS Edge SRNE ESS
+= SRNE ESS
 
-This bundle provides the foundation for integrating the SRNE ASP48120SH3
-hybrid inverter with OpenEMS.
+Provides read-only integration of an SRNE hybrid inverter with OpenEMS Edge.
 
-The initial scaffold intentionally defines no Modbus register tasks. Telemetry
-mapping and control are implemented in follow-up stories using the validated
-register map from the NFE Modbus energy logger.
+== Overview
+
+The bundle reads ESS telemetry from an SRNE inverter over Modbus RTU. It maps
+the validated battery and inverter-output registers to the standard OpenEMS
+`SymmetricEss` and `HybridEss` channels.
+
+== Supported Devices
+
+* SRNE ASP48120SH3
+* Modbus RTU, holding-register reads (FC03), default Unit-ID `1`
+* Validated at `9600 8N1`
+
+== Components
+
+[[_srne_ess]]
+
+=== SRNE ESS
+
+*Name*: SRNE ESS
+
+*Factory-PID*: `Srne.Ess`
+
+.Implemented Natures/Interfaces
+* SymmetricEss
+* HybridEss
+* ModbusComponent
+
+*Description*: Reads state of charge, battery voltage and current, inverter
+active power and calculated DC battery power. Control-register writes are not
+part of this component.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `ess0`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+* `capacity` (int): Usable battery capacity in Wh (default: `0`)
+* `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]

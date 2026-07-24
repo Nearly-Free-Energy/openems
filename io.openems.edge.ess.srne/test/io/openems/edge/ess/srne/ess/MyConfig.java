@@ -9,6 +9,8 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private String id;
 		private String modbusId;
 		private int modbusUnitId;
+		private int capacity;
+		private int maxApparentPower;
 
 		private Builder() {
 		}
@@ -25,6 +27,16 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setModbusUnitId(int modbusUnitId) {
 			this.modbusUnitId = modbusUnitId;
+			return this;
+		}
+
+		public Builder setCapacity(int capacity) {
+			this.capacity = capacity;
+			return this;
+		}
+
+		public Builder setMaxApparentPower(int maxApparentPower) {
+			this.maxApparentPower = maxApparentPower;
 			return this;
 		}
 
@@ -57,5 +69,15 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int modbusUnitId() {
 		return this.builder.modbusUnitId;
+	}
+
+	@Override
+	public int capacity() {
+		return this.builder.capacity;
+	}
+
+	@Override
+	public int maxApparentPower() {
+		return this.builder.maxApparentPower;
 	}
 }

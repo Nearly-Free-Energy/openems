@@ -25,5 +25,11 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Modbus Unit-ID", description = "The Unit-ID of the Modbus device.")
 	int modbusUnitId() default SrneConstants.DEFAULT_UNIT_ID;
 
+	@AttributeDefinition(name = "Capacity", description = "Usable battery capacity in [Wh].")
+	int capacity() default 0;
+
+	@AttributeDefinition(name = "Maximum apparent power", description = "Maximum inverter apparent power in [VA].")
+	int maxApparentPower() default 12_000;
+
 	String webconsole_configurationFactory_nameHint() default "SRNE ESS [{id}]";
 }
