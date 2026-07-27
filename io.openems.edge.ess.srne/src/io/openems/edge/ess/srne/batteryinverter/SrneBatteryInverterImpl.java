@@ -82,8 +82,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
 
 		/*
-		 * SRNE battery current is positive while charging and negative while
-		 * discharging. OpenEMS battery-inverter power uses the opposite sign.
+		 * Validated on the ASP48120SH3: SRNE battery current is positive while
+		 * discharging and negative while charging. This matches the OpenEMS
+		 * battery-inverter power sign convention.
 		 */
 		final Consumer<Value<Integer>> updateActivePower = ignore -> {
 			var voltage = this.getBatteryVoltageChannel().getNextValue().get();
@@ -92,7 +93,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this._setActivePower(null);
 				return;
 			}
-			this._setActivePower((int) Math.round(-voltage * (double) current / 1_000_000D));
+			this._setActivePower((int) Math.round(voltage * (double) current / 1_000_000D));
 		};
 		this.getBatteryVoltageChannel().onSetNextValue(updateActivePower);
 		this.getBatteryCurrentChannel().onSetNextValue(updateActivePower);
