@@ -68,9 +68,9 @@ public class SrneEssImpl extends AbstractOpenemsModbusComponent
 		this._setMaxApparentPower(config.maxApparentPower());
 
 		/*
-		 * SRNE reports battery current as positive while charging and negative while
-		 * discharging. OpenEMS active power is positive while discharging, so invert
-		 * the SRNE sign for both power channels.
+		 * Validated on the ASP48120SH3: SRNE reports battery current as positive
+		 * while discharging and negative while charging. This matches the OpenEMS
+		 * active-power sign convention.
 		 */
 		final Consumer<Value<Integer>> updateActivePower = ignore -> {
 			var voltage = this.getBatteryVoltageChannel().getNextValue().get();
@@ -80,7 +80,7 @@ public class SrneEssImpl extends AbstractOpenemsModbusComponent
 				this._setDcDischargePower(null);
 				return;
 			}
-			var activePower = (int) Math.round(-voltage * (double) current / 1_000_000D);
+			var activePower = (int) Math.round(voltage * (double) current / 1_000_000D);
 			this._setActivePower(activePower);
 			this._setDcDischargePower(activePower);
 		};

@@ -26,7 +26,7 @@ public class SrneBatteryInverterImplTest {
 				.addReference("setModbus", new DummyModbusBridge("modbus0") //
 						.withRegisters(0x0101, //
 								/* BATTERY_VOLTAGE: 52.4 V */ 524, //
-								/* BATTERY_CURRENT: -12.3 A */ -123) //
+								/* BATTERY_CURRENT: +12.3 A (discharging) */ 123) //
 						.withRegister(0x0210, /* MACHINE_STATE */ 2)) //
 				.activate(MyConfig.create() //
 						.setId("batteryInverter0") //
@@ -40,7 +40,7 @@ public class SrneBatteryInverterImplTest {
 						.output(SrneBatteryInverter.ChannelId.STATE_MACHINE, State.ON_GRID) //
 						.output(SymmetricBatteryInverter.ChannelId.GRID_MODE, GridMode.ON_GRID) //
 						.output(SrneBatteryInverter.ChannelId.BATTERY_VOLTAGE, 52_400) //
-						.output(SrneBatteryInverter.ChannelId.BATTERY_CURRENT, -12_300) //
+						.output(SrneBatteryInverter.ChannelId.BATTERY_CURRENT, 12_300) //
 						.output(SymmetricBatteryInverter.ChannelId.ACTIVE_POWER, 645) //
 						.output(SymmetricBatteryInverter.ChannelId.MAX_APPARENT_POWER, 12_000) //
 						.output(OffGridBatteryInverter.ChannelId.INVERTER_STATE, true) //

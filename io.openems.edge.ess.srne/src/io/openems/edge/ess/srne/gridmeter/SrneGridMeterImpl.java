@@ -58,6 +58,7 @@ public class SrneGridMeterImpl extends AbstractOpenemsModbusComponent
 
 		ElectricityMeter.calculateAverageVoltageFromPhases(this);
 		ElectricityMeter.calculateSumCurrentFromPhases(this);
+		ElectricityMeter.calculateSumActivePowerFromPhases(this);
 	}
 
 	@Activate
@@ -80,7 +81,17 @@ public class SrneGridMeterImpl extends AbstractOpenemsModbusComponent
 						m(ElectricityMeter.ChannelId.FREQUENCY, new UnsignedWordElement(0x0215), SCALE_FACTOR_1)), //
 				new FC3ReadRegistersTask(0x022A, Priority.HIGH, //
 						m(ElectricityMeter.ChannelId.VOLTAGE_L2, new UnsignedWordElement(0x022A), SCALE_FACTOR_2), //
-						m(ElectricityMeter.ChannelId.VOLTAGE_L3, new UnsignedWordElement(0x022B), SCALE_FACTOR_2)));
+						m(ElectricityMeter.ChannelId.VOLTAGE_L3, new UnsignedWordElement(0x022B), SCALE_FACTOR_2)), //
+				/*
+				 * Validated by a live grid-off/grid-on test: the complete block drops
+				 * to zero without utility power and returns when the grid is restored.
+				 */
+				new FC3ReadRegistersTask(0x0238, Priority.HIGH, //
+						m(ElectricityMeter.ChannelId.CURRENT_L2, new UnsignedWordElement(0x0238), SCALE_FACTOR_2), //
+						m(ElectricityMeter.ChannelId.CURRENT_L3, new UnsignedWordElement(0x0239), SCALE_FACTOR_2), //
+						m(ElectricityMeter.ChannelId.ACTIVE_POWER_L1, new UnsignedWordElement(0x023A)), //
+						m(ElectricityMeter.ChannelId.ACTIVE_POWER_L2, new UnsignedWordElement(0x023B)), //
+						m(ElectricityMeter.ChannelId.ACTIVE_POWER_L3, new UnsignedWordElement(0x023C))));
 	}
 
 	@Override
