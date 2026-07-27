@@ -7,6 +7,8 @@ Provides read-only integration of an SRNE hybrid inverter with OpenEMS Edge.
 The bundle reads ESS telemetry from an SRNE inverter over Modbus RTU. It maps
 the validated battery, grid-input and backup-output registers to the standard
 OpenEMS `SymmetricEss`, `HybridEss` and `ElectricityMeter` channels.
+The battery-inverter component also derives the OpenEMS grid/off-grid
+lifecycle from machine-state register `0x0210`.
 
 == Supported Devices
 
@@ -40,6 +42,38 @@ Control-register writes are not part of this component.
 * `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
 * `modbusUnitId` (int): Device Unit-ID (default: `1`)
 * `capacity` (int): Usable battery capacity in Wh (default: `0`)
+* `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_battery_inverter]]
+
+=== SRNE Battery-Inverter
+
+*Name*: SRNE Battery-Inverter
+
+*Factory-PID*: `Srne.BatteryInverter`
+
+.Implemented Natures/Interfaces
+* OffGridBatteryInverter
+* ManagedSymmetricBatteryInverter (read-only until the control path is implemented)
+* ModbusComponent
+
+*Description*: Reads machine state, battery voltage and signed battery current.
+Active power is calculated from battery voltage and current. Stable mains and
+inverter-powered states map to OpenEMS on-grid and off-grid modes. Startup,
+transition, stopped, fault and unknown states intentionally report an undefined
+grid mode. State `2` (`running (mains/bypass)`) is validated on the live unit;
+the remaining state labels still require live transition testing. No control
+register is written by this component.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `batteryInverter0`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `startStop` (enum): Start/stop behaviour (default: `AUTO`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
 * `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
