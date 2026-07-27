@@ -6,6 +6,8 @@ import static org.osgi.service.component.annotations.ReferenceCardinality.MANDAT
 import static org.osgi.service.component.annotations.ReferencePolicy.STATIC;
 import static org.osgi.service.component.annotations.ReferencePolicyOption.GREEDY;
 
+import java.util.function.Consumer;
+
 import org.osgi.service.component.ComponentContext;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
@@ -23,6 +25,8 @@ import io.openems.edge.bridge.modbus.api.ModbusComponent;
 import io.openems.edge.bridge.modbus.api.ModbusProtocol;
 import io.openems.edge.bridge.modbus.api.element.UnsignedWordElement;
 import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
+import io.openems.edge.common.channel.IntegerReadChannel;
+import io.openems.edge.common.channel.value.Value;
 import io.openems.edge.common.component.OpenemsComponent;
 import io.openems.edge.common.taskmanager.Priority;
 import io.openems.edge.ess.srne.common.Srne;
@@ -58,6 +62,22 @@ public class SrneBackupMeterImpl extends AbstractOpenemsModbusComponent
 
 		ElectricityMeter.calculateAverageVoltageFromPhases(this);
 		ElectricityMeter.calculateSumCurrentFromPhases(this);
+		ElectricityMeter.calculateSumActivePowerFromPhases(this);
+		ElectricityMeter.calculateSumReactivePowerFromPhases(this);
+
+		var apparentPowerL1 = this.<IntegerReadChannel>channel(SrneBackupMeter.ChannelId.APPARENT_POWER_L1);
+		final Consumer<Value<Integer>> calculateReactivePowerL1 = ignore -> {
+			var apparentPower = apparentPowerL1.getNextValue().get();
+			var activePower = this.getActivePowerL1Channel().getNextValue().get();
+			if (apparentPower == null || activePower == null) {
+				this._setReactivePowerL1(null);
+				return;
+			}
+			var reactivePowerSquared = (double) apparentPower * apparentPower - (double) activePower * activePower;
+			this._setReactivePowerL1((int) Math.round(Math.sqrt(Math.max(0D, reactivePowerSquared))));
+		};
+		apparentPowerL1.onSetNextValue(calculateReactivePowerL1);
+		this.getActivePowerL1Channel().onSetNextValue(calculateReactivePowerL1);
 	}
 
 	@Activate
@@ -82,7 +102,15 @@ public class SrneBackupMeterImpl extends AbstractOpenemsModbusComponent
 						m(ElectricityMeter.ChannelId.VOLTAGE_L2, new UnsignedWordElement(0x022C), SCALE_FACTOR_2), //
 						m(ElectricityMeter.ChannelId.VOLTAGE_L3, new UnsignedWordElement(0x022D), SCALE_FACTOR_2), //
 						m(ElectricityMeter.ChannelId.CURRENT_L2, new UnsignedWordElement(0x022E), SCALE_FACTOR_2), //
-						m(ElectricityMeter.ChannelId.CURRENT_L3, new UnsignedWordElement(0x022F), SCALE_FACTOR_2)));
+						m(ElectricityMeter.ChannelId.CURRENT_L3, new UnsignedWordElement(0x022F), SCALE_FACTOR_2)), //
+				new FC3ReadRegistersTask(0x021B, Priority.HIGH, //
+						m(ElectricityMeter.ChannelId.ACTIVE_POWER_L1, new UnsignedWordElement(0x021B)), //
+						m(SrneBackupMeter.ChannelId.APPARENT_POWER_L1, new UnsignedWordElement(0x021C))), //
+				new FC3ReadRegistersTask(0x0232, Priority.HIGH, //
+						m(ElectricityMeter.ChannelId.ACTIVE_POWER_L2, new UnsignedWordElement(0x0232)), //
+						m(ElectricityMeter.ChannelId.ACTIVE_POWER_L3, new UnsignedWordElement(0x0233)), //
+						m(ElectricityMeter.ChannelId.REACTIVE_POWER_L2, new UnsignedWordElement(0x0234)), //
+						m(ElectricityMeter.ChannelId.REACTIVE_POWER_L3, new UnsignedWordElement(0x0235))));
 	}
 
 	@Override
@@ -94,6 +122,8 @@ public class SrneBackupMeterImpl extends AbstractOpenemsModbusComponent
 	public String debugLog() {
 		return "V:" + this.getVoltage().asString() //
 				+ "|I:" + this.getCurrent().asString() //
+				+ "|P:" + this.getActivePower().asString() //
+				+ "|Q:" + this.getReactivePower().asString() //
 				+ "|f:" + this.getFrequency().asString();
 	}
 }

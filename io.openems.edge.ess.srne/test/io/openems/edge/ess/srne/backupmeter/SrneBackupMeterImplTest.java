@@ -24,7 +24,15 @@ public class SrneBackupMeterImplTest {
 								/* VOLTAGE_L2: 230.0 V */ 2_300, //
 								/* VOLTAGE_L3: 229.8 V */ 2_298, //
 								/* CURRENT_L2: 2.8 A */ 28, //
-								/* CURRENT_L3: 3.4 A */ 34)) //
+								/* CURRENT_L3: 3.4 A */ 34) //
+						.withRegisters(0x021B, //
+								/* ACTIVE_POWER_L1 */ 600, //
+								/* APPARENT_POWER_L1 */ 750) //
+						.withRegisters(0x0232, //
+								/* ACTIVE_POWER_L2 */ 500, //
+								/* ACTIVE_POWER_L3 */ 400, //
+								/* REACTIVE_POWER_L2 */ 120, //
+								/* REACTIVE_POWER_L3 */ 90)) //
 				.activate(MyConfig.create() //
 						.setId("meter2") //
 						.setModbusId("modbus0") //
@@ -40,6 +48,14 @@ public class SrneBackupMeterImplTest {
 						.output(ElectricityMeter.ChannelId.CURRENT_L2, 2_800) //
 						.output(ElectricityMeter.ChannelId.CURRENT_L3, 3_400) //
 						.output(ElectricityMeter.ChannelId.CURRENT, 9_300) //
+						.output(ElectricityMeter.ChannelId.ACTIVE_POWER_L1, 600) //
+						.output(ElectricityMeter.ChannelId.ACTIVE_POWER_L2, 500) //
+						.output(ElectricityMeter.ChannelId.ACTIVE_POWER_L3, 400) //
+						.output(ElectricityMeter.ChannelId.ACTIVE_POWER, 1_500) //
+						.output(ElectricityMeter.ChannelId.REACTIVE_POWER_L1, 450) //
+						.output(ElectricityMeter.ChannelId.REACTIVE_POWER_L2, 120) //
+						.output(ElectricityMeter.ChannelId.REACTIVE_POWER_L3, 90) //
+						.output(ElectricityMeter.ChannelId.REACTIVE_POWER, 660) //
 						.output(ElectricityMeter.ChannelId.FREQUENCY, 49_990)) //
 				.deactivate();
 	}

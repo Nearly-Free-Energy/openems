@@ -81,8 +81,10 @@ https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source 
 * ElectricityMeter
 * ModbusComponent
 
-*Description*: Reads backup-output voltage and current for L1, L2 and L3, plus
-the backup-output frequency. It is exposed as a metered-consumption meter.
+*Description*: Reads backup-output voltage, current and active power for L1, L2
+and L3, plus backup-output frequency and reactive power. Reactive power for L1
+is calculated from its apparent and active power registers. It is exposed as a
+metered-consumption meter.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `meter2`)
