@@ -5,8 +5,8 @@ Provides read-only integration of an SRNE hybrid inverter with OpenEMS Edge.
 == Overview
 
 The bundle reads ESS telemetry from an SRNE inverter over Modbus RTU. It maps
-the validated battery registers to the standard OpenEMS `SymmetricEss` and
-`HybridEss` channels.
+the validated battery, grid-input and backup-output registers to the standard
+OpenEMS `SymmetricEss`, `HybridEss` and `ElectricityMeter` channels.
 
 == Supported Devices
 
@@ -41,5 +41,56 @@ Control-register writes are not part of this component.
 * `modbusUnitId` (int): Device Unit-ID (default: `1`)
 * `capacity` (int): Usable battery capacity in Wh (default: `0`)
 * `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_grid_meter]]
+
+=== SRNE Grid-Meter
+
+*Name*: SRNE Grid-Meter
+
+*Factory-PID*: `Srne.Grid-Meter`
+
+.Implemented Natures/Interfaces
+* ElectricityMeter
+* ModbusComponent
+
+*Description*: Reads grid-input voltage for L1, L2 and L3, current for L1 and
+grid frequency. The device does not expose grid current for L2 or L3 in the
+validated register range.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `meter0`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_backup_meter]]
+
+=== SRNE Backup-Meter
+
+*Name*: SRNE Backup-Meter
+
+*Factory-PID*: `Srne.Backup-Meter`
+
+.Implemented Natures/Interfaces
+* ElectricityMeter
+* ModbusComponent
+
+*Description*: Reads backup-output voltage, current and active power for L1, L2
+and L3, plus backup-output frequency and reactive power. Reactive power for L1
+is calculated from its apparent and active power registers. It is exposed as a
+metered-consumption meter.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `meter2`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
