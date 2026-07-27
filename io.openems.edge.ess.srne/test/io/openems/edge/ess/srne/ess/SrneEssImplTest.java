@@ -41,8 +41,7 @@ public class SrneEssImplTest {
 								/* SOC */ 76, //
 								/* BATTERY_VOLTAGE: 52.4 V */ 524, //
 								/* BATTERY_CURRENT: -12.3 A */ -123, //
-								/* unused device temperature */ 0) //
-						.withRegister(0x021B, 3_450)) //
+								/* unused device temperature */ 0)) //
 				.activate(MyConfig.create() //
 						.setId("ess0") //
 						.setModbusId("modbus0") //
@@ -56,7 +55,7 @@ public class SrneEssImplTest {
 						.output(SrneEss.ChannelId.BATTERY_VOLTAGE, 52_400) //
 						.output(SrneEss.ChannelId.BATTERY_CURRENT, -12_300) //
 						.output(HybridEss.ChannelId.DC_DISCHARGE_POWER, 645) //
-						.output(SymmetricEss.ChannelId.ACTIVE_POWER, 3_450)) //
+						.output(SymmetricEss.ChannelId.ACTIVE_POWER, 645)) //
 				.deactivate();
 	}
 

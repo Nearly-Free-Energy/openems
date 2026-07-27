@@ -69,19 +69,23 @@ public class SrneEssImpl extends AbstractOpenemsModbusComponent
 
 		/*
 		 * SRNE reports battery current as positive while charging and negative while
-		 * discharging. OpenEMS uses the opposite sign for DC discharge power.
+		 * discharging. OpenEMS active power is positive while discharging, so invert
+		 * the SRNE sign for both power channels.
 		 */
-		final Consumer<Value<Integer>> updateDcDischargePower = ignore -> {
+		final Consumer<Value<Integer>> updateActivePower = ignore -> {
 			var voltage = this.getBatteryVoltageChannel().getNextValue().get();
 			var current = this.getBatteryCurrentChannel().getNextValue().get();
 			if (voltage == null || current == null) {
+				this._setActivePower(null);
 				this._setDcDischargePower(null);
 				return;
 			}
-			this._setDcDischargePower((int) Math.round(-voltage * (double) current / 1_000_000D));
+			var activePower = (int) Math.round(-voltage * (double) current / 1_000_000D);
+			this._setActivePower(activePower);
+			this._setDcDischargePower(activePower);
 		};
-		this.getBatteryVoltageChannel().onSetNextValue(updateDcDischargePower);
-		this.getBatteryCurrentChannel().onSetNextValue(updateDcDischargePower);
+		this.getBatteryVoltageChannel().onSetNextValue(updateActivePower);
+		this.getBatteryCurrentChannel().onSetNextValue(updateActivePower);
 	}
 
 	@Override
@@ -97,9 +101,7 @@ public class SrneEssImpl extends AbstractOpenemsModbusComponent
 						m(SymmetricEss.ChannelId.SOC, new UnsignedWordElement(0x0100)), //
 						m(SrneEss.ChannelId.BATTERY_VOLTAGE, new UnsignedWordElement(0x0101), SCALE_FACTOR_2), //
 						m(SrneEss.ChannelId.BATTERY_CURRENT, new SignedWordElement(0x0102), SCALE_FACTOR_2), //
-						new DummyRegisterElement(0x0103)), //
-				new FC3ReadRegistersTask(0x021B, Priority.HIGH, //
-						m(SymmetricEss.ChannelId.ACTIVE_POWER, new UnsignedWordElement(0x021B))));
+						new DummyRegisterElement(0x0103)));
 	}
 
 	@Override

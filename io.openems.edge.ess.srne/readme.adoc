@@ -5,8 +5,8 @@ Provides read-only integration of an SRNE hybrid inverter with OpenEMS Edge.
 == Overview
 
 The bundle reads ESS telemetry from an SRNE inverter over Modbus RTU. It maps
-the validated battery and inverter-output registers to the standard OpenEMS
-`SymmetricEss` and `HybridEss` channels.
+the validated battery registers to the standard OpenEMS `SymmetricEss` and
+`HybridEss` channels.
 
 == Supported Devices
 
@@ -29,9 +29,9 @@ the validated battery and inverter-output registers to the standard OpenEMS
 * HybridEss
 * ModbusComponent
 
-*Description*: Reads state of charge, battery voltage and current, inverter
-active power and calculated DC battery power. Control-register writes are not
-part of this component.
+*Description*: Reads state of charge, battery voltage and current. Active power
+and DC battery power are calculated from signed battery voltage and current.
+Control-register writes are not part of this component.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `ess0`)
