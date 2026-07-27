@@ -1,10 +1,12 @@
 package io.openems.edge.ess.srne.batteryinverter;
 
+import static io.openems.edge.bridge.modbus.api.ElementToChannelConverter.SCALE_FACTOR_2;
 import static org.osgi.service.component.annotations.ReferenceCardinality.MANDATORY;
 import static org.osgi.service.component.annotations.ReferencePolicy.STATIC;
 import static org.osgi.service.component.annotations.ReferencePolicyOption.GREEDY;
 
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import org.osgi.service.component.ComponentContext;
 import org.osgi.service.component.annotations.Activate;
@@ -25,9 +27,10 @@ import io.openems.edge.bridge.modbus.api.AbstractOpenemsModbusComponent;
 import io.openems.edge.bridge.modbus.api.BridgeModbus;
 import io.openems.edge.bridge.modbus.api.ModbusComponent;
 import io.openems.edge.bridge.modbus.api.ModbusProtocol;
-import io.openems.edge.bridge.modbus.api.element.DummyRegisterElement;
+import io.openems.edge.bridge.modbus.api.element.SignedWordElement;
 import io.openems.edge.bridge.modbus.api.element.UnsignedWordElement;
 import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
+import io.openems.edge.common.channel.value.Value;
 import io.openems.edge.common.component.OpenemsComponent;
 import io.openems.edge.common.startstop.StartStop;
 import io.openems.edge.common.startstop.StartStoppable;
@@ -77,6 +80,22 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
+
+		/*
+		 * SRNE battery current is positive while charging and negative while
+		 * discharging. OpenEMS battery-inverter power uses the opposite sign.
+		 */
+		final Consumer<Value<Integer>> updateActivePower = ignore -> {
+			var voltage = this.getBatteryVoltageChannel().getNextValue().get();
+			var current = this.getBatteryCurrentChannel().getNextValue().get();
+			if (voltage == null || current == null) {
+				this._setActivePower(null);
+				return;
+			}
+			this._setActivePower((int) Math.round(-voltage * (double) current / 1_000_000D));
+		};
+		this.getBatteryVoltageChannel().onSetNextValue(updateActivePower);
+		this.getBatteryCurrentChannel().onSetNextValue(updateActivePower);
 	}
 
 	@Override
@@ -109,10 +128,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Override
 	protected ModbusProtocol defineModbusProtocol() {
 		return new ModbusProtocol(this, //
+				new FC3ReadRegistersTask(0x0101, Priority.HIGH, //
+						m(SrneBatteryInverter.ChannelId.BATTERY_VOLTAGE, new UnsignedWordElement(0x0101),
+								SCALE_FACTOR_2), //
+						m(SrneBatteryInverter.ChannelId.BATTERY_CURRENT, new SignedWordElement(0x0102),
+								SCALE_FACTOR_2)), //
 				new FC3ReadRegistersTask(0x0210, Priority.HIGH, //
-						m(SrneBatteryInverter.ChannelId.MACHINE_STATE, new UnsignedWordElement(0x0210)), //
-						new DummyRegisterElement(0x0211, 0x021A), //
-						m(SymmetricBatteryInverter.ChannelId.ACTIVE_POWER, new UnsignedWordElement(0x021B))));
+						m(SrneBatteryInverter.ChannelId.MACHINE_STATE, new UnsignedWordElement(0x0210))));
 	}
 
 	@Override
@@ -152,6 +174,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Override
 	public String debugLog() {
 		return "State:" + this.getMachineStateChannel().value().asString() //
-				+ "|Grid:" + this.getGridModeChannel().value().asString();
+				+ "|Grid:" + this.getGridModeChannel().value().asString() //
+				+ "|P:" + this.getActivePower().asString();
 	}
 }

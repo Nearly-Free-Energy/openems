@@ -59,8 +59,9 @@ https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source 
 * ManagedSymmetricBatteryInverter (read-only until the control path is implemented)
 * ModbusComponent
 
-*Description*: Reads machine state and active power. It maps stable mains and
-inverter-powered states to OpenEMS on-grid and off-grid modes. Startup,
+*Description*: Reads machine state, battery voltage and signed battery current.
+Active power is calculated from battery voltage and current. Stable mains and
+inverter-powered states map to OpenEMS on-grid and off-grid modes. Startup,
 transition, stopped, fault and unknown states intentionally report an undefined
 grid mode. State `2` (`running (mains/bypass)`) is validated on the live unit;
 the remaining state labels still require live transition testing. No control
