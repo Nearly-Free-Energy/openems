@@ -46,29 +46,6 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git fetch --no-tags origin develop:refs/remotes/origin/develop
           git merge-base --is-ancestor "$SOURCE_SHA" origin/develop
-      - uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Reject existing release and source tags
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          for image in \
-            openems-backend \
-            openems-ui-backend \
-            openems-edge \
-            openems-ui-edge; do
-            for tag in "$RELEASE_TAG" "sha-$SOURCE_SHA"; do
-              reference="$REGISTRY/$IMAGE_NAMESPACE/$image:$tag"
-              if docker manifest inspect "$reference" >/dev/null 2>&1; then
-                echo "Image tag already exists: $reference" >&2
-                exit 1
-              fi
-            done
-          done
 
   publish:
     needs: validate
@@ -100,7 +77,39 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check for a completed image from an earlier attempt
+        id: existing
+        env:
+          IMAGE: ${{ matrix.image }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          release_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:$RELEASE_TAG"
+          source_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:sha-$SOURCE_SHA"
+          release_digest="$(
+            docker buildx imagetools inspect "$release_ref" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true
+          )"
+          source_digest="$(
+            docker buildx imagetools inspect "$source_ref" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true
+          )"
+
+          if [[ -z "$release_digest" && -z "$source_digest" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$release_digest" && "$release_digest" == "$source_digest" ]]; then
+            {
+              echo "skip=true"
+              echo "digest=$release_digest"
+            } >> "$GITHUB_OUTPUT"
+            echo "Reusing completed image from an earlier release attempt: $release_ref"
+          else
+            echo "Release and source tags are incomplete or point to different images." >&2
+            echo "Refusing to overwrite: $release_ref and $source_ref" >&2
+            exit 1
+          fi
       - id: build
+        if: steps.existing.outputs.skip != 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -121,7 +130,7 @@ jobs:
       - name: Record immutable image
         env:
           IMAGE: ${{ matrix.image }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.existing.outputs.digest }}
           PLATFORMS: ${{ matrix.platforms }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
