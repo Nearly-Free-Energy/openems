@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact commit SHA reachable from Nearly-Free-Energy/openems:develop
+        description: Exact commit SHA reachable from Nearly-Free-Energy/openems:main
         required: true
         type: string
       release_tag:
@@ -39,13 +39,13 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_sha }}
-      - name: Verify source commit is on develop
+      - name: Verify source commit is on main
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          git fetch --no-tags origin develop:refs/remotes/origin/develop
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/develop
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
 
   publish:
     needs: validate
