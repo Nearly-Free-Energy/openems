@@ -287,6 +287,10 @@ public class ControllerApiBackendImpl extends AbstractOpenemsComponent
 	 * Wraps a notification in {@link EdgeRpcNotification} when edgeId is set
 	 * (Backend 2026.x edge.manager protocol). Falls back to raw notification for
 	 * 2025.x Backends where edgeId is empty.
+	 *
+	 * @param notification the {@link JsonrpcNotification} to wrap
+	 * @return the wrapped {@link EdgeRpcNotification}, or the original notification
+	 *         when edgeId is empty
 	 */
 	JsonrpcNotification wrap(JsonrpcNotification notification) {
 		var edgeId = this.config.edgeId();
