@@ -1,88 +1,161 @@
-name: Build OpenEMS Docker Image
+name: Build NFE OpenEMS images
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - develop
-      - main
-    tags:
-      - "*.*.*"
-    
+    inputs:
+      source_sha:
+        description: Exact commit SHA reachable from Nearly-Free-Energy/openems:develop
+        required: true
+        type: string
+      release_tag:
+        description: Unique NFE release tag, e.g. nfe-v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: nfe-openems-image-release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: nearly-free-energy
+
 jobs:
-  docker:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^nfe-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_sha }}
+      - name: Verify source commit is on develop
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags origin develop:refs/remotes/origin/develop
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/develop
+
+  publish:
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
-        image: [edge, backend, ui-edge, ui-backend, backend-edge]
         include:
-          - image: edge
-            dockerfile: tools/docker/edge/Dockerfile
-          - image: ui-edge
-            dockerfile: tools/docker/ui/Dockerfile.edge
-          - image: backend
+          - image: openems-backend
             dockerfile: tools/docker/backend/Dockerfile
-          - image: ui-backend
+            platforms: linux/amd64
+          - image: openems-ui-backend
             dockerfile: tools/docker/ui/Dockerfile.backend
-          - image: backend-edge
-            dockerfile: tools/docker/backend-edge/Dockerfile
-    permissions:
-        packages: write
-        contents: read
-
+            platforms: linux/amd64
+          - image: openems-edge
+            dockerfile: tools/docker/edge/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - image: openems-ui-edge
+            dockerfile: tools/docker/ui/Dockerfile.edge
+            platforms: linux/amd64,linux/arm64
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-        
-      - name: Get cleaned branch name
-        id: clean_name
-        run: |
-          REF_NAME=$(echo "${{ github.ref }}" | sed -e 's/refs\/heads\///' -e 's/refs\/tags\///' -e 's/release\/v//')
-          echo "branch=${REF_NAME}-test" >> "$GITHUB_OUTPUT"
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
+      - uses: actions/checkout@v7
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+          ref: ${{ inputs.source_sha }}
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.REPOSITORY_OWNER }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check for a completed image from an earlier attempt
+        id: existing
+        env:
+          IMAGE: ${{ matrix.image }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          release_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:$RELEASE_TAG"
+          source_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:sha-$SOURCE_SHA"
+          release_digest="$(
+            docker buildx imagetools inspect "$release_ref" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true
+          )"
+          source_digest="$(
+            docker buildx imagetools inspect "$source_ref" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true
+          )"
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: |
-            openems/${{ matrix.image }}
-            ghcr.io/openems/${{ matrix.image }}
-          labels: |
-            org.opencontainers.image.authors=OpenEMS
-            org.opencontainers.image.title=OpenEMS ${{ matrix.image }}
-            org.opencontainers.image.vendor=OpenEMS <openems.io>
-          tags: |
-            type=semver,pattern={{raw}},enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
-
-      - name: Build and push Docker images
+          if [[ -z "$release_digest" && -z "$source_digest" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$release_digest" && "$release_digest" == "$source_digest" ]]; then
+            {
+              echo "skip=true"
+              echo "digest=$release_digest"
+            } >> "$GITHUB_OUTPUT"
+            echo "Reusing completed image from an earlier release attempt: $release_ref"
+          else
+            echo "Release and source tags are incomplete or point to different images." >&2
+            echo "Refusing to overwrite: $release_ref and $source_ref" >&2
+            exit 1
+          fi
+      - id: build
+        if: steps.existing.outputs.skip != 'true'
         uses: docker/build-push-action@v7
         with:
+          context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64, linux/arm64
+          platforms: ${{ matrix.platforms }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ inputs.release_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:sha-${{ inputs.source_sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.version=${{ inputs.release_tag }}
+            org.opencontainers.image.source=https://github.com/Nearly-Free-Energy/openems
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           provenance: mode=max
           sbom: true
+      - name: Record immutable image
+        env:
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.existing.outputs.digest }}
+          PLATFORMS: ${{ matrix.platforms }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          {
+            echo "## $IMAGE"
+            echo
+            echo "\`$REGISTRY/$IMAGE_NAMESPACE/$IMAGE@$DIGEST\`"
+            echo
+            echo "- Release: \`$RELEASE_TAG\`"
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Platforms: \`$PLATFORMS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  complete:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record release completion
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          {
+            echo "## NFE image release complete"
+            echo
+            echo "All four images published for \`$RELEASE_TAG\` from \`$SOURCE_SHA\`."
+          } >> "$GITHUB_STEP_SUMMARY"
