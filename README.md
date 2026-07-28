@@ -12,6 +12,12 @@ OpenEMS - the Open Source Energy Management System - is a modular platform for e
 
 If you plan to use OpenEMS for your own projects, please consider joining the [OpenEMS Association e.V.](https://openems.io/association), a network of universities, hardware manufacturers, software companies as well as commercial and private owners, and get in touch in the [OpenEMS Community forum](https://community.openems.io). 
 
+## Nearly Free Energy development
+
+This fork uses a trunk-based workflow with `main` as its only long-lived NFE
+branch. Developers build and test changes locally, then submit short-lived
+branches as pull requests to `main`. See [NFE development workflow](NFE_DEVELOPMENT.md).
+
 ### OpenEMS in »Local Energy Management«
 
 ![Local Energy Management](./doc/modules/ROOT/assets/images/local-energy-management.png "Local Energy Management")
@@ -80,14 +86,14 @@ If you use OpenEMS in your scientific research, please use our Zenodo Digital Ob
 * OpenEMS Edge 
 * OpenEMS Backend
 
-Copyright (C) 2016-2025 OpenEMS Association e.V.
+Copyright (C) 2016-2026 OpenEMS Association e.V.
 
 This product includes software developed at FENECON GmbH: you can
 redistribute it and/or modify it under the terms of the [Eclipse Public License version 2.0](LICENSE-EPL-2.0). 
 
  * OpenEMS UI
 
-Copyright (C) 2016-2025 OpenEMS Association e.V.
+Copyright (C) 2016-2026 OpenEMS Association e.V.
 
 This product includes software developed at FENECON GmbH: you can
 redistribute it and/or modify it under the terms of the [GNU Affero General Public License version 3](LICENSE-AGPL-3.0).
