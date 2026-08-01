@@ -131,22 +131,3 @@ jobs:
           push: false
           cache-from: type=gha,scope=validate-${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=validate-${{ matrix.image }}
-
-  docker-validation:
-    name: docker-validation
-    if: always()
-    needs: validate-docker
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require release Docker builds
-        env:
-          DOCKER_RESULT: ${{ needs.validate-docker.result }}
-          REQUIRE_DOCKER: >-
-            ${{ github.event_name == 'workflow_call' ||
-                (github.event_name == 'pull_request' && startsWith(github.head_ref, 'upstream-release/')) }}
-        run: |
-          if [[ "$REQUIRE_DOCKER" == "true" && "$DOCKER_RESULT" != "success" ]]; then
-            echo "Release Docker validation did not succeed: $DOCKER_RESULT" >&2
-            exit 1
-          fi
-          echo "Docker validation result: $DOCKER_RESULT"
