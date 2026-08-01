@@ -1,88 +1,261 @@
-name: Build OpenEMS Docker Image
+name: Build NFE OpenEMS images
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - develop
-      - main
-    tags:
-      - "*.*.*"
-    
+    inputs:
+      source_sha:
+        description: Exact commit SHA reachable from Nearly-Free-Energy/openems:main
+        required: true
+        type: string
+      release_tag:
+        description: Unique NFE release tag, e.g. nfe-v0.1.0
+        required: true
+        type: string
+      upstream_tag:
+        description: Optional OpenEMS release tag represented by this build
+        required: false
+        type: string
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: nfe-openems-image-release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: nearly-free-energy
+
 jobs:
-  docker:
+  prepare:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.base.ref == 'main' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'upstream-release/') &&
+       contains(github.event.pull_request.labels.*.name, 'upstream-release'))
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      upstream_tag: ${{ steps.metadata.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.verify.outputs.upstream_sha }}
+      automatic: ${{ steps.metadata.outputs.automatic }}
+      integration_branch: ${{ steps.metadata.outputs.integration_branch }}
+    steps:
+      - name: Resolve release metadata
+        id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_SOURCE_SHA: ${{ inputs.source_sha }}
+          MANUAL_RELEASE_TAG: ${{ inputs.release_tag }}
+          MANUAL_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            source_sha="$MANUAL_SOURCE_SHA"
+            release_tag="$MANUAL_RELEASE_TAG"
+            upstream_tag="$MANUAL_UPSTREAM_TAG"
+            automatic=false
+            integration_branch=""
+          else
+            if [[ ! "$HEAD_REF" =~ ^upstream-release/([0-9]{4}\.[0-9]{1,2}\.[0-9]+)/(nfe-v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              echo "Invalid integration branch: $HEAD_REF" >&2
+              exit 1
+            fi
+            source_sha="$MERGE_SHA"
+            upstream_tag="${BASH_REMATCH[1]}"
+            release_tag="${BASH_REMATCH[2]}"
+            automatic=true
+            integration_branch="$HEAD_REF"
+          fi
+
+          [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$release_tag" =~ ^nfe-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ -n "$upstream_tag" ]]; then
+            [[ "$upstream_tag" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$ ]]
+          fi
+
+          {
+            echo "source_sha=$source_sha"
+            echo "release_tag=$release_tag"
+            echo "upstream_tag=$upstream_tag"
+            echo "automatic=$automatic"
+            echo "integration_branch=$integration_branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact source commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.metadata.outputs.source_sha }}
+
+      - name: Verify source and upstream ancestry
+        id: verify
+        env:
+          AUTOMATIC: ${{ steps.metadata.outputs.automatic }}
+          SOURCE_SHA: ${{ steps.metadata.outputs.source_sha }}
+          UPSTREAM_TAG: ${{ steps.metadata.outputs.upstream_tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+
+          if [[ "$AUTOMATIC" == "true" ]]; then
+            parent_count="$(git show -s --format='%P' "$SOURCE_SHA" | wc -w | tr -d ' ')"
+            if [[ "$parent_count" -lt 2 ]]; then
+              echo "Upstream integrations must use a merge commit; squash/rebase merges cannot publish." >&2
+              exit 1
+            fi
+          fi
+
+          upstream_sha=""
+          if [[ -n "$UPSTREAM_TAG" ]]; then
+            git fetch --force --no-tags https://github.com/OpenEMS/openems.git \
+              "refs/tags/$UPSTREAM_TAG:refs/tags/$UPSTREAM_TAG"
+            upstream_sha="$(git rev-list -n 1 "$UPSTREAM_TAG")"
+            git merge-base --is-ancestor "$upstream_sha" "$SOURCE_SHA"
+          fi
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+    secrets: inherit
+
+  publish:
+    needs: [prepare, validate]
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
-        image: [edge, backend, ui-edge, ui-backend, backend-edge]
         include:
-          - image: edge
-            dockerfile: tools/docker/edge/Dockerfile
-          - image: ui-edge
-            dockerfile: tools/docker/ui/Dockerfile.edge
-          - image: backend
+          - image: openems-backend
             dockerfile: tools/docker/backend/Dockerfile
-          - image: ui-backend
+            platforms: linux/amd64
+          - image: openems-ui-backend
             dockerfile: tools/docker/ui/Dockerfile.backend
-          - image: backend-edge
-            dockerfile: tools/docker/backend-edge/Dockerfile
-    permissions:
-        packages: write
-        contents: read
-
+            platforms: linux/amd64
+          - image: openems-edge
+            dockerfile: tools/docker/edge/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - image: openems-ui-edge
+            dockerfile: tools/docker/ui/Dockerfile.edge
+            platforms: linux/amd64,linux/arm64
     steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        
-      - name: Get cleaned branch name
-        id: clean_name
-        run: |
-          REF_NAME=$(echo "${{ github.ref }}" | sed -e 's/refs\/heads\///' -e 's/refs\/tags\///' -e 's/release\/v//')
-          echo "branch=${REF_NAME}-test" >> "$GITHUB_OUTPUT"
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
         with:
-          registry: ghcr.io
-          username: ${{ github.REPOSITORY_OWNER }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check for a completed image from an earlier attempt
+        id: existing
+        env:
+          IMAGE: ${{ matrix.image }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          release_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:$RELEASE_TAG"
+          source_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:sha-$SOURCE_SHA"
+          release_digest="$(
+            docker buildx imagetools inspect "$release_ref" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true
+          )"
+          source_digest="$(
+            docker buildx imagetools inspect "$source_ref" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true
+          )"
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: |
-            openems/${{ matrix.image }}
-            ghcr.io/openems/${{ matrix.image }}
-          labels: |
-            org.opencontainers.image.authors=OpenEMS
-            org.opencontainers.image.title=OpenEMS ${{ matrix.image }}
-            org.opencontainers.image.vendor=OpenEMS <openems.io>
-          tags: |
-            type=semver,pattern={{raw}},enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
-
-      - name: Build and push Docker images
+          if [[ -z "$release_digest" && -z "$source_digest" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$release_digest" && "$release_digest" == "$source_digest" ]]; then
+            {
+              echo "skip=true"
+              echo "digest=$release_digest"
+            } >> "$GITHUB_OUTPUT"
+            echo "Reusing completed image from an earlier release attempt: $release_ref"
+          else
+            echo "Release and source tags are incomplete or point to different images." >&2
+            echo "Refusing to overwrite: $release_ref and $source_ref" >&2
+            exit 1
+          fi
+      - id: build
+        if: steps.existing.outputs.skip != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
+          context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64, linux/arm64
+          platforms: ${{ matrix.platforms }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ needs.prepare.outputs.release_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:sha-${{ needs.prepare.outputs.source_sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.release_tag }}
+            org.opencontainers.image.source=https://github.com/Nearly-Free-Energy/openems
+            io.nearly-free-energy.openems.upstream.tag=${{ needs.prepare.outputs.upstream_tag }}
+            io.nearly-free-energy.openems.upstream.revision=${{ needs.prepare.outputs.upstream_sha }}
+            io.nearly-free-energy.openems.merge.revision=${{ needs.prepare.outputs.source_sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           provenance: mode=max
           sbom: true
+      - name: Record immutable image
+        env:
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.existing.outputs.digest }}
+          PLATFORMS: ${{ matrix.platforms }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+        run: |
+          {
+            echo "## $IMAGE"
+            echo
+            echo "\`$REGISTRY/$IMAGE_NAMESPACE/$IMAGE@$DIGEST\`"
+            echo
+            echo "- Release: \`$RELEASE_TAG\`"
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Upstream: \`${UPSTREAM_TAG:-not specified}\`"
+            echo "- Platforms: \`$PLATFORMS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  complete:
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record release completion
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+        run: |
+          {
+            echo "## NFE image release complete"
+            echo
+            echo "All four images published for \`$RELEASE_TAG\` from \`$SOURCE_SHA\`."
+            if [[ -n "$UPSTREAM_TAG" ]]; then
+              echo "Upstream OpenEMS release: \`$UPSTREAM_TAG\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete completed integration branch
+        if: needs.prepare.outputs.automatic == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INTEGRATION_BRANCH: ${{ needs.prepare.outputs.integration_branch }}
+        run: gh api --method DELETE "repos/${{ github.repository }}/git/refs/heads/$INTEGRATION_BRANCH"

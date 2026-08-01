@@ -1,17 +1,27 @@
 name: Build OpenEMS
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact commit to validate
+        required: true
+        type: string
   pull_request:
     types: [opened, synchronize, reopened]
   push:
     branches:
       - main
-      - develop
+
+permissions:
+  contents: read
   
 jobs:
   build-java:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Setup Java 21
         uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.5.0
@@ -38,7 +48,7 @@ jobs:
         run: git diff --exit-code io.openems.edge.application/EdgeApp.bndrun
 
       - name: Generate JaCoCo Code-coverage-report
-        run: ./gradlew jacocoLogAggregatedCoverage
+        run: ./gradlew jacocoTestReport jacocoAggregatedReport
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
@@ -50,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -81,3 +93,41 @@ jobs:
           flags: ui
           directory: ./ui/
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  validate-docker:
+    name: Validate Docker image (${{ matrix.image }})
+    if: >-
+      github.event_name == 'workflow_call' ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'upstream-release/'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: openems-backend
+            dockerfile: tools/docker/backend/Dockerfile
+            platforms: linux/amd64
+          - image: openems-ui-backend
+            dockerfile: tools/docker/ui/Dockerfile.backend
+            platforms: linux/amd64
+          - image: openems-edge
+            dockerfile: tools/docker/edge/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - image: openems-ui-edge
+            dockerfile: tools/docker/ui/Dockerfile.edge
+            platforms: linux/amd64,linux/arm64
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: false
+          cache-from: type=gha,scope=validate-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=validate-${{ matrix.image }}

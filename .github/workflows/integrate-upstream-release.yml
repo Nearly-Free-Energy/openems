@@ -1,0 +1,148 @@
+name: Integrate OpenEMS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Published OpenEMS release tag, e.g. 2026.8.0
+        required: true
+        type: string
+      nfe_release_tag:
+        description: Unique NFE image tag, e.g. nfe-v0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrate-upstream-${{ inputs.upstream_tag }}
+  cancel-in-progress: false
+
+jobs:
+  create-pull-request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release names
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          NFE_RELEASE_TAG: ${{ inputs.nfe_release_tag }}
+        run: |
+          [[ "$UPSTREAM_TAG" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$ ]]
+          [[ "$NFE_RELEASE_TAG" =~ ^nfe-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.NFE_RELEASE_APP_ID }}
+          private-key: ${{ secrets.NFE_RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-packages: read
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Checkout NFE repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Validate published upstream release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          release="$(gh api "repos/OpenEMS/openems/releases/tags/$UPSTREAM_TAG")"
+          test "$(jq -r '.draft' <<<"$release")" = "false"
+          test "$(jq -r '.prerelease' <<<"$release")" = "false"
+          test "$(jq -r '.tag_name' <<<"$release")" = "$UPSTREAM_TAG"
+
+      - name: Verify NFE image tag is unused
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NFE_RELEASE_TAG: ${{ inputs.nfe_release_tag }}
+        run: |
+          for package in openems-backend openems-ui-backend openems-edge openems-ui-edge; do
+            version_id="$(
+              gh api --paginate "orgs/Nearly-Free-Energy/packages/container/$package/versions" \
+                --jq ".[] | select(.metadata.container.tags | index(\"$NFE_RELEASE_TAG\")) | .id" \
+                | head -n 1
+            )"
+            if [[ -n "$version_id" ]]; then
+              echo "$package already has immutable tag $NFE_RELEASE_TAG" >&2
+              exit 1
+            fi
+          done
+
+      - name: Fetch and verify upstream tag
+        id: upstream
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          git fetch --force --no-tags https://github.com/OpenEMS/openems.git \
+            "refs/tags/$UPSTREAM_TAG:refs/tags/$UPSTREAM_TAG"
+          upstream_sha="$(git rev-list -n 1 "$UPSTREAM_TAG")"
+          test -n "$upstream_sha"
+          echo "sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Create or verify integration branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          NFE_RELEASE_TAG: ${{ inputs.nfe_release_tag }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          branch="upstream-release/$UPSTREAM_TAG/$NFE_RELEASE_TAG"
+          remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')"
+
+          if [[ -n "$remote_sha" && "$remote_sha" != "$UPSTREAM_SHA" ]]; then
+            existing="$(gh pr list --state open --base main --head "$branch" --json url --jq '.[0].url // empty')"
+            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            if [[ -z "$existing" ]] || ! git merge-base --is-ancestor "$UPSTREAM_SHA" "$remote_sha"; then
+              echo "Integration branch exists at an unrelated commit $remote_sha" >&2
+              exit 1
+            fi
+            echo "Reusing conflict-resolution branch from $existing"
+          fi
+
+          if [[ -z "$remote_sha" ]]; then
+            git push origin "$UPSTREAM_SHA:refs/heads/$branch"
+          fi
+
+      - name: Create or reuse pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          NFE_RELEASE_TAG: ${{ inputs.nfe_release_tag }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          branch="upstream-release/$UPSTREAM_TAG/$NFE_RELEASE_TAG"
+          existing="$(gh pr list --state open --base main --head "$branch" --json url --jq '.[0].url // empty')"
+
+          if [[ -n "$existing" ]]; then
+            echo "Reusing $existing"
+            exit 0
+          fi
+
+          gh label create upstream-release \
+            --description "Integrates a published OpenEMS upstream release" \
+            --color 1D76DB \
+            --force
+
+          body="$(printf '%s\n' \
+            '## Automated upstream integration' \
+            '' \
+            "- Upstream release: \`$UPSTREAM_TAG\`" \
+            "- Upstream commit: \`$UPSTREAM_SHA\`" \
+            "- NFE image tag: \`$NFE_RELEASE_TAG\`" \
+            '' \
+            'Resolve conflicts without discarding NFE-specific behavior. Merge this PR with a merge commit; do not squash or rebase it. Images publish only after the merged commit passes the full validation workflow.')"
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Integrate OpenEMS $UPSTREAM_TAG ($NFE_RELEASE_TAG)" \
+            --body "$body" \
+            --label upstream-release

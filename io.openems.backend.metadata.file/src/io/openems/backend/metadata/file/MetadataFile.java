@@ -35,6 +35,7 @@ import com.google.gson.JsonObject;
 
 import io.openems.backend.common.alerting.OfflineEdgeAlertingSetting;
 import io.openems.backend.common.alerting.SumStateAlertingSetting;
+import io.openems.backend.common.edge.jsonrpc.UpdateMetadataCache;
 import io.openems.backend.common.alerting.UserAlertingSettings;
 import io.openems.backend.common.metadata.AbstractMetadata;
 import io.openems.backend.common.metadata.Edge;
@@ -90,7 +91,7 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 	private static final Role USER_GLOBAL_ROLE = Role.ADMIN;
 	private JsonObject settings = new JsonObject();
 
-	private static Language LANGUAGE = Language.DE;
+	private Language defaultLanguage = Language.DE;
 
 	private final Logger log = LoggerFactory.getLogger(MetadataFile.class);
 	private final Map<String, MyEdge> edges = new HashMap<>();
@@ -108,8 +109,10 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 
 	@Activate
 	private void activate(Config config) {
-		this.log.info("Activate [path=" + config.path() + "]");
+		this.log.info("Activate [path=" + config.path() + ", defaultLanguage=" + config.defaultLanguage() + "]");
 		this.path = config.path();
+		this.defaultLanguage = config.defaultLanguage();
+		this.user = this.generateUser();
 
 		// Read the data async
 		CompletableFuture.runAsync(() -> {
@@ -132,6 +135,15 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 			}
 		}
 		return Optional.empty();
+	}
+
+	@Override
+	public synchronized UpdateMetadataCache.Notification generateUpdateMetadataCacheNotification() {
+		this.refreshData();
+		var apikeysToEdgeIds = this.edges.values().stream() //
+				.filter(edge -> edge.getApikey() != null && !edge.getApikey().isBlank()) //
+				.collect(Collectors.toMap(MyEdge::getApikey, MyEdge::getId, (a, b) -> a));
+		return new UpdateMetadataCache.Notification(apikeysToEdgeIds);
 	}
 
 	@Override
@@ -225,7 +237,7 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 
 	private User generateUser() {
 		return new User(MetadataFile.USER_ID, MetadataFile.USER_NAME, UUID.randomUUID().toString(),
-				MetadataFile.LANGUAGE, MetadataFile.USER_GLOBAL_ROLE, this.edges.size() > 1, this.settings);
+				this.defaultLanguage, MetadataFile.USER_GLOBAL_ROLE, this.edges.size() > 1, this.settings);
 	}
 
 	@Override
@@ -280,8 +292,11 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 	}
 
 	@Override
-	public void updateUserLanguage(User user, Language locale) throws OpenemsNamedException {
-		MetadataFile.LANGUAGE = locale;
+	public synchronized void updateUserLanguage(User user, Language locale) throws OpenemsNamedException {
+		this.defaultLanguage = locale;
+		final var previousUser = this.user;
+		this.user = new User(previousUser.getId(), previousUser.getName(), previousUser.getToken(), locale,
+				previousUser.getGlobalRole(), previousUser.hasMultipleEdges(), previousUser.getSettings());
 	}
 
 	@Override
