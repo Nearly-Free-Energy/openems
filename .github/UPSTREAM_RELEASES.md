@@ -11,11 +11,12 @@ published OpenEMS release into NFE `main` without rewriting NFE history.
    release branches contain files below `.github/workflows`.
 2. Add the App ID as the `NFE_RELEASE_APP_ID` Actions secret and its private key
    as `NFE_RELEASE_APP_PRIVATE_KEY`.
-3. Create a branch ruleset for `main` that requires one approval and the Java,
-   UI, and four Docker validation checks from **Build OpenEMS**.
-4. Allow merge commits. Do not squash or rebase upstream integration pull
-   requests; preserving the upstream commit ancestry makes later integrations
-   reliable.
+3. Keep the existing `main` pull-request checks. Do not make the four Docker
+   matrix jobs required branch checks: they run only for `upstream-release/*`
+   pull requests and are validated again before image publication.
+4. Merge upstream integration pull requests with a merge commit. The publisher
+   verifies that the upstream release remains in the merged commit's ancestry;
+   squash or rebase merges therefore do not publish images.
 
 ## Monthly procedure
 
