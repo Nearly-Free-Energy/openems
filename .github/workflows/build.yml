@@ -98,7 +98,7 @@ jobs:
   validate-docker:
     name: Validate Docker image (${{ matrix.image }})
     if: >-
-      github.event_name == 'workflow_call' ||
+      inputs.source_sha != '' ||
       (github.event_name == 'pull_request' && startsWith(github.head_ref, 'upstream-release/'))
     runs-on: ubuntu-latest
     strategy:
