@@ -11,6 +11,15 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private String modbusId;
 		private int modbusUnitId;
 		private int maxApparentPower;
+		private boolean controlEnabled;
+		private int dischargeCutoffSoc = -1;
+		private int stopChargeCurrent = -1;
+		private int stopChargeSoc = -1;
+		private int lowSocAlarm = -1;
+		private int switchToLineSoc = -1;
+		private int switchToBatterySoc = -1;
+		private int acChargeCurrentLimit = -1;
+		private int maxChargeCurrentLimit = -1;
 
 		private Builder() {
 		}
@@ -32,6 +41,16 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setMaxApparentPower(int maxApparentPower) {
 			this.maxApparentPower = maxApparentPower;
+			return this;
+		}
+
+		public Builder setControlEnabled(boolean value) {
+			this.controlEnabled = value;
+			return this;
+		}
+
+		public Builder setDischargeCutoffSoc(int value) {
+			this.dischargeCutoffSoc = value;
 			return this;
 		}
 
@@ -74,5 +93,50 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int maxApparentPower() {
 		return this.builder.maxApparentPower;
+	}
+
+	@Override
+	public boolean controlEnabled() {
+		return this.builder.controlEnabled;
+	}
+
+	@Override
+	public int dischargeCutoffSoc() {
+		return this.builder.dischargeCutoffSoc;
+	}
+
+	@Override
+	public int stopChargeCurrent() {
+		return this.builder.stopChargeCurrent;
+	}
+
+	@Override
+	public int stopChargeSoc() {
+		return this.builder.stopChargeSoc;
+	}
+
+	@Override
+	public int lowSocAlarm() {
+		return this.builder.lowSocAlarm;
+	}
+
+	@Override
+	public int switchToLineSoc() {
+		return this.builder.switchToLineSoc;
+	}
+
+	@Override
+	public int switchToBatterySoc() {
+		return this.builder.switchToBatterySoc;
+	}
+
+	@Override
+	public int acChargeCurrentLimit() {
+		return this.builder.acChargeCurrentLimit;
+	}
+
+	@Override
+	public int maxChargeCurrentLimit() {
+		return this.builder.maxChargeCurrentLimit;
 	}
 }

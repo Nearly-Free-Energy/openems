@@ -30,6 +30,8 @@ import io.openems.edge.bridge.modbus.api.ModbusProtocol;
 import io.openems.edge.bridge.modbus.api.element.SignedWordElement;
 import io.openems.edge.bridge.modbus.api.element.UnsignedWordElement;
 import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
+import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
+import io.openems.edge.common.channel.IntegerReadChannel;
 import io.openems.edge.common.channel.value.Value;
 import io.openems.edge.common.component.OpenemsComponent;
 import io.openems.edge.common.startstop.StartStop;
@@ -53,6 +55,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	private final AtomicReference<TargetGridMode> targetGridMode = new AtomicReference<>(TargetGridMode.GO_ON_GRID);
 	private final AtomicReference<StartStop> startStopTarget = new AtomicReference<>(StartStop.UNDEFINED);
+	private final UnsignedWordElement dischargeCutoffSocWrite = new UnsignedWordElement(0xE00F);
+	private final UnsignedWordElement stopChargeCurrentWrite = new UnsignedWordElement(0xE01C);
+	private final UnsignedWordElement stopChargeSocWrite = new UnsignedWordElement(0xE01D);
+	private final UnsignedWordElement lowSocAlarmWrite = new UnsignedWordElement(0xE01E);
+	private final UnsignedWordElement switchToLineSocWrite = new UnsignedWordElement(0xE01F);
+	private final UnsignedWordElement switchToBatterySocWrite = new UnsignedWordElement(0xE020);
+	private final UnsignedWordElement acChargeCurrentLimitWrite = new UnsignedWordElement(0xE205);
+	private final UnsignedWordElement maxChargeCurrentLimitWrite = new UnsignedWordElement(0xE20A);
+	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
+			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
+			new SafeWriteHandler(), new SafeWriteHandler() };
+	private Config config;
 
 	@Override
 	@Reference(//
@@ -77,6 +91,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	@Activate
 	private void activate(ComponentContext context, Config config) throws OpenemsException {
+		this.config = config;
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
@@ -129,13 +144,40 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Override
 	protected ModbusProtocol defineModbusProtocol() {
 		return new ModbusProtocol(this, //
+				new FC3ReadRegistersTask(0xE00F, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_CUTOFF_SOC,
+								new UnsignedWordElement(0xE00F))), //
+				new FC3ReadRegistersTask(0xE01C, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.STOP_CHARGE_CURRENT, new UnsignedWordElement(0xE01C),
+								SCALE_FACTOR_2), //
+						m(SrneBatteryInverter.ChannelId.STOP_CHARGE_SOC, new UnsignedWordElement(0xE01D)), //
+						m(SrneBatteryInverter.ChannelId.LOW_SOC_ALARM, new UnsignedWordElement(0xE01E)), //
+						m(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC, new UnsignedWordElement(0xE01F)), //
+						m(SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC,
+								new UnsignedWordElement(0xE020))), //
+				new FC3ReadRegistersTask(0xE205, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
+								new UnsignedWordElement(0xE205), SCALE_FACTOR_2)), //
+				new FC3ReadRegistersTask(0xE20A, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
+								new UnsignedWordElement(0xE20A), SCALE_FACTOR_2)), //
 				new FC3ReadRegistersTask(0x0101, Priority.HIGH, //
 						m(SrneBatteryInverter.ChannelId.BATTERY_VOLTAGE, new UnsignedWordElement(0x0101),
 								SCALE_FACTOR_2), //
 						m(SrneBatteryInverter.ChannelId.BATTERY_CURRENT, new SignedWordElement(0x0102),
 								SCALE_FACTOR_2)), //
 				new FC3ReadRegistersTask(0x0210, Priority.HIGH, //
-						m(SrneBatteryInverter.ChannelId.MACHINE_STATE, new UnsignedWordElement(0x0210))));
+						m(SrneBatteryInverter.ChannelId.MACHINE_STATE, new UnsignedWordElement(0x0210))), //
+				new FC16WriteRegistersTask(this.writeHandlers[0]::onExecute, 0xE00F, this.dischargeCutoffSocWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[1]::onExecute, 0xE01C, this.stopChargeCurrentWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[2]::onExecute, 0xE01D, this.stopChargeSocWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[3]::onExecute, 0xE01E, this.lowSocAlarmWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[4]::onExecute, 0xE01F, this.switchToLineSocWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[5]::onExecute, 0xE020, this.switchToBatterySocWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[6]::onExecute, 0xE205,
+						this.acChargeCurrentLimitWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[7]::onExecute, 0xE20A,
+						this.maxChargeCurrentLimitWrite));
 	}
 
 	@Override
@@ -150,11 +192,64 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	@Override
 	public void run(Battery battery, int setActivePower, int setReactivePower) throws OpenemsNamedException {
-		/*
-		 * Story 18 is intentionally read-only. Story 19 will consume targetGridMode and
-		 * apply the power set-points through the validated FC16 control path.
-		 */
 		this.updateLifecycle();
+		this.reconcileSafeSettings();
+	}
+
+	private void reconcileSafeSettings() {
+		if (this.config == null || !this.config.controlEnabled()) {
+			return;
+		}
+		MachineState machineState = this.getMachineStateChannel().value().asEnum();
+		if (machineState == null || !machineState.isVerified()) {
+			return;
+		}
+
+		this.reconcile(0, SrneBatteryInverter.ChannelId.DISCHARGE_CUTOFF_SOC,
+				this.config.dischargeCutoffSoc(), 0, 100, 1, this.dischargeCutoffSocWrite);
+		this.reconcile(1, SrneBatteryInverter.ChannelId.STOP_CHARGE_CURRENT,
+				this.config.stopChargeCurrent(), 0, 120, 10, this.stopChargeCurrentWrite);
+		this.reconcile(2, SrneBatteryInverter.ChannelId.STOP_CHARGE_SOC,
+				this.config.stopChargeSoc(), 0, 100, 1, this.stopChargeSocWrite);
+		this.reconcile(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM,
+				this.config.lowSocAlarm(), 0, 100, 1, this.lowSocAlarmWrite);
+		this.reconcile(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC,
+				this.config.switchToLineSoc(), 0, 100, 1, this.switchToLineSocWrite);
+		this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC,
+				this.config.switchToBatterySoc(), 0, 100, 1, this.switchToBatterySocWrite);
+		this.reconcile(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
+				this.config.acChargeCurrentLimit(), 0, 120, 10, this.acChargeCurrentLimitWrite);
+		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
+				this.config.maxChargeCurrentLimit(), 0, 120, 10, this.maxChargeCurrentLimitWrite);
+		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+	}
+
+	private void reconcile(int index, SrneBatteryInverter.ChannelId channelId, int configuredTarget, int min, int max,
+			int rawMultiplier, UnsignedWordElement writeElement) {
+		if (configuredTarget < 0) {
+			return;
+		}
+		var handler = this.writeHandlers[index];
+		Integer actual = ((IntegerReadChannel) this.channel(channelId)).value().get();
+		handler.verify(actual);
+		int target = Math.max(min, Math.min(max, configuredTarget));
+		int channelTarget = target * (rawMultiplier == 10 ? 1_000 : 1);
+		if (handler.queueIfChanged(actual, channelTarget)) {
+			writeElement.setNextWriteValue(target * rawMultiplier);
+		}
+	}
+
+	private SafeWriteHandler.State aggregateWriteState() {
+		var result = SafeWriteHandler.State.IDLE;
+		for (var handler : this.writeHandlers) {
+			if (handler.getState() == SafeWriteHandler.State.FAILED) {
+				return SafeWriteHandler.State.FAILED;
+			}
+			if (handler.getState().ordinal() > result.ordinal()) {
+				result = handler.getState();
+			}
+		}
+		return result;
 	}
 
 	@Override
