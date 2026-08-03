@@ -112,6 +112,22 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		};
 		this.getBatteryVoltageChannel().onSetNextValue(updateActivePower);
 		this.getBatteryCurrentChannel().onSetNextValue(updateActivePower);
+
+		this.registerReadback(0, SrneBatteryInverter.ChannelId.DISCHARGE_CUTOFF_SOC);
+		this.registerReadback(1, SrneBatteryInverter.ChannelId.STOP_CHARGE_CURRENT);
+		this.registerReadback(2, SrneBatteryInverter.ChannelId.STOP_CHARGE_SOC);
+		this.registerReadback(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM);
+		this.registerReadback(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC);
+		this.registerReadback(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC);
+		this.registerReadback(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT);
+		this.registerReadback(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT);
+	}
+
+	private void registerReadback(int index, SrneBatteryInverter.ChannelId channelId) {
+		((IntegerReadChannel) this.channel(channelId)).onSetNextValue(value -> {
+			this.writeHandlers[index].verify(value.get());
+			this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+		});
 	}
 
 	@Override
@@ -231,7 +247,6 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		var handler = this.writeHandlers[index];
 		Integer actual = ((IntegerReadChannel) this.channel(channelId)).value().get();
-		handler.verify(actual);
 		int target = Math.max(min, Math.min(max, configuredTarget));
 		int channelTarget = target * (rawMultiplier == 10 ? 1_000 : 1);
 		if (handler.queueIfChanged(actual, channelTarget)) {

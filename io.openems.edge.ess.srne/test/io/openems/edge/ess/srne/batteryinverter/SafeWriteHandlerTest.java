@@ -29,6 +29,20 @@ public class SafeWriteHandlerTest {
 	}
 
 	@Test
+	void remainsPendingUntilFreshReadbackArrives() {
+		var sut = new SafeWriteHandler();
+		assertTrue(sut.queueIfChanged(10, 20));
+		sut.onExecute(ExecuteState.OK);
+
+		// Merely reconciling against the cached value must not verify or fail the write.
+		assertFalse(sut.queueIfChanged(10, 20));
+		assertEquals(SafeWriteHandler.State.AWAITING_READBACK, sut.getState());
+
+		sut.verify(20);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.getState());
+	}
+
+	@Test
 	void mismatchFailsWithoutRetry() {
 		var sut = new SafeWriteHandler();
 		assertTrue(sut.queueIfChanged(10, 20));
