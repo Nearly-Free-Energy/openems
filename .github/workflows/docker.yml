@@ -193,6 +193,16 @@ jobs:
             echo "Refusing to overwrite: $release_ref and $source_ref" >&2
             exit 1
           fi
+      - name: Refresh package source association
+        if: steps.existing.outputs.skip == 'true'
+        env:
+          IMAGE: ${{ matrix.image }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          release_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:$RELEASE_TAG"
+          source_ref="$REGISTRY/$IMAGE_NAMESPACE/$IMAGE:sha-$SOURCE_SHA"
+          docker buildx imagetools create --prefer-index=false --tag "$release_ref" "$source_ref"
       - id: build
         if: steps.existing.outputs.skip != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
