@@ -6,6 +6,12 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 /**
  * Coordinates one idempotent settings write and its read-back verification.
  * A failed or mismatched write is never retried automatically.
+ *
+ * <p>Thread-safety: {@code queueIfChanged} is called from the Edge cycle thread
+ * (via {@code run()}), while {@code onExecute} and {@code verify} are called from
+ * the Modbus bridge worker thread (task execute callback and read-back channel
+ * callback). The mutable {@code state}/{@code target} are therefore guarded by
+ * intrinsic locking so transitions are atomic and visible across those threads.
  */
 final class SafeWriteHandler {
 
@@ -37,7 +43,7 @@ final class SafeWriteHandler {
 	private State state = State.IDLE;
 	private Integer target;
 
-	public boolean queueIfChanged(Integer actual, int target) {
+	public synchronized boolean queueIfChanged(Integer actual, int target) {
 		if (this.state != State.IDLE || actual == null || actual == target) {
 			return false;
 		}
@@ -46,21 +52,21 @@ final class SafeWriteHandler {
 		return true;
 	}
 
-	public void onExecute(ExecuteState executeState) {
+	public synchronized void onExecute(ExecuteState executeState) {
 		if (this.state != State.QUEUED || executeState == ExecuteState.NO_OP) {
 			return;
 		}
 		this.state = executeState == ExecuteState.OK ? State.AWAITING_READBACK : State.FAILED;
 	}
 
-	public void verify(Integer actual) {
+	public synchronized void verify(Integer actual) {
 		if (this.state != State.AWAITING_READBACK || actual == null) {
 			return;
 		}
 		this.state = actual.equals(this.target) ? State.VERIFIED : State.FAILED;
 	}
 
-	public State getState() {
+	public synchronized State getState() {
 		return this.state;
 	}
 }

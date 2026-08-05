@@ -212,6 +212,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.reconcileSafeSettings();
 	}
 
+	/**
+	 * Continuous max charge/discharge current of the SR-SE10B (205Ah LFP) is 100A;
+	 * 120A is only the 3-second peak (datasheet SRNE_SE series V1.5). Current-limit
+	 * settings are capped at the continuous rating so a configured limit can never
+	 * exceed what the battery allows.
+	 */
+	private static final int MAX_BATTERY_CURRENT_A = 100;
+
 	private void reconcileSafeSettings() {
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
@@ -224,7 +232,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.reconcile(0, SrneBatteryInverter.ChannelId.DISCHARGE_CUTOFF_SOC,
 				this.config.dischargeCutoffSoc(), 0, 100, 1, this.dischargeCutoffSocWrite);
 		this.reconcile(1, SrneBatteryInverter.ChannelId.STOP_CHARGE_CURRENT,
-				this.config.stopChargeCurrent(), 0, 120, 10, this.stopChargeCurrentWrite);
+				this.config.stopChargeCurrent(), 0, MAX_BATTERY_CURRENT_A, 10, this.stopChargeCurrentWrite);
 		this.reconcile(2, SrneBatteryInverter.ChannelId.STOP_CHARGE_SOC,
 				this.config.stopChargeSoc(), 0, 100, 1, this.stopChargeSocWrite);
 		this.reconcile(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM,
@@ -234,9 +242,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC,
 				this.config.switchToBatterySoc(), 0, 100, 1, this.switchToBatterySocWrite);
 		this.reconcile(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
-				this.config.acChargeCurrentLimit(), 0, 120, 10, this.acChargeCurrentLimitWrite);
+				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
-				this.config.maxChargeCurrentLimit(), 0, 120, 10, this.maxChargeCurrentLimitWrite);
+				this.config.maxChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.maxChargeCurrentLimitWrite);
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 	}
 
