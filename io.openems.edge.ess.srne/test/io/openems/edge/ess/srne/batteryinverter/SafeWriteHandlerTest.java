@@ -51,4 +51,50 @@ public class SafeWriteHandlerTest {
 		assertEquals(SafeWriteHandler.State.FAILED, sut.getState());
 		assertFalse(sut.queueIfChanged(15, 20));
 	}
+
+	@Test
+	void missingReadbackTimesOutWithoutRetry() {
+		var sut = new SafeWriteHandler();
+		assertTrue(sut.queueIfChanged(10, 20));
+		sut.onExecute(ExecuteState.OK);
+		for (var i = 1; i < 30; i++) {
+			sut.onCycle(30);
+			assertEquals(SafeWriteHandler.State.AWAITING_READBACK, sut.getState());
+		}
+		sut.onCycle(30);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.getState());
+		assertFalse(sut.queueIfChanged(10, 20));
+	}
+
+	@Test
+	void rejectedTargetNeverQueuesAWrite() {
+		var sut = new SafeWriteHandler();
+		assertTrue(sut.reject());
+		assertEquals(SafeWriteHandler.State.FAILED, sut.getState());
+		assertFalse(sut.reject());
+		assertFalse(sut.queueIfChanged(10, 20));
+	}
+
+	@Test
+	void newActivationStartsWithFreshHandler() {
+		var previousActivation = new SafeWriteHandler();
+		assertTrue(previousActivation.queueIfChanged(10, 20));
+		previousActivation.onExecute(ExecuteState.OK);
+		previousActivation.verify(20);
+		assertEquals(SafeWriteHandler.State.VERIFIED, previousActivation.getState());
+
+		var nextActivation = new SafeWriteHandler();
+		assertEquals(SafeWriteHandler.State.IDLE, nextActivation.getState());
+		assertTrue(nextActivation.queueIfChanged(20, 30));
+	}
+
+	@Test
+	void aggregatePrecedenceIsIndependentOfEnumOrder() {
+		assertTrue(SrneBatteryInverterImpl.writeStatePrecedence(SafeWriteHandler.State.FAILED) //
+				> SrneBatteryInverterImpl.writeStatePrecedence(SafeWriteHandler.State.AWAITING_READBACK));
+		assertTrue(SrneBatteryInverterImpl.writeStatePrecedence(SafeWriteHandler.State.AWAITING_READBACK) //
+				> SrneBatteryInverterImpl.writeStatePrecedence(SafeWriteHandler.State.QUEUED));
+		assertTrue(SrneBatteryInverterImpl.writeStatePrecedence(SafeWriteHandler.State.QUEUED) //
+				> SrneBatteryInverterImpl.writeStatePrecedence(SafeWriteHandler.State.VERIFIED));
+	}
 }

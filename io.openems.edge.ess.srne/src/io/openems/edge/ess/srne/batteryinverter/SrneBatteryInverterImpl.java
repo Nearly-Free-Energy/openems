@@ -15,6 +15,8 @@ import org.osgi.service.component.annotations.ConfigurationPolicy;
 import org.osgi.service.component.annotations.Deactivate;
 import org.osgi.service.component.annotations.Reference;
 import org.osgi.service.metatype.annotations.Designate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.common.exceptions.OpenemsException;
@@ -52,6 +54,8 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
 public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		implements SrneBatteryInverter, Srne, OffGridBatteryInverter, ManagedSymmetricBatteryInverter,
 		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable {
+	private static final int READBACK_TIMEOUT_CYCLES = 30;
+	private final Logger log = LoggerFactory.getLogger(SrneBatteryInverterImpl.class);
 
 	private final AtomicReference<TargetGridMode> targetGridMode = new AtomicReference<>(TargetGridMode.GO_ON_GRID);
 	private final AtomicReference<StartStop> startStopTarget = new AtomicReference<>(StartStop.UNDEFINED);
@@ -92,6 +96,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Activate
 	private void activate(ComponentContext context, Config config) throws OpenemsException {
 		this.config = config;
+		/*
+		 * There is intentionally no @Modified method. A settings configuration update
+		 * causes DS to replace this component instance, giving every setting a fresh
+		 * SafeWriteHandler. VERIFIED and FAILED therefore remain terminal for one
+		 * configured request and cannot trigger repeated writes in the same activation.
+		 */
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
@@ -221,6 +231,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private static final int MAX_BATTERY_CURRENT_A = 100;
 
 	private void reconcileSafeSettings() {
+		for (var handler : this.writeHandlers) {
+			handler.onCycle(READBACK_TIMEOUT_CYCLES);
+		}
+		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
 		}
@@ -255,7 +269,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		var handler = this.writeHandlers[index];
 		Integer actual = ((IntegerReadChannel) this.channel(channelId)).value().get();
-		int target = Math.max(min, Math.min(max, configuredTarget));
+		if (configuredTarget < min || configuredTarget > max) {
+			if (handler.reject()) {
+				this.logWarn(this.log, "Rejected out-of-range setting [" + channelId.name() + "] value ["
+						+ configuredTarget + "]; validated range is [" + min + ".." + max + "]");
+			}
+			return;
+		}
+		int target = configuredTarget;
 		int channelTarget = target * (rawMultiplier == 10 ? 1_000 : 1);
 		if (handler.queueIfChanged(actual, channelTarget)) {
 			writeElement.setNextWriteValue(target * rawMultiplier);
@@ -265,14 +286,23 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private SafeWriteHandler.State aggregateWriteState() {
 		var result = SafeWriteHandler.State.IDLE;
 		for (var handler : this.writeHandlers) {
-			if (handler.getState() == SafeWriteHandler.State.FAILED) {
-				return SafeWriteHandler.State.FAILED;
-			}
-			if (handler.getState().ordinal() > result.ordinal()) {
-				result = handler.getState();
+			var state = handler.getState();
+			if (writeStatePrecedence(state) > writeStatePrecedence(result)) {
+				result = state;
 			}
 		}
 		return result;
+	}
+
+	static int writeStatePrecedence(SafeWriteHandler.State state) {
+		return switch (state) {
+		case FAILED -> 5;
+		case AWAITING_READBACK -> 4;
+		case QUEUED -> 3;
+		case VERIFIED -> 2;
+		case IDLE -> 1;
+		case UNDEFINED -> 0;
+		};
 	}
 
 	@Override
