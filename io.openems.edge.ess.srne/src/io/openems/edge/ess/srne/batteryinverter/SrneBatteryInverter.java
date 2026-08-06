@@ -21,7 +21,17 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		MACHINE_STATE(Doc.of(MachineState.values()) //
 				.text("Machine state from holding register 0x0210")), //
 		STATE_MACHINE(Doc.of(State.values()) //
-				.text("Grid/off-grid lifecycle derived from the machine state")); //
+				.text("Grid/off-grid lifecycle derived from the machine state")), //
+		DISCHARGE_CUTOFF_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
+		STOP_CHARGE_CURRENT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
+		STOP_CHARGE_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
+		LOW_SOC_ALARM(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
+		SWITCH_TO_LINE_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
+		SWITCH_TO_BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
+		AC_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
+		MAX_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
+		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
+				.text("Aggregate state of the guarded settings write operation")); //
 
 		private final Doc doc;
 

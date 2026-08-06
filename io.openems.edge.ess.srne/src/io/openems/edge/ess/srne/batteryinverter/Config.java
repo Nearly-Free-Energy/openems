@@ -32,5 +32,32 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Maximum apparent power", description = "Maximum inverter apparent power in [VA].")
 	int maxApparentPower() default 12_000;
 
+	@AttributeDefinition(name = "Enable settings writes", description = "Safety gate for FC16 settings writes. Disabled by default.")
+	boolean controlEnabled() default false;
+
+	@AttributeDefinition(name = "Discharge cutoff SoC", description = "Target for E00F in percent; -1 leaves unchanged.")
+	int dischargeCutoffSoc() default -1;
+
+	@AttributeDefinition(name = "Stop-charge current", description = "Target for E01C in amperes; -1 leaves unchanged.")
+	int stopChargeCurrent() default -1;
+
+	@AttributeDefinition(name = "Stop-charge SoC", description = "Target for E01D in percent; -1 leaves unchanged.")
+	int stopChargeSoc() default -1;
+
+	@AttributeDefinition(name = "Low-SoC alarm", description = "Target for E01E in percent; -1 leaves unchanged.")
+	int lowSocAlarm() default -1;
+
+	@AttributeDefinition(name = "Switch to line SoC", description = "Target for E01F in percent; -1 leaves unchanged.")
+	int switchToLineSoc() default -1;
+
+	@AttributeDefinition(name = "Switch to battery SoC", description = "Target for E020 in percent; -1 leaves unchanged.")
+	int switchToBatterySoc() default -1;
+
+	@AttributeDefinition(name = "AC charge-current limit", description = "Target for E205 in amperes; -1 leaves unchanged.")
+	int acChargeCurrentLimit() default -1;
+
+	@AttributeDefinition(name = "Maximum charge-current limit", description = "Target for E20A in amperes; -1 leaves unchanged.")
+	int maxChargeCurrentLimit() default -1;
+
 	String webconsole_configurationFactory_nameHint() default "SRNE Battery-Inverter [{id}]";
 }
