@@ -86,4 +86,63 @@ public class SrneBatteryInverterImplTest {
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
 				.deactivate();
 	}
+
+	// JUSTIFICATION-A3: new negative tests for the two safety gates (default-off and
+	// machine-state-verified), added because the reconcile trigger now fires every
+	// cycle in all topologies. Not a wrapper around existing coverage.
+	@Test
+	public void testControlDisabledNeverQueues() throws Exception {
+		// Default-off guard: even with a target that differs from the actual reading
+		// and the inverter in the verified state, control disabled must never queue a
+		// write. SAFE_WRITE_STATE stays IDLE across many cycles.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegister(0xE205, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(false) //
+						.setLowSocAlarm(16) //
+						.build()) //
+				.next(new TestCase(), 12) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.IDLE)) //
+				.deactivate();
+	}
+
+	@Test
+	public void testUnverifiedMachineStateNeverQueues() throws Exception {
+		// Machine-state gate: control enabled and a differing target, but the inverter
+		// is not in the verified RUNNING_MAINS_BYPASS state, so no write is queued.
+		// SAFE_WRITE_STATE stays IDLE across many cycles.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegister(0xE205, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setLowSocAlarm(16) //
+						.build()) //
+				.next(new TestCase(), 12) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.IDLE)) //
+				.deactivate();
+	}
 }
