@@ -84,6 +84,12 @@ public class SrneBatteryInverterImplTest {
 				.next(new TestCase() //
 						.output(SrneBatteryInverter.ChannelId.LOW_SOC_ALARM, 15) //
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				// The reconcile trigger fires every cycle; extra cycles must NOT queue a
+				// second or changed write - it stays a single one-shot QUEUED.
+				.next(new TestCase(), 5) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.LOW_SOC_ALARM, 15) //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
 				.deactivate();
 	}
 
