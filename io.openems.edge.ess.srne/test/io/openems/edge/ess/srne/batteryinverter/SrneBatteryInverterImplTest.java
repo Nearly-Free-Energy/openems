@@ -60,4 +60,30 @@ public class SrneBatteryInverterImplTest {
 		assertEquals(GridMode.UNDEFINED, StateMachine.toGridMode(State.FAULT));
 		assertEquals(State.UNDEFINED, StateMachine.fromMachineState(null));
 	}
+
+	@Test
+	public void testSettingsWriteQueuesWithoutGenericManagedEss() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegister(0xE205, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setLowSocAlarm(16) //
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.LOW_SOC_ALARM, 15) //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				.deactivate();
+	}
 }

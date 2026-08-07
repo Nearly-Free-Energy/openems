@@ -14,6 +14,9 @@ import org.osgi.service.component.annotations.Component;
 import org.osgi.service.component.annotations.ConfigurationPolicy;
 import org.osgi.service.component.annotations.Deactivate;
 import org.osgi.service.component.annotations.Reference;
+import org.osgi.service.event.Event;
+import org.osgi.service.event.EventHandler;
+import org.osgi.service.event.propertytypes.EventTopics;
 import org.osgi.service.metatype.annotations.Designate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +39,7 @@ import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
 import io.openems.edge.common.channel.IntegerReadChannel;
 import io.openems.edge.common.channel.value.Value;
 import io.openems.edge.common.component.OpenemsComponent;
+import io.openems.edge.common.event.EdgeEventConstants;
 import io.openems.edge.common.startstop.StartStop;
 import io.openems.edge.common.startstop.StartStoppable;
 import io.openems.edge.common.taskmanager.Priority;
@@ -50,10 +54,13 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
 		immediate = true, //
 		configurationPolicy = ConfigurationPolicy.REQUIRE //
 )
+@EventTopics({ //
+		EdgeEventConstants.TOPIC_CYCLE_AFTER_PROCESS_IMAGE //
+})
 @GenerateTargetsFromReferences("Modbus")
 public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		implements SrneBatteryInverter, Srne, OffGridBatteryInverter, ManagedSymmetricBatteryInverter,
-		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable {
+		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable, EventHandler {
 	private static final int READBACK_TIMEOUT_CYCLES = 30;
 	private final Logger log = LoggerFactory.getLogger(SrneBatteryInverterImpl.class);
 
@@ -135,9 +142,25 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	private void registerReadback(int index, SrneBatteryInverter.ChannelId channelId) {
 		((IntegerReadChannel) this.channel(channelId)).onSetNextValue(value -> {
-			this.writeHandlers[index].verify(value.get());
+			var handler = this.writeHandlers[index];
+			var previousState = handler.getState();
+			handler.verify(value.get());
+			if (previousState != handler.getState()) {
+				this.logInfo(this.log, "Settings write [" + channelId.name() + "] state [" + handler.getState()
+						+ "] after readback [" + value.get() + "]");
+			}
 			this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		});
+	}
+
+	@Override
+	public void handleEvent(Event event) {
+		if (!this.isEnabled()) {
+			return;
+		}
+		switch (event.getTopic()) {
+		case EdgeEventConstants.TOPIC_CYCLE_AFTER_PROCESS_IMAGE -> this.reconcileSafeSettings();
+		}
 	}
 
 	@Override
@@ -219,7 +242,6 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Override
 	public void run(Battery battery, int setActivePower, int setReactivePower) throws OpenemsNamedException {
 		this.updateLifecycle();
-		this.reconcileSafeSettings();
 	}
 
 	/**
@@ -279,6 +301,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		int target = configuredTarget;
 		int channelTarget = target * (rawMultiplier == 10 ? 1_000 : 1);
 		if (handler.queueIfChanged(actual, channelTarget)) {
+			this.logInfo(this.log, "Queued one-shot settings write [" + channelId.name() + "] from [" + actual
+					+ "] to [" + channelTarget + "]");
 			writeElement.setNextWriteValue(target * rawMultiplier);
 		}
 	}
