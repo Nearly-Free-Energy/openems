@@ -2,6 +2,8 @@ package io.openems.edge.ess.srne.batteryinverter;
 
 import static io.openems.edge.ess.srne.SrneConstants.DEFAULT_UNIT_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -149,6 +151,86 @@ public class SrneBatteryInverterImplTest {
 				.next(new TestCase(), 12) //
 				.next(new TestCase() //
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.IDLE)) //
+				.deactivate();
+	}
+
+	// JUSTIFICATION-A3: tests for the new TOU schedule-window write path (#67) -
+	// pure time encoding/validation plus the guarded queue and the invalid-time
+	// reject. New behaviour, not a wrapper around existing coverage.
+	@Test
+	public void testEncodedTimeValidationAndFormatting() {
+		assertTrue(SrneBatteryInverterImpl.isValidEncodedTime(0)); // 00:00
+		assertTrue(SrneBatteryInverterImpl.isValidEncodedTime(1536)); // 06:00
+		assertTrue(SrneBatteryInverterImpl.isValidEncodedTime(4608)); // 18:00
+		assertTrue(SrneBatteryInverterImpl.isValidEncodedTime(5947)); // 23:59
+		assertFalse(SrneBatteryInverterImpl.isValidEncodedTime(60)); // 00:60 minute out of range
+		assertFalse(SrneBatteryInverterImpl.isValidEncodedTime(6144)); // 24:00 hour out of range
+		assertFalse(SrneBatteryInverterImpl.isValidEncodedTime(-1));
+		assertFalse(SrneBatteryInverterImpl.isValidEncodedTime(0x1_0000));
+		assertEquals("00:00", SrneBatteryInverterImpl.formatEncodedTime(0));
+		assertEquals("06:00", SrneBatteryInverterImpl.formatEncodedTime(1536));
+		assertEquals("18:00", SrneBatteryInverterImpl.formatEncodedTime(4608));
+		assertEquals("23:59", SrneBatteryInverterImpl.formatEncodedTime(5947));
+	}
+
+	@Test
+	public void testScheduleWindowWriteQueues() throws Exception {
+		// A differing discharge-window target (18:00) queues one guarded schedule write.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegister(0xE205, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegisters(0xE026, 0, 1536) // charge window 00:00-06:00
+						.withRegisters(0xE02D, 0, 0) // discharge window currently off
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setDischargeWindow1Start(4608) // 18:00
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, 0) //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				// Every cycle re-runs reconcile; it must stay a single one-shot QUEUED.
+				.next(new TestCase(), 5) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				.deactivate();
+	}
+
+	@Test
+	public void testScheduleInvalidTimeRejected() throws Exception {
+		// A garbage encoded time (hour 25) is rejected before any write is queued.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegister(0xE205, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegisters(0xE026, 0, 1536) //
+						.withRegisters(0xE02D, 0, 0) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setDischargeWindow1Start(6400) // hour 25 -> invalid
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.FAILED)) //
 				.deactivate();
 	}
 }

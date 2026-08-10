@@ -30,6 +30,16 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		SWITCH_TO_BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
 		AC_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
 		MAX_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
+		// TOU schedule windows: raw value is encoded hour*256+minute (e.g. 18:00
+		// = 4608). Used for time-of-use arbitrage (charge off-peak, discharge peak).
+		CHARGE_WINDOW_1_START(Doc.of(OpenemsType.INTEGER) //
+				.text("Charge window 1 start, encoded hour*256+min (0xE026)")), //
+		CHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
+				.text("Charge window 1 stop, encoded hour*256+min (0xE027)")), //
+		DISCHARGE_WINDOW_1_START(Doc.of(OpenemsType.INTEGER) //
+				.text("Discharge window 1 start, encoded hour*256+min (0xE02D)")), //
+		DISCHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
+				.text("Discharge window 1 stop, encoded hour*256+min (0xE02E)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 

@@ -74,7 +74,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final UnsignedWordElement switchToBatterySocWrite = new UnsignedWordElement(0xE020);
 	private final UnsignedWordElement acChargeCurrentLimitWrite = new UnsignedWordElement(0xE205);
 	private final UnsignedWordElement maxChargeCurrentLimitWrite = new UnsignedWordElement(0xE20A);
+	// TOU schedule windows (encoded hour*256+min): charge 0xE026/E027, discharge
+	// 0xE02D/E02E. Same guarded write path; validated as a time before queueing.
+	private final UnsignedWordElement chargeWindow1StartWrite = new UnsignedWordElement(0xE026);
+	private final UnsignedWordElement chargeWindow1StopWrite = new UnsignedWordElement(0xE027);
+	private final UnsignedWordElement dischargeWindow1StartWrite = new UnsignedWordElement(0xE02D);
+	private final UnsignedWordElement dischargeWindow1StopWrite = new UnsignedWordElement(0xE02E);
 	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
+			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler() };
 	private Config config;
@@ -138,6 +145,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.registerReadback(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC);
 		this.registerReadback(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT);
 		this.registerReadback(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT);
+		this.registerReadback(8, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START);
+		this.registerReadback(9, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP);
+		this.registerReadback(10, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START);
+		this.registerReadback(11, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP);
 	}
 
 	private void registerReadback(int index, SrneBatteryInverter.ChannelId channelId) {
@@ -210,6 +221,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC3ReadRegistersTask(0xE20A, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
 								new UnsignedWordElement(0xE20A), SCALE_FACTOR_2)), //
+				new FC3ReadRegistersTask(0xE026, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, new UnsignedWordElement(0xE026)), //
+						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, new UnsignedWordElement(0xE027))), //
+				new FC3ReadRegistersTask(0xE02D, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, new UnsignedWordElement(0xE02D)), //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, new UnsignedWordElement(0xE02E))), //
 				new FC3ReadRegistersTask(0x0101, Priority.HIGH, //
 						m(SrneBatteryInverter.ChannelId.BATTERY_VOLTAGE, new UnsignedWordElement(0x0101),
 								SCALE_FACTOR_2), //
@@ -226,7 +243,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC16WriteRegistersTask(this.writeHandlers[6]::onExecute, 0xE205,
 						this.acChargeCurrentLimitWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[7]::onExecute, 0xE20A,
-						this.maxChargeCurrentLimitWrite));
+						this.maxChargeCurrentLimitWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[8]::onExecute, 0xE026, this.chargeWindow1StartWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[9]::onExecute, 0xE027, this.chargeWindow1StopWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[10]::onExecute, 0xE02D,
+						this.dischargeWindow1StartWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[11]::onExecute, 0xE02E,
+						this.dischargeWindow1StopWrite));
 	}
 
 	@Override
@@ -281,6 +304,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
 				this.config.maxChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.maxChargeCurrentLimitWrite);
+		this.reconcileTime(8, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START,
+				this.config.chargeWindow1Start(), this.chargeWindow1StartWrite);
+		this.reconcileTime(9, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP,
+				this.config.chargeWindow1Stop(), this.chargeWindow1StopWrite);
+		this.reconcileTime(10, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START,
+				this.config.dischargeWindow1Start(), this.dischargeWindow1StartWrite);
+		this.reconcileTime(11, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP,
+				this.config.dischargeWindow1Stop(), this.dischargeWindow1StopWrite);
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 	}
 
@@ -305,6 +336,69 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					+ "] to [" + channelTarget + "]");
 			writeElement.setNextWriteValue(target * rawMultiplier);
 		}
+	}
+
+	// JUSTIFICATION-A3: new reconcile variant + 2 pure validators for the TOU
+	// schedule feature (#67); the numeric reconcile() cannot validate a time
+	// (hour*256+min) so a separate guarded path is required, mirroring reconcile().
+	/**
+	 * Reconciles a TOU schedule-window register (raw value encoded hour*256+min).
+	 *
+	 * <p>
+	 * Same guarded, one-shot, readback-verified path as {@link #reconcile}, but the
+	 * out-of-range guard validates the value as a time (hour 0..23, minute 0..59)
+	 * so a mistyped window cannot be written to the inverter. -1 leaves it unchanged.
+	 *
+	 * @param index            the write-handler index
+	 * @param channelId        the read-back channel for this register
+	 * @param configuredTarget the desired encoded time, or -1 to leave unchanged
+	 * @param writeElement     the FC16 write element for this register
+	 */
+	private void reconcileTime(int index, SrneBatteryInverter.ChannelId channelId, int configuredTarget,
+			UnsignedWordElement writeElement) {
+		if (configuredTarget < 0) {
+			return;
+		}
+		var handler = this.writeHandlers[index];
+		Integer actual = ((IntegerReadChannel) this.channel(channelId)).value().get();
+		if (!isValidEncodedTime(configuredTarget)) {
+			if (handler.reject()) {
+				this.logWarn(this.log, "Rejected schedule time [" + channelId.name() + "] value ["
+						+ configuredTarget + "]; must be hour*256+min with hour 0..23 and minute 0..59");
+			}
+			return;
+		}
+		if (handler.queueIfChanged(actual, configuredTarget)) {
+			this.logInfo(this.log, "Queued one-shot schedule write [" + channelId.name() + "] from [" + actual
+					+ "] to [" + configuredTarget + "] (" + formatEncodedTime(configuredTarget) + ")");
+			writeElement.setNextWriteValue(configuredTarget);
+		}
+	}
+
+	/**
+	 * Whether a raw schedule value is a valid encoded time (hour*256+min, hour
+	 * 0..23, minute 0..59).
+	 *
+	 * @param encoded the raw register value
+	 * @return true if it decodes to a valid time
+	 */
+	static boolean isValidEncodedTime(int encoded) {
+		if (encoded < 0 || encoded > 0xFFFF) {
+			return false;
+		}
+		var hour = encoded >> 8;
+		var minute = encoded & 0xFF;
+		return hour <= 23 && minute <= 59;
+	}
+
+	/**
+	 * Formats an encoded schedule time (hour*256+min) as HH:mm for logging.
+	 *
+	 * @param encoded the raw register value
+	 * @return the HH:mm string
+	 */
+	static String formatEncodedTime(int encoded) {
+		return String.format("%02d:%02d", encoded >> 8, encoded & 0xFF);
 	}
 
 	private SafeWriteHandler.State aggregateWriteState() {

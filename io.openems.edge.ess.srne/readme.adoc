@@ -56,7 +56,7 @@ https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source 
 
 .Implemented Natures/Interfaces
 * OffGridBatteryInverter
-* ManagedSymmetricBatteryInverter (read-only until the control path is implemented)
+* ManagedSymmetricBatteryInverter
 * ModbusComponent
 
 *Description*: Reads machine state, battery voltage and signed battery current.
@@ -64,8 +64,16 @@ Active power is calculated from battery voltage and current. Stable mains and
 inverter-powered states map to OpenEMS on-grid and off-grid modes. Startup,
 transition, stopped, fault and unknown states intentionally report an undefined
 grid mode. State `2` (`running (mains/bypass)`) is validated on the live unit;
-the remaining state labels still require live transition testing. No control
-register is written by this component.
+the remaining state labels still require live transition testing.
+
+*Guarded settings + schedule writes*: an opt-in path (`controlEnabled`, default
+off) writes a fixed allow-list of SRNE settings registers - SoC thresholds and
+charge-current limits, plus the time-of-use charge/discharge SCHEDULE windows
+(`0xE026/E027` charge, `0xE02D/E02E` discharge, encoded `hour*256+min`) for TOU
+arbitrage. Each write is one-shot and readback-verified, and only fires while the
+machine state is a live-validated running state; every target defaults to `-1`
+(leave unchanged) and schedule times are validated (hour 0..23, minute 0..59)
+before any write. See `SafeWriteHandler`.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)
@@ -75,6 +83,9 @@ register is written by this component.
 * `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
 * `modbusUnitId` (int): Device Unit-ID (default: `1`)
 * `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
+* `controlEnabled` (boolean): Safety gate for FC16 settings/schedule writes (default: `false`)
+* settings targets (int, `-1` = leave unchanged): `dischargeCutoffSoc`, `stopChargeCurrent`, `stopChargeSoc`, `lowSocAlarm`, `switchToLineSoc`, `switchToBatterySoc`, `acChargeCurrentLimit`, `maxChargeCurrentLimit`
+* TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
 
