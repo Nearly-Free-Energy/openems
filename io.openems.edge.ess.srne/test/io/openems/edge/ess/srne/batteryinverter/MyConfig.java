@@ -20,6 +20,12 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int switchToBatterySoc = -1;
 		private int acChargeCurrentLimit = -1;
 		private int maxChargeCurrentLimit = -1;
+		private int chargeWindow1Start = -1;
+		private int chargeWindow1Stop = -1;
+		private int dischargeWindow1Start = -1;
+		private int dischargeWindow1Stop = -1;
+		private int chargeScheduleEnable = -1;
+		private int dischargeScheduleEnable = -1;
 
 		private Builder() {
 		}
@@ -56,6 +62,39 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setLowSocAlarm(int value) {
 			this.lowSocAlarm = value;
+			return this;
+		}
+
+		// JUSTIFICATION-A3: test-builder setters for the new schedule-window config
+		// fields (#67); required so tests can configure them, mirroring the existing
+		// setters.
+		public Builder setChargeWindow1Start(int value) {
+			this.chargeWindow1Start = value;
+			return this;
+		}
+
+		public Builder setChargeWindow1Stop(int value) {
+			this.chargeWindow1Stop = value;
+			return this;
+		}
+
+		public Builder setDischargeWindow1Start(int value) {
+			this.dischargeWindow1Start = value;
+			return this;
+		}
+
+		public Builder setDischargeWindow1Stop(int value) {
+			this.dischargeWindow1Stop = value;
+			return this;
+		}
+
+		public Builder setChargeScheduleEnable(int value) {
+			this.chargeScheduleEnable = value;
+			return this;
+		}
+
+		public Builder setDischargeScheduleEnable(int value) {
+			this.dischargeScheduleEnable = value;
 			return this;
 		}
 
@@ -143,5 +182,38 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int maxChargeCurrentLimit() {
 		return this.builder.maxChargeCurrentLimit;
+	}
+
+	// JUSTIFICATION-A3: mandatory Config-interface implementations for the new
+	// schedule-window fields (#67); MyConfig implements Config so it cannot compile
+	// without them.
+	@Override
+	public int chargeWindow1Start() {
+		return this.builder.chargeWindow1Start;
+	}
+
+	@Override
+	public int chargeWindow1Stop() {
+		return this.builder.chargeWindow1Stop;
+	}
+
+	@Override
+	public int dischargeWindow1Start() {
+		return this.builder.dischargeWindow1Start;
+	}
+
+	@Override
+	public int dischargeWindow1Stop() {
+		return this.builder.dischargeWindow1Stop;
+	}
+
+	@Override
+	public int chargeScheduleEnable() {
+		return this.builder.chargeScheduleEnable;
+	}
+
+	@Override
+	public int dischargeScheduleEnable() {
+		return this.builder.dischargeScheduleEnable;
 	}
 }

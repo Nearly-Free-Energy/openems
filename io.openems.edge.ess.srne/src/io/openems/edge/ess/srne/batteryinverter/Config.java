@@ -2,6 +2,7 @@ package io.openems.edge.ess.srne.batteryinverter;
 
 import org.osgi.service.metatype.annotations.AttributeDefinition;
 import org.osgi.service.metatype.annotations.ObjectClassDefinition;
+import org.osgi.service.metatype.annotations.Option;
 
 import io.openems.edge.common.startstop.StartStopConfig;
 import io.openems.edge.ess.srne.SrneConstants;
@@ -58,6 +59,36 @@ import io.openems.edge.ess.srne.SrneConstants;
 
 	@AttributeDefinition(name = "Maximum charge-current limit", description = "Target for E20A in amperes; -1 leaves unchanged.")
 	int maxChargeCurrentLimit() default -1;
+
+	// TOU schedule windows for time-of-use arbitrage. Value is encoded hour*256+min
+	// (e.g. 00:00 = 0, 06:00 = 1536, 18:00 = 4608, 23:59 = 5947). -1 leaves the
+	// register unchanged. Charge off-peak, discharge at peak.
+	@AttributeDefinition(name = "Charge window 1 start", description = "Target for E026, encoded hour*256+min; -1 leaves unchanged.")
+	int chargeWindow1Start() default -1;
+
+	@AttributeDefinition(name = "Charge window 1 stop", description = "Target for E027, encoded hour*256+min; -1 leaves unchanged.")
+	int chargeWindow1Stop() default -1;
+
+	@AttributeDefinition(name = "Discharge window 1 start", description = "Target for E02D, encoded hour*256+min; -1 leaves unchanged.")
+	int dischargeWindow1Start() default -1;
+
+	@AttributeDefinition(name = "Discharge window 1 stop", description = "Target for E02E, encoded hour*256+min; -1 leaves unchanged.")
+	int dischargeWindow1Stop() default -1;
+
+	// Schedule enable flags. Written last, only after the matching window pair is
+	// read-back verified, so a mis-set window can never leave a schedule armed. 0
+	// disables, 1 enables, -1 leaves unchanged. enable=1 requires a configured window.
+	@AttributeDefinition(name = "Charge schedule enable", description = "Target for E02C; enables the charge time-schedule; leave unchanged by default.", options = {
+			@Option(label = "Leave unchanged", value = "-1"), //
+			@Option(label = "Disabled", value = "0"), //
+			@Option(label = "Enabled", value = "1") })
+	int chargeScheduleEnable() default -1;
+
+	@AttributeDefinition(name = "Discharge schedule enable", description = "Target for E033; enables the discharge time-schedule; leave unchanged by default.", options = {
+			@Option(label = "Leave unchanged", value = "-1"), //
+			@Option(label = "Disabled", value = "0"), //
+			@Option(label = "Enabled", value = "1") })
+	int dischargeScheduleEnable() default -1;
 
 	String webconsole_configurationFactory_nameHint() default "SRNE Battery-Inverter [{id}]";
 }
