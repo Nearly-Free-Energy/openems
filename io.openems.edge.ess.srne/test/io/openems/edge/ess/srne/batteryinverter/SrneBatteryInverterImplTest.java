@@ -269,4 +269,173 @@ public class SrneBatteryInverterImplTest {
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.FAILED)) //
 				.deactivate();
 	}
+
+	// JUSTIFICATION-A3: new tests for the output-priority (E204) guarded write added to
+	// the allow-list (#71); a differing target queues one write, an out-of-range value
+	// is rejected. New behaviour, not a wrapper around existing coverage.
+	@Test
+	public void testOutputPriorityWriteQueues() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegisters(0xE204, 1, 20) // output priority = 1, mains charge = 20
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE215, 1) // BMS comms enabled
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setOutputPriority(2) // differs from actual 1
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY, 1) //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				// Every cycle re-runs reconcile; it must stay a single one-shot QUEUED.
+				.next(new TestCase(), 5) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				.deactivate();
+	}
+
+	@Test
+	public void testOutputPriorityOutOfRangeRejected() throws Exception {
+		// Exact boundary: 3 is the max accepted mode; 4 must be rejected before any write.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegisters(0xE204, 1, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE215, 1) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setOutputPriority(4) // > 3 -> invalid (exact boundary)
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.FAILED)) //
+				.deactivate();
+	}
+
+	// JUSTIFICATION-A3: coverage for the BMS-comms (E215) guarded write and the
+	// output-priority prerequisite gate added under #71 (pre-PR reviewer findings).
+	@Test
+	public void testBmsCommunicationWriteQueues() throws Exception {
+		// A differing BMS-comms target (actual 1, target 2 = CAN, in range 0..2) queues.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegisters(0xE204, 1, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE215, 1) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setBmsCommunication(2) // differs from actual 1, in range (boundary max)
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.BMS_COMMUNICATION, 1) //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				.next(new TestCase(), 5) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				.deactivate();
+	}
+
+	@Test
+	public void testBmsCommunicationOutOfRangeRejected() throws Exception {
+		// Exact boundary: 2 is the max accepted; 3 must be rejected before any write.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegisters(0xE204, 1, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE215, 1) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setBmsCommunication(3) // > 2 -> invalid (exact boundary)
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.FAILED)) //
+				.deactivate();
+	}
+
+	@Test
+	public void testOutputPriorityPrerequisiteGate() {
+		// An unmanaged prerequisite (-1) never blocks, regardless of handler/read state.
+		assertTrue(SrneBatteryInverterImpl.isPrerequisiteSettled(-1, SafeWriteHandler.State.QUEUED, null));
+		assertTrue(SrneBatteryInverterImpl.isPrerequisiteSettled(-1, SafeWriteHandler.State.FAILED, 5));
+		// A managed prerequisite is settled when VERIFIED this activation...
+		assertTrue(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.VERIFIED, null));
+		// ...OR when the device already reads the configured value (handler rests in IDLE
+		// and never queues, so requiring VERIFIED alone would deadlock the arm).
+		assertTrue(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.IDLE, 50));
+		// Not settled: managed, not verified, and the device does not (yet) match.
+		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.IDLE, 40));
+		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.IDLE, null));
+		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.QUEUED, 40));
+		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.AWAITING_READBACK, 40));
+		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.FAILED, 40));
+	}
+
+	@Test
+	public void testOutputPriorityArmsWhenPrerequisiteAlreadyCorrect() throws Exception {
+		// The disciplined workflow: the SoC band is already correct on the device, so its
+		// handler rests in IDLE (never VERIFIED). Output priority must STILL arm - it must
+		// not deadlock waiting for a write that never needs to happen.
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) // E020 (switchToBatterySoc) = 80
+						.withRegisters(0xE204, 1, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE215, 1) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setSwitchToBatterySoc(80) // already equals device E020=80 -> handler stays IDLE
+						.setOutputPriority(2) // differs from device E204=1 -> must still arm (QUEUED)
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
+				.deactivate();
+	}
 }

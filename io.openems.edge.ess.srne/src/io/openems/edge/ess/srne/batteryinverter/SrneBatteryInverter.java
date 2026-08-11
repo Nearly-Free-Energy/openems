@@ -30,6 +30,12 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		SWITCH_TO_BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
 		AC_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
 		MAX_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
+		// Output priority = source transfer (SBU/SUB/SOL/UTI). The value->mode enum is
+		// confirmed on the unit at commissioning; not the same as charge priority.
+		OUTPUT_PRIORITY(Doc.of(OpenemsType.INTEGER) //
+				.text("Output source priority mode (0xE204)")), //
+		BMS_COMMUNICATION(Doc.of(OpenemsType.INTEGER) //
+				.text("BMS communication enable (0xE215)")), //
 		// TOU schedule windows: raw value is encoded hour*256+minute (e.g. 18:00
 		// = 4608). Used for time-of-use arbitrage (charge off-peak, discharge peak).
 		CHARGE_WINDOW_1_START(Doc.of(OpenemsType.INTEGER) //
