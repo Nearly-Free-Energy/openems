@@ -73,13 +73,19 @@ TOU arbitrage. Each write is one-shot and readback-verified, and only fires whil
 the machine state is a live-validated running state; every target defaults to
 `-1` (leave unchanged). Scalar settings use `SafeWriteHandler`.
 
-A schedule window is a coherent unit handled by `ScheduleWindow`: the contiguous
-start/stop time pair (`0xE026/E027` charge, `0xE02D/E02E` discharge, encoded
-`hour*256+min`) is written as a single atomic FC16 block and read-back verified;
-ONLY then is the schedule enable flag (`0xE02C` charge, `0xE033` discharge)
-written - the enable is always the last step. Any validation failure, execute
-error or read-back mismatch leaves the enable flag untouched, so a mis-set window
-can never leave a schedule armed (disabled is the safe resting state). Start and
+A schedule window is a coherent unit handled by `ScheduleWindow`, governed by one
+invariant: the enable register must read `0` on the device whenever the window
+registers are written. The contiguous start/stop time pair (`0xE026/E027` charge,
+`0xE02D/E02E` discharge, encoded `hour*256+min`) is written as a single atomic
+FC16 block and read-back verified. A currently-armed window is never mutated in
+place: any window change is sequenced disarm -> verify-disabled -> atomic window
+write -> verify-window -> re-arm. The enable flag (`0xE02C` charge, `0xE033`
+discharge) is the last step; the desired end-enable is captured once, so leaving
+enable unmanaged (`-1`) on an armed device disarms, rewrites and restores the
+armed state rather than mutating or silently disabling it. Any validation
+failure, execute error or read-back mismatch leaves the enable flag untouched, so
+a mis-set window can never leave a schedule armed (disabled is the safe resting
+state). Start and
 stop must be configured together; the window is validated as a within-day window
 (both valid times, `start < stop`). Cross-midnight windows are rejected because
 the SRNE has no defined midnight wrap and cannot encode 24:00 - a window that runs
