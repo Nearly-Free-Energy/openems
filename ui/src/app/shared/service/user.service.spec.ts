@@ -12,7 +12,8 @@ describe("UserService", () => {
     let userService: UserService;
 
     beforeEach(() => {
-        localStorage.clear();
+        localStorage.removeItem("THEME");
+        localStorage.removeItem("THEME_COLOR");
         modalController = jasmine.createSpyObj<ModalController>("ModalController", ["create"]);
         service = jasmine.createSpyObj<Service>("Service", ["currentEdge", "toast"], {
             websocket: jasmine.createSpyObj("Websocket", ["sendRequest"]),
@@ -33,7 +34,10 @@ describe("UserService", () => {
         userService = TestBed.inject(UserService);
     });
 
-    afterEach(() => localStorage.clear());
+    afterEach(() => {
+        localStorage.removeItem("THEME");
+        localStorage.removeItem("THEME_COLOR");
+    });
 
     it("uses the system theme as the default", () => {
         expect(UserService.DEFAULT_THEME).toBe(Theme.SYSTEM);
