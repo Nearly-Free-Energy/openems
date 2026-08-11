@@ -26,6 +26,8 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int dischargeWindow1Stop = -1;
 		private int chargeScheduleEnable = -1;
 		private int dischargeScheduleEnable = -1;
+		private int outputPriority = -1;
+		private int bmsCommunication = -1;
 
 		private Builder() {
 		}
@@ -65,6 +67,16 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 			return this;
 		}
 
+		public Builder setSwitchToLineSoc(int value) {
+			this.switchToLineSoc = value;
+			return this;
+		}
+
+		public Builder setSwitchToBatterySoc(int value) {
+			this.switchToBatterySoc = value;
+			return this;
+		}
+
 		// JUSTIFICATION-A3: test-builder setters for the new schedule-window config
 		// fields (#67); required so tests can configure them, mirroring the existing
 		// setters.
@@ -95,6 +107,16 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setDischargeScheduleEnable(int value) {
 			this.dischargeScheduleEnable = value;
+			return this;
+		}
+
+		public Builder setOutputPriority(int value) {
+			this.outputPriority = value;
+			return this;
+		}
+
+		public Builder setBmsCommunication(int value) {
+			this.bmsCommunication = value;
 			return this;
 		}
 
@@ -215,5 +237,15 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int dischargeScheduleEnable() {
 		return this.builder.dischargeScheduleEnable;
+	}
+
+	@Override
+	public int outputPriority() {
+		return this.builder.outputPriority;
+	}
+
+	@Override
+	public int bmsCommunication() {
+		return this.builder.bmsCommunication;
 	}
 }

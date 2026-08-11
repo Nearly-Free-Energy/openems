@@ -74,9 +74,16 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final UnsignedWordElement switchToBatterySocWrite = new UnsignedWordElement(0xE020);
 	private final UnsignedWordElement acChargeCurrentLimitWrite = new UnsignedWordElement(0xE205);
 	private final UnsignedWordElement maxChargeCurrentLimitWrite = new UnsignedWordElement(0xE20A);
+	// JUSTIFICATION-A3: output priority (E204, source transfer) + BMS-comms enable
+	// (E215) added to the guarded write allow-list (#71) so SBU mode + BMS-SoC switching
+	// are settable from OpenEMS. Same scalar guarded path as the SoC/current settings;
+	// the exact value->mode enum is unverified in the manuals and is confirmed on the
+	// unit at commissioning, so the ranges here are bounded only.
+	private final UnsignedWordElement outputPriorityWrite = new UnsignedWordElement(0xE204);
+	private final UnsignedWordElement bmsCommunicationWrite = new UnsignedWordElement(0xE215);
 	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
-			new SafeWriteHandler(), new SafeWriteHandler() };
+			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler() };
 	/*
 	 * TOU schedule windows for arbitrage. Each window is a coherent (start, stop,
 	 * enable) unit: the contiguous start/stop pair (charge 0xE026/0xE027, discharge
@@ -87,6 +94,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final ScheduleWindow chargeWindow = new ScheduleWindow(0xE026, 0xE02C, "CHARGE");
 	private final ScheduleWindow dischargeWindow = new ScheduleWindow(0xE02D, 0xE033, "DISCHARGE");
 	private Config config;
+	// One-shot audit flag: log at most once that the output-priority write is held
+	// pending its prerequisites (reconcile runs every cycle).
+	private boolean outputPriorityHeldLogged;
 
 	@Override
 	@Reference(//
@@ -148,6 +158,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.registerReadback(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC);
 		this.registerReadback(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT);
 		this.registerReadback(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT);
+		this.registerReadback(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY);
+		this.registerReadback(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION);
 		this.registerWindowReadback(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
@@ -254,12 +266,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						m(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC, new UnsignedWordElement(0xE01F)), //
 						m(SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC,
 								new UnsignedWordElement(0xE020))), //
-				new FC3ReadRegistersTask(0xE205, Priority.LOW, //
+				new FC3ReadRegistersTask(0xE204, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY, new UnsignedWordElement(0xE204)), //
 						m(SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
 								new UnsignedWordElement(0xE205), SCALE_FACTOR_2)), //
 				new FC3ReadRegistersTask(0xE20A, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
 								new UnsignedWordElement(0xE20A), SCALE_FACTOR_2)), //
+				new FC3ReadRegistersTask(0xE215, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.BMS_COMMUNICATION, new UnsignedWordElement(0xE215))), //
 				new FC3ReadRegistersTask(0xE026, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, new UnsignedWordElement(0xE026)), //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, new UnsignedWordElement(0xE027))), //
@@ -292,6 +307,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.acChargeCurrentLimitWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[7]::onExecute, 0xE20A,
 						this.maxChargeCurrentLimitWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[8]::onExecute, 0xE204, this.outputPriorityWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[9]::onExecute, 0xE215, this.bmsCommunicationWrite), //
 				// Atomic (start, stop) block write per window, then a separate enable write.
 				new FC16WriteRegistersTask(this.chargeWindow::onWindowExecute, 0xE026,
 						this.chargeWindow.startWriteElement(), this.chargeWindow.stopWriteElement()), //
@@ -349,14 +366,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.stopChargeSoc(), 0, 100, 1, this.stopChargeSocWrite);
 		this.reconcile(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM,
 				this.config.lowSocAlarm(), 0, 100, 1, this.lowSocAlarmWrite);
-		this.reconcile(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC,
-				this.config.switchToLineSoc(), 0, 100, 1, this.switchToLineSocWrite);
-		this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC,
-				this.config.switchToBatterySoc(), 0, 100, 1, this.switchToBatterySocWrite);
 		this.reconcile(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
 				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
 				this.config.maxChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.maxChargeCurrentLimitWrite);
+		// Source transfer: the reserve band (E01F/E020), BMS mode (E215) and output
+		// priority (E204) are reconciled together as one coherent, validated operation.
+		this.reconcileSourceTransfer();
 		this.reconcileWindow(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
@@ -392,6 +408,133 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					+ "] to [" + channelTarget + "]");
 			writeElement.setNextWriteValue(target * rawMultiplier);
 		}
+	}
+
+	// JUSTIFICATION-A3: guarded reconcile for output priority (#71). Output priority =
+	// SBU transfers the load onto the battery - it is effectively the "arm" for battery
+	// discharge. Mirroring the schedule feature's verified-then-enable, it is written
+	// only once its safety prerequisites (the reserve-floor / return SoC band and BMS
+	// comms) have read-back verified, so a failed or still-pending floor write can never
+	// arm battery discharge against a wrong reserve. Cannot use the flat reconcile()
+	// because of this cross-setting gate.
+	// JUSTIFICATION-A3: coherent source-transfer reconcile (#71, PR #25 review). Output
+	// priority = SBU transfers the load onto the battery; its reserve band (E01F/E020)
+	// and BMS mode (E215) are safety prerequisites. When an arm is requested the WHOLE
+	// set is validated (present, individually bounded, coherent) BEFORE any of it is
+	// written, so a rejected arm never leaves a bad reserve band or partial writes on the
+	// live device. When no arm is requested the band and BMS remain independent settings.
+	private void reconcileSourceTransfer() {
+		var line = this.config.switchToLineSoc();
+		var battery = this.config.switchToBatterySoc();
+		var bms = this.config.bmsCommunication();
+		var arm = this.config.outputPriority();
+		if (arm < 0) {
+			// A bad reserve band is dangerous whenever the unit is in SBU (its normal
+			// backup posture, settable from the panel), so an incoherent band is never
+			// written even when OpenEMS is not arming: reject both thresholds if both are
+			// configured and inverted. BMS remains an independent write.
+			if (line >= 0 && battery >= 0 && line >= battery) {
+				this.rejectBand(line, battery);
+			} else {
+				this.reconcile(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC, line, 0, 100, 1,
+						this.switchToLineSocWrite);
+				this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC, battery, 0, 100, 1,
+						this.switchToBatterySocWrite);
+			}
+			this.reconcile(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION, bms, 0, 2, 1,
+					this.bmsCommunicationWrite);
+			return;
+		}
+		// Arming: validate the whole set up front and write NOTHING on failure.
+		if (arm > 3) {
+			this.rejectOutputPriority("output priority [" + arm + "] out of range 0..3");
+			return;
+		}
+		if (line < 0 || battery < 0 || bms < 0) {
+			this.rejectOutputPriority(
+					"requires switchToLineSoc, switchToBatterySoc and bmsCommunication to all be configured");
+			return;
+		}
+		if (line > 100 || battery > 100 || bms > 2) {
+			this.rejectOutputPriority("reserve band / BMS out of range (SoC 0..100, BMS 0..2)");
+			return;
+		}
+		if (line >= battery) {
+			this.rejectOutputPriority("reserve band invalid: switchToLineSoc [" + line
+					+ "] must be below switchToBatterySoc [" + battery + "]");
+			return;
+		}
+		// Whole set valid: reconcile the band + BMS, then arm once all three are settled.
+		this.reconcile(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC, line, 0, 100, 1,
+				this.switchToLineSocWrite);
+		this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC, battery, 0, 100, 1,
+				this.switchToBatterySocWrite);
+		this.reconcile(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION, bms, 0, 2, 1, this.bmsCommunicationWrite);
+		var prerequisitesSettled = isPrerequisiteSettled(line, this.writeHandlers[4].getState(),
+				this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC))
+				&& isPrerequisiteSettled(battery, this.writeHandlers[5].getState(),
+						this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC))
+				&& isPrerequisiteSettled(bms, this.writeHandlers[9].getState(),
+						this.readValue(SrneBatteryInverter.ChannelId.BMS_COMMUNICATION));
+		if (!prerequisitesSettled) {
+			if (!this.outputPriorityHeldLogged) {
+				this.logInfo(this.log, "Output-priority (SBU) write held pending its SoC-band / BMS prerequisites");
+				this.outputPriorityHeldLogged = true;
+			}
+			return;
+		}
+		this.reconcile(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY, arm, 0, 3, 1, this.outputPriorityWrite);
+	}
+
+	// Package-private for tests: lets a test assert that a reserve-band / BMS write did
+	// NOT queue on a rejected arm (state stays IDLE), not just that the aggregate failed.
+	SafeWriteHandler.State writeHandlerStateForTest(int index) {
+		return this.writeHandlers[index].getState();
+	}
+
+	private void rejectOutputPriority(String reason) {
+		if (this.writeHandlers[8].reject()) {
+			this.logWarn(this.log, "Rejected output-priority arm: " + reason);
+		}
+	}
+
+	private void rejectBand(int line, int battery) {
+		var rejectedLine = this.writeHandlers[4].reject();
+		var rejectedBattery = this.writeHandlers[5].reject();
+		if (rejectedLine || rejectedBattery) {
+			this.logWarn(this.log, "Rejected reserve-band write: switchToLineSoc [" + line
+					+ "] must be below switchToBatterySoc [" + battery + "]");
+		}
+	}
+
+	private Integer readValue(SrneBatteryInverter.ChannelId channelId) {
+		return ((IntegerReadChannel) this.channel(channelId)).value().get();
+	}
+
+	/**
+	 * Whether a configured output-priority prerequisite is settled and it is therefore
+	 * safe to arm battery-priority output. Settled means the handler is at rest - either
+	 * IDLE (already correct on the device, so it never queued) or VERIFIED (written and
+	 * confirmed this activation) - AND the device CURRENTLY reads the configured target.
+	 * A queued, awaiting or failed write is never settled even if the read momentarily
+	 * matches, and a verified value that has since drifted (or is unknown) is not settled
+	 * either. Callers guarantee the target is configured (&gt;= 0).
+	 *
+	 * <p>Requires unscaled prerequisites (rawMultiplier 1) so the raw channel read and
+	 * the config target are the same space; all current prerequisites (E01F/E020/E215)
+	 * are unscaled. A scaled register must not be added as a prerequisite without also
+	 * scaling this comparison.
+	 *
+	 * @param configuredTarget the prerequisite's configured target
+	 * @param state            the prerequisite write handler's current state
+	 * @param actual           the prerequisite register's current read value, or null
+	 * @return true if it is safe to proceed with the output-priority write
+	 */
+	static boolean isPrerequisiteSettled(int configuredTarget, SafeWriteHandler.State state, Integer actual) {
+		if (state != SafeWriteHandler.State.IDLE && state != SafeWriteHandler.State.VERIFIED) {
+			return false;
+		}
+		return actual != null && actual == configuredTarget;
 	}
 
 	// JUSTIFICATION-A3: guarded reconcile for a coherent TOU schedule window (#67,

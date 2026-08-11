@@ -60,6 +60,15 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Maximum charge-current limit", description = "Target for E20A in amperes; -1 leaves unchanged.")
 	int maxChargeCurrentLimit() default -1;
 
+	// Output priority (source transfer) and BMS-comms enable. Raw mode numbers; the
+	// value->mode mapping (which value is SBU, etc.) is unverified in the manuals and
+	// must be confirmed on the unit before use. -1 leaves unchanged. See #71.
+	@AttributeDefinition(name = "Output priority mode", description = "Raw target for E204 (source transfer, e.g. SBU); range 0..3; confirm the value->mode mapping on the unit; -1 leaves unchanged.")
+	int outputPriority() default -1;
+
+	@AttributeDefinition(name = "BMS communication enable", description = "Raw target for E215 (BMS comms); range 0..2; confirm the value->mode mapping on the unit; -1 leaves unchanged.")
+	int bmsCommunication() default -1;
+
 	// TOU schedule windows for time-of-use arbitrage. Value is encoded hour*256+min
 	// (e.g. 00:00 = 0, 06:00 = 1536, 18:00 = 4608, 23:59 = 5947). -1 leaves the
 	// register unchanged. Charge off-peak, discharge at peak.
