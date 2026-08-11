@@ -67,6 +67,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 			return this;
 		}
 
+		public Builder setSwitchToLineSoc(int value) {
+			this.switchToLineSoc = value;
+			return this;
+		}
+
 		public Builder setSwitchToBatterySoc(int value) {
 			this.switchToBatterySoc = value;
 			return this;

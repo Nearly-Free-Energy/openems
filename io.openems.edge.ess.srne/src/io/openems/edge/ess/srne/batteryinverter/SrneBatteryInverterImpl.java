@@ -424,14 +424,30 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// arm battery discharge against a wrong reserve. Cannot use the flat reconcile()
 	// because of this cross-setting gate.
 	private void reconcileOutputPriority() {
-		if (this.config.outputPriority() < 0) {
+		var target = this.config.outputPriority();
+		if (target < 0) {
 			return;
 		}
-		var prerequisitesSettled = isPrerequisiteSettled(this.config.switchToLineSoc(),
-				this.writeHandlers[4].getState(), this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC))
-				&& isPrerequisiteSettled(this.config.switchToBatterySoc(), this.writeHandlers[5].getState(),
+		var line = this.config.switchToLineSoc();
+		var battery = this.config.switchToBatterySoc();
+		var bms = this.config.bmsCommunication();
+		// Arming battery-priority output must never rely on unknown existing device
+		// settings: require an explicit, coherent, verified reserve band and BMS mode.
+		if (line < 0 || battery < 0 || bms < 0) {
+			this.rejectOutputPriority(
+					"requires switchToLineSoc, switchToBatterySoc and bmsCommunication to all be configured");
+			return;
+		}
+		if (line >= battery) {
+			this.rejectOutputPriority("reserve band invalid: switchToLineSoc [" + line
+					+ "] must be below switchToBatterySoc [" + battery + "]");
+			return;
+		}
+		var prerequisitesSettled = isPrerequisiteSettled(line, this.writeHandlers[4].getState(),
+				this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC))
+				&& isPrerequisiteSettled(battery, this.writeHandlers[5].getState(),
 						this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC))
-				&& isPrerequisiteSettled(this.config.bmsCommunication(), this.writeHandlers[9].getState(),
+				&& isPrerequisiteSettled(bms, this.writeHandlers[9].getState(),
 						this.readValue(SrneBatteryInverter.ChannelId.BMS_COMMUNICATION));
 		if (!prerequisitesSettled) {
 			if (!this.outputPriorityHeldLogged) {
@@ -440,8 +456,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			}
 			return;
 		}
-		this.reconcile(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY,
-				this.config.outputPriority(), 0, 3, 1, this.outputPriorityWrite);
+		this.reconcile(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY, target, 0, 3, 1, this.outputPriorityWrite);
+	}
+
+	private void rejectOutputPriority(String reason) {
+		if (this.writeHandlers[8].reject()) {
+			this.logWarn(this.log, "Rejected output-priority arm: " + reason);
+		}
 	}
 
 	private Integer readValue(SrneBatteryInverter.ChannelId channelId) {
@@ -449,28 +470,27 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	/**
-	 * Whether an output-priority prerequisite is settled and it is therefore safe to arm
-	 * battery-priority output. A prerequisite is settled when it is unmanaged
-	 * (target &lt; 0), when its write has read-back verified this activation, OR when the
-	 * device already reads the configured value (its handler then rests in IDLE and never
-	 * queues, so requiring VERIFIED alone would deadlock the arm).
+	 * Whether a configured output-priority prerequisite is settled and it is therefore
+	 * safe to arm battery-priority output. Settled means the handler is at rest - either
+	 * IDLE (already correct on the device, so it never queued) or VERIFIED (written and
+	 * confirmed this activation) - AND the device CURRENTLY reads the configured target.
+	 * A queued, awaiting or failed write is never settled even if the read momentarily
+	 * matches, and a verified value that has since drifted (or is unknown) is not settled
+	 * either. Callers guarantee the target is configured (&gt;= 0).
 	 *
 	 * <p>Requires unscaled prerequisites (rawMultiplier 1) so the raw channel read and
 	 * the config target are the same space; all current prerequisites (E01F/E020/E215)
 	 * are unscaled. A scaled register must not be added as a prerequisite without also
 	 * scaling this comparison.
 	 *
-	 * @param configuredTarget the prerequisite's configured target, or -1 if unmanaged
+	 * @param configuredTarget the prerequisite's configured target
 	 * @param state            the prerequisite write handler's current state
 	 * @param actual           the prerequisite register's current read value, or null
 	 * @return true if it is safe to proceed with the output-priority write
 	 */
 	static boolean isPrerequisiteSettled(int configuredTarget, SafeWriteHandler.State state, Integer actual) {
-		if (configuredTarget < 0) {
-			return true;
-		}
-		if (state == SafeWriteHandler.State.VERIFIED) {
-			return true;
+		if (state != SafeWriteHandler.State.IDLE && state != SafeWriteHandler.State.VERIFIED) {
+			return false;
 		}
 		return actual != null && actual == configuredTarget;
 	}
