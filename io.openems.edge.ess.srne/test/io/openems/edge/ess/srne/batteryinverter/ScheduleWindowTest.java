@@ -255,11 +255,57 @@ public class ScheduleWindowTest {
 	}
 
 	@Test
-	void windowMatchesButEnableAlreadySet() {
+	void changedWindowOnArmedDeviceDisarmsFirstThenRearms() {
 		var sut = newDischargeWindow();
-		// Window differs and needs writing, but enable is already 1: after the window
-		// verifies, no enable write is needed and the operation is done.
+		// Device is ARMED (enable=1) with an old window; operator sets a new window and
+		// keeps it enabled. The window must NOT be written while armed: disarm first.
 		sut.reconcile(0, 0, 1, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset()); // window untouched
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset());
+
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+
+		// Now disarmed -> the window pair is written atomically.
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(4608), sut.queuedStart());
+		assertEquals(Integer.valueOf(5947), sut.queuedStop());
+		sut.startWriteElement().getNextWriteValueAndReset();
+		sut.stopWriteElement().getNextWriteValueAndReset();
+		sut.onWindowExecute(ExecuteState.OK);
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
+
+		// Finally re-armed, last.
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(1), sut.queuedEnable());
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(1);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+	}
+
+	@Test
+	void changedWindowOnArmedDeviceWithUnmanagedEnableRestoresArmed() {
+		var sut = newDischargeWindow();
+		// Device is ARMED (enable=1); operator changes only the window and leaves enable
+		// at -1. Must disarm, rewrite, then RESTORE the captured armed state - never
+		// mutate a live enabled window, and never silently leave it disabled.
+		sut.reconcile(0, 0, 1, 4608, 5947, -1);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(1), sut.desiredEnable()); // captured original armed state
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset()); // window untouched
+
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+
+		sut.reconcile(0, 0, 0, 4608, 5947, -1);
 		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
 		sut.startWriteElement().getNextWriteValueAndReset();
 		sut.stopWriteElement().getNextWriteValueAndReset();
@@ -267,9 +313,14 @@ public class ScheduleWindowTest {
 		sut.verifyStart(4608);
 		sut.verifyStop(5947);
 		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
-		sut.reconcile(4608, 5947, 1, 4608, 5947, 1);
+
+		// Restored to armed (captured enable=1), not left disabled.
+		sut.reconcile(4608, 5947, 0, 4608, 5947, -1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(1), sut.queuedEnable());
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(1);
 		assertEquals(ScheduleWindow.State.DONE, sut.getState());
-		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
 	}
 
 	@Test

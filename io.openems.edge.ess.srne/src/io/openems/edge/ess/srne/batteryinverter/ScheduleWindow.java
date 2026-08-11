@@ -9,27 +9,28 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  *
  * <p>A schedule window is the (start, stop) time pair plus its enable flag. The
  * two time registers are contiguous, so they are written together as a single
- * atomic FC16 block: the inverter never sees a half-updated window. The enable
- * flag is sequenced by direction of safety:
+ * atomic FC16 block: the inverter never sees a half-updated window.
  *
- * <ul>
- * <li><b>Disarm first</b>: when {@code enable=0} is requested it is written
- * before anything else, independent of the window - disabling always moves the
- * inverter to the safe state, so a window typo or a failed window write can never
- * block or delay it.
- * <li><b>Arm last</b>: {@code enable=1} is written only after BOTH time registers
- * have been read back and verified, and only when a complete window is
- * configured. Any validation failure, execute error or read-back mismatch drives
- * the window to {@code FAILED} and the enable flag is never raised, so a mis-set
- * window can never leave a schedule armed.
- * </ul>
+ * <p>The whole operation is governed by one safety invariant: <b>the enable
+ * register must read 0 on the device whenever the window registers are
+ * written</b>. So any change to a currently-armed window is sequenced as
+ * disarm &rarr; verify-disabled &rarr; atomic window write &rarr; verify-window
+ * &rarr; re-arm. A live enabled window is never mutated in place; a failed or
+ * mismatched write leaves the schedule disabled (the safe resting state) and is
+ * never retried automatically.
  *
- * <p>Nothing is ever retried automatically; a fresh instance is created on every
- * component activation, exactly like {@link SafeWriteHandler}.
+ * <p>The desired end enable state is captured once: {@code enable=0}/{@code 1}
+ * are taken from config, while {@code enable=-1} (unmanaged) captures whatever
+ * the device currently reads, so a window change on an armed device is disarmed,
+ * rewritten and then restored to its original armed state. {@code enable=1}
+ * requires a complete configured window; {@code enable} outside 0/1 is rejected.
  *
  * <p>Cross-midnight windows (start &gt;= stop) are rejected: the SRNE encodes
  * time as hour*256+min with a maximum of 23:59 (5947) and no defined midnight
  * wrap, so "to midnight" must be expressed as 23:59.
+ *
+ * <p>A fresh instance is created on every component activation, exactly like
+ * {@link SafeWriteHandler}.
  *
  * <p>Thread-safety: {@code reconcile} runs on the Edge cycle thread while
  * {@code onWindowExecute}/{@code onEnableExecute} and the {@code verify*}
@@ -83,6 +84,7 @@ final class ScheduleWindow {
 	private Integer targetStart;
 	private Integer targetStop;
 	private Integer targetEnable;
+	private Integer desiredEnable;
 	private boolean startVerified;
 	private boolean stopVerified;
 	private int awaitingReadbackCycles;
@@ -106,8 +108,9 @@ final class ScheduleWindow {
 		return this.enableWrite;
 	}
 
-	// Package-private accessors so tests can pin the exact values queued for the
-	// write (the dummy bridge cannot echo a written register).
+	// Package-private accessors so tests can pin the exact values queued for a
+	// write (the dummy bridge cannot echo a written register) and the captured
+	// end-state.
 	Integer queuedStart() {
 		return this.targetStart;
 	}
@@ -120,11 +123,17 @@ final class ScheduleWindow {
 		return this.targetEnable;
 	}
 
+	Integer desiredEnable() {
+		return this.desiredEnable;
+	}
+
 	/**
 	 * Drives the coherent window write forward by one reconcile step. Acts only from
 	 * the actionable states ({@code IDLE}, {@code DISABLE_VERIFIED},
 	 * {@code WINDOW_VERIFIED}); all other states are transient or terminal and
-	 * ignored.
+	 * ignored. Each step performs at most one register write and the whole
+	 * operation converges toward the desired (window, enable) end state while never
+	 * writing the window registers unless the device reads {@code enable == 0}.
 	 *
 	 * @param actualStart  the read-back start register, or null if unknown
 	 * @param actualStop   the read-back stop register, or null if unknown
@@ -137,16 +146,16 @@ final class ScheduleWindow {
 	public synchronized String reconcile(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart,
 			int cfgStop, int cfgEnable) {
 		return switch (this.state) {
-		case IDLE -> this.reconcileFromIdle(actualStart, actualStop, actualEnable, cfgStart, cfgStop, cfgEnable);
-		case DISABLE_VERIFIED -> this.enterWindowPhase(actualStart, actualStop, actualEnable, cfgStart, cfgStop,
-				cfgEnable);
-		case WINDOW_VERIFIED -> this.reconcileArm(actualEnable, cfgEnable);
+		case IDLE -> this.start(actualStart, actualStop, actualEnable, cfgStart, cfgStop, cfgEnable);
+		case DISABLE_VERIFIED, WINDOW_VERIFIED -> this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
 		default -> null;
 		};
 	}
 
-	private String reconcileFromIdle(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart,
-			int cfgStop, int cfgEnable) {
+	// Validates the request, captures the desired end enable state once, then takes
+	// the first convergence step.
+	private String start(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart, int cfgStop,
+			int cfgEnable) {
 		// Unconfigured: nothing to manage.
 		if (cfgStart < 0 && cfgStop < 0 && cfgEnable < 0) {
 			return null;
@@ -157,32 +166,6 @@ final class ScheduleWindow {
 			this.state = State.FAILED;
 			return "Rejected [" + this.label + "] schedule enable [" + cfgEnable + "]; must be 0 or 1";
 		}
-		// Disarm has priority and is independent of the window: disabling always moves
-		// the inverter to the safe state, so it must never be blocked or deferred by a
-		// window change or an invalid window.
-		if (cfgEnable == 0) {
-			if (actualEnable == null) {
-				return null;
-			}
-			if (!actualEnable.equals(0)) {
-				this.targetEnable = 0;
-				this.enableWrite.setNextWriteValue(0);
-				this.state = State.DISABLE_QUEUED;
-				return "Queued one-shot [" + this.label + "] schedule disable (before any window change)";
-			}
-			// Already disabled: safe to (re)program the window if one is configured.
-			return this.enterWindowPhase(actualStart, actualStop, actualEnable, cfgStart, cfgStop, cfgEnable);
-		}
-		// Arming requires a complete window this component can set and verify.
-		if (cfgEnable == 1 && (cfgStart < 0 || cfgStop < 0)) {
-			this.state = State.FAILED;
-			return "Rejected [" + this.label + "] schedule enable=1 without a complete window";
-		}
-		return this.enterWindowPhase(actualStart, actualStop, actualEnable, cfgStart, cfgStop, cfgEnable);
-	}
-
-	private String enterWindowPhase(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart,
-			int cfgStop, int cfgEnable) {
 		// A window is the start+stop pair; both must be configured together so a
 		// half-specified window is never written.
 		if ((cfgStart < 0) != (cfgStop < 0)) {
@@ -195,45 +178,65 @@ final class ScheduleWindow {
 			return "Rejected [" + this.label + "] schedule window [" + cfgStart + "," + cfgStop
 					+ "]; must be valid times with start < stop (encode end-of-day as 23:59)";
 		}
-		if (windowManaged) {
-			// Wait for a fresh read-back of both time registers before deciding: acting on
-			// an unknown window could arm a schedule that was never verified.
-			if (actualStart == null || actualStop == null) {
-				return null;
-			}
-			// Write the window pair atomically when it differs from the device.
-			if (!actualStart.equals(cfgStart) || !actualStop.equals(cfgStop)) {
-				this.targetStart = cfgStart;
-				this.targetStop = cfgStop;
-				this.startWrite.setNextWriteValue(cfgStart);
-				this.stopWrite.setNextWriteValue(cfgStop);
-				this.state = State.WINDOW_QUEUED;
-				return "Queued one-shot [" + this.label + "] window write to [" + formatEncodedTime(cfgStart) + ".."
-						+ formatEncodedTime(cfgStop) + "]";
-			}
-			// Window already matches the device: treat as verified.
-			this.startVerified = true;
-			this.stopVerified = true;
+		// Arming requires a complete window this component can set and verify.
+		if (cfgEnable == 1 && !windowManaged) {
+			this.state = State.FAILED;
+			return "Rejected [" + this.label + "] schedule enable=1 without a complete window";
 		}
-		this.state = State.WINDOW_VERIFIED;
-		return this.reconcileArm(actualEnable, cfgEnable);
+		// Need the current enable (to respect the invariant and capture the end state)
+		// and, when a window is managed, the current window before deciding anything.
+		if (actualEnable == null || (windowManaged && (actualStart == null || actualStop == null))) {
+			return null;
+		}
+		// Capture the desired end enable state ONCE: an explicit 0/1 is the target;
+		// -1 (unmanaged) keeps whatever the device currently is, so a window change on
+		// an armed device is disarmed, rewritten and restored to armed.
+		this.desiredEnable = cfgEnable >= 0 ? Integer.valueOf(cfgEnable) : actualEnable;
+		return this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
 	}
 
-	private String reconcileArm(Integer actualEnable, int cfgEnable) {
-		// Only arming (enable=1) is written here; enable=0 was handled disarm-first.
-		if (cfgEnable == 1) {
-			if (actualEnable == null) {
-				return null;
+	// Takes the single next convergence step toward the desired (window, enable) end
+	// state, enforcing the invariant that the window is written only while the device
+	// reads enable == 0.
+	private String advance(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart, int cfgStop) {
+		if (actualEnable == null) {
+			return null;
+		}
+		var windowManaged = cfgStart >= 0;
+		if (windowManaged && (actualStart == null || actualStop == null)) {
+			return null;
+		}
+		var windowMatches = !windowManaged || (actualStart.equals(cfgStart) && actualStop.equals(cfgStop));
+		if (!windowMatches) {
+			// Invariant: never write the window while the schedule is armed. Disarm first.
+			if (!actualEnable.equals(0)) {
+				return this.queueEnable(0);
 			}
-			if (!actualEnable.equals(1)) {
-				this.targetEnable = 1;
-				this.enableWrite.setNextWriteValue(1);
-				this.state = State.ENABLE_QUEUED;
-				return "Queued one-shot [" + this.label + "] schedule enable=1 (after window verified)";
-			}
+			// Device is disarmed: write the start/stop pair atomically.
+			this.targetStart = cfgStart;
+			this.targetStop = cfgStop;
+			this.startVerified = false;
+			this.stopVerified = false;
+			this.startWrite.setNextWriteValue(cfgStart);
+			this.stopWrite.setNextWriteValue(cfgStop);
+			this.state = State.WINDOW_QUEUED;
+			return "Queued one-shot [" + this.label + "] window write to [" + formatEncodedTime(cfgStart) + ".."
+					+ formatEncodedTime(cfgStop) + "]";
+		}
+		// Window is correct on the device: converge the enable flag to the end state.
+		if (!actualEnable.equals(this.desiredEnable)) {
+			return this.queueEnable(this.desiredEnable);
 		}
 		this.state = State.DONE;
 		return null;
+	}
+
+	private String queueEnable(int value) {
+		this.targetEnable = value;
+		this.enableWrite.setNextWriteValue(value);
+		this.state = value == 0 ? State.DISABLE_QUEUED : State.ENABLE_QUEUED;
+		return "Queued one-shot [" + this.label + "] schedule enable=" + value
+				+ (value == 0 ? " (disarm before window change)" : " (after window verified)");
 	}
 
 	public synchronized void onWindowExecute(ExecuteState executeState) {
@@ -297,7 +300,7 @@ final class ScheduleWindow {
 		}
 		switch (this.state) {
 		case DISABLE_AWAITING_READBACK ->
-			// disarm verified -> continue to the window phase (reprogram if configured)
+			// disarm verified -> re-enter convergence (window write / re-arm / done)
 			this.state = actual.equals(this.targetEnable) ? State.DISABLE_VERIFIED : State.FAILED;
 		case ENABLE_AWAITING_READBACK -> this.state = actual.equals(this.targetEnable) ? State.DONE : State.FAILED;
 		default -> {
