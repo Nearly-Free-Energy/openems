@@ -85,7 +85,16 @@ enable unmanaged (`-1`) on an armed device disarms, rewrites and restores the
 armed state rather than mutating or silently disabling it. Any validation
 failure, execute error or read-back mismatch leaves the enable flag untouched, so
 a mis-set window can never leave a schedule armed (disabled is the safe resting
-state). Start and
+state).
+
+Two operational notes: (1) if the control gate closes (machine state leaves the
+verified running state, or `controlEnabled` is turned off) after a window change
+has disarmed but before it re-arms, the discharge schedule stays disabled until
+control resumes and the sequence self-heals - a transient loss of peak-shaving,
+not a backup-safety loss (backup is governed by the SoC thresholds, not the
+schedule). (2) As with the scalar settings writes, a stale pre-write read-back can
+latch `SAFE_WRITE_STATE=FAILED` on a schedule that is in fact correctly armed;
+FAILED here can mean "armed-but-unconfirmed" - re-read the registers to confirm. Start and
 stop must be configured together; the window is validated as a within-day window
 (both valid times, `start < stop`). Cross-midnight windows are rejected because
 the SRNE has no defined midnight wrap and cannot encode 24:00 - a window that runs

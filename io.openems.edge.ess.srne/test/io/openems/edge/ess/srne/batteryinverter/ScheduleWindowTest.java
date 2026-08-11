@@ -290,6 +290,28 @@ public class ScheduleWindowTest {
 		assertEquals(ScheduleWindow.State.DONE, sut.getState());
 	}
 
+	// JUSTIFICATION-A3: new invariant-robustness test (re-review advisory) proving the
+	// window is never written if the device enable flaps back to 1 mid-sequence.
+	@Test
+	void flappedEnableAtDisableVerifiedReDisarmsNeverWritesWindow() {
+		var sut = newDischargeWindow();
+		// Reach DISABLE_VERIFIED (armed device + changed window).
+		sut.reconcile(0, 0, 1, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		sut.enableWriteElement().getNextWriteValueAndReset();
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+
+		// The device enable flaps back to 1 before the window write. The invariant must
+		// hold: re-disarm, never write the window while armed.
+		sut.reconcile(0, 0, 1, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.stopWriteElement().getNextWriteValueAndReset());
+	}
+
 	@Test
 	void changedWindowOnArmedDeviceWithUnmanagedEnableRestoresArmed() {
 		var sut = newDischargeWindow();
