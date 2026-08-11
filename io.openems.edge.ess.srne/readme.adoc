@@ -68,12 +68,24 @@ the remaining state labels still require live transition testing.
 
 *Guarded settings + schedule writes*: an opt-in path (`controlEnabled`, default
 off) writes a fixed allow-list of SRNE settings registers - SoC thresholds and
-charge-current limits, plus the time-of-use charge/discharge SCHEDULE windows
-(`0xE026/E027` charge, `0xE02D/E02E` discharge, encoded `hour*256+min`) for TOU
-arbitrage. Each write is one-shot and readback-verified, and only fires while the
-machine state is a live-validated running state; every target defaults to `-1`
-(leave unchanged) and schedule times are validated (hour 0..23, minute 0..59)
-before any write. See `SafeWriteHandler`.
+charge-current limits, plus the time-of-use charge/discharge SCHEDULE windows for
+TOU arbitrage. Each write is one-shot and readback-verified, and only fires while
+the machine state is a live-validated running state; every target defaults to
+`-1` (leave unchanged). Scalar settings use `SafeWriteHandler`.
+
+A schedule window is a coherent unit handled by `ScheduleWindow`: the contiguous
+start/stop time pair (`0xE026/E027` charge, `0xE02D/E02E` discharge, encoded
+`hour*256+min`) is written as a single atomic FC16 block and read-back verified;
+ONLY then is the schedule enable flag (`0xE02C` charge, `0xE033` discharge)
+written - the enable is always the last step. Any validation failure, execute
+error or read-back mismatch leaves the enable flag untouched, so a mis-set window
+can never leave a schedule armed (disabled is the safe resting state). Start and
+stop must be configured together; the window is validated as a within-day window
+(both valid times, `start < stop`). Cross-midnight windows are rejected because
+the SRNE has no defined midnight wrap and cannot encode 24:00 - a window that runs
+to midnight must stop at `23:59` (5947). The inverter real-time clock (`0xE034-036`)
+is exposed read-only so commissioning can verify the clock before any schedule is
+enabled; a wrong clock fires every window at the wrong wall-clock time.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)
@@ -85,7 +97,8 @@ before any write. See `SafeWriteHandler`.
 * `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
 * `controlEnabled` (boolean): Safety gate for FC16 settings/schedule writes (default: `false`)
 * settings targets (int, `-1` = leave unchanged): `dischargeCutoffSoc`, `stopChargeCurrent`, `stopChargeSoc`, `lowSocAlarm`, `switchToLineSoc`, `switchToBatterySoc`, `acChargeCurrentLimit`, `maxChargeCurrentLimit`
-* TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`
+* TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
+* TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
 

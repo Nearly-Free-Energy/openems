@@ -24,6 +24,8 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int chargeWindow1Stop = -1;
 		private int dischargeWindow1Start = -1;
 		private int dischargeWindow1Stop = -1;
+		private int chargeScheduleEnable = -1;
+		private int dischargeScheduleEnable = -1;
 
 		private Builder() {
 		}
@@ -83,6 +85,16 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setDischargeWindow1Stop(int value) {
 			this.dischargeWindow1Stop = value;
+			return this;
+		}
+
+		public Builder setChargeScheduleEnable(int value) {
+			this.chargeScheduleEnable = value;
+			return this;
+		}
+
+		public Builder setDischargeScheduleEnable(int value) {
+			this.dischargeScheduleEnable = value;
 			return this;
 		}
 
@@ -193,5 +205,15 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int dischargeWindow1Stop() {
 		return this.builder.dischargeWindow1Stop;
+	}
+
+	@Override
+	public int chargeScheduleEnable() {
+		return this.builder.chargeScheduleEnable;
+	}
+
+	@Override
+	public int dischargeScheduleEnable() {
+		return this.builder.dischargeScheduleEnable;
 	}
 }

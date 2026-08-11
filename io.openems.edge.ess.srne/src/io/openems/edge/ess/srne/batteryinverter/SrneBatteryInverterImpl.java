@@ -74,16 +74,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final UnsignedWordElement switchToBatterySocWrite = new UnsignedWordElement(0xE020);
 	private final UnsignedWordElement acChargeCurrentLimitWrite = new UnsignedWordElement(0xE205);
 	private final UnsignedWordElement maxChargeCurrentLimitWrite = new UnsignedWordElement(0xE20A);
-	// TOU schedule windows (encoded hour*256+min): charge 0xE026/E027, discharge
-	// 0xE02D/E02E. Same guarded write path; validated as a time before queueing.
-	private final UnsignedWordElement chargeWindow1StartWrite = new UnsignedWordElement(0xE026);
-	private final UnsignedWordElement chargeWindow1StopWrite = new UnsignedWordElement(0xE027);
-	private final UnsignedWordElement dischargeWindow1StartWrite = new UnsignedWordElement(0xE02D);
-	private final UnsignedWordElement dischargeWindow1StopWrite = new UnsignedWordElement(0xE02E);
 	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
-			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler() };
+	/*
+	 * TOU schedule windows for arbitrage. Each window is a coherent (start, stop,
+	 * enable) unit: the contiguous start/stop pair (charge 0xE026/0xE027, discharge
+	 * 0xE02D/0xE02E, encoded hour*256+min) is written as one atomic FC16 block and
+	 * read-back verified; only then is the enable flag (charge 0xE02C, discharge
+	 * 0xE033) written. A failure never arms the schedule. See ScheduleWindow.
+	 */
+	private final ScheduleWindow chargeWindow = new ScheduleWindow(0xE026, 0xE02C, "CHARGE");
+	private final ScheduleWindow dischargeWindow = new ScheduleWindow(0xE02D, 0xE033, "DISCHARGE");
 	private Config config;
 
 	@Override
@@ -113,8 +115,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		/*
 		 * There is intentionally no @Modified method. A settings configuration update
 		 * causes DS to replace this component instance, giving every setting a fresh
-		 * SafeWriteHandler. VERIFIED and FAILED therefore remain terminal for one
-		 * configured request and cannot trigger repeated writes in the same activation.
+		 * SafeWriteHandler / ScheduleWindow. VERIFIED, DONE and FAILED therefore remain
+		 * terminal for one configured request and cannot trigger repeated writes in the
+		 * same activation.
 		 */
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
 		this._setMaxApparentPower(config.maxApparentPower());
@@ -145,10 +148,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.registerReadback(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC);
 		this.registerReadback(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT);
 		this.registerReadback(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT);
-		this.registerReadback(8, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START);
-		this.registerReadback(9, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP);
-		this.registerReadback(10, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START);
-		this.registerReadback(11, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP);
+		this.registerWindowReadback(this.chargeWindow, //
+				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
+				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
+				SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE);
+		this.registerWindowReadback(this.dischargeWindow, //
+				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
+				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
+				SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
 	}
 
 	private void registerReadback(int index, SrneBatteryInverter.ChannelId channelId) {
@@ -162,6 +169,38 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			}
 			this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		});
+	}
+
+	// JUSTIFICATION-A3: coherent-window read-back wiring for the TOU schedule
+	// feature (#67, PR #24). The window start/stop/enable each verify a distinct
+	// register of one ScheduleWindow, so a single indexed registerReadback cannot
+	// express it; this mirrors that helper for the three-register unit.
+	private void registerWindowReadback(ScheduleWindow window, SrneBatteryInverter.ChannelId startChannel,
+			SrneBatteryInverter.ChannelId stopChannel, SrneBatteryInverter.ChannelId enableChannel) {
+		((IntegerReadChannel) this.channel(startChannel)).onSetNextValue(value -> {
+			var previousState = window.getState();
+			window.verifyStart(value.get());
+			this.logWindowTransition(window, startChannel, previousState, value.get());
+		});
+		((IntegerReadChannel) this.channel(stopChannel)).onSetNextValue(value -> {
+			var previousState = window.getState();
+			window.verifyStop(value.get());
+			this.logWindowTransition(window, stopChannel, previousState, value.get());
+		});
+		((IntegerReadChannel) this.channel(enableChannel)).onSetNextValue(value -> {
+			var previousState = window.getState();
+			window.verifyEnable(value.get());
+			this.logWindowTransition(window, enableChannel, previousState, value.get());
+		});
+	}
+
+	private void logWindowTransition(ScheduleWindow window, SrneBatteryInverter.ChannelId channelId,
+			ScheduleWindow.State previousState, Integer readback) {
+		if (previousState != window.getState()) {
+			this.logInfo(this.log, "Schedule write [" + channelId.name() + "] state [" + window.getState()
+					+ "] after readback [" + readback + "]");
+		}
+		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 	}
 
 	@Override
@@ -224,9 +263,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC3ReadRegistersTask(0xE026, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, new UnsignedWordElement(0xE026)), //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, new UnsignedWordElement(0xE027))), //
-				new FC3ReadRegistersTask(0xE02D, Priority.LOW, //
+				new FC3ReadRegistersTask(0xE02C, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, new UnsignedWordElement(0xE02C)), //
 						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, new UnsignedWordElement(0xE02D)), //
 						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, new UnsignedWordElement(0xE02E))), //
+				new FC3ReadRegistersTask(0xE033, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE, new UnsignedWordElement(0xE033)), //
+						// 0xE034-0xE036 is the inverter real-time clock (year/month, day/hour,
+						// minute/second, each encoded high*256+low). Read-only here so
+						// commissioning can verify the clock before any schedule is trusted.
+						m(SrneBatteryInverter.ChannelId.RTC_YEAR_MONTH, new UnsignedWordElement(0xE034)), //
+						m(SrneBatteryInverter.ChannelId.RTC_DAY_HOUR, new UnsignedWordElement(0xE035)), //
+						m(SrneBatteryInverter.ChannelId.RTC_MINUTE_SECOND, new UnsignedWordElement(0xE036))), //
 				new FC3ReadRegistersTask(0x0101, Priority.HIGH, //
 						m(SrneBatteryInverter.ChannelId.BATTERY_VOLTAGE, new UnsignedWordElement(0x0101),
 								SCALE_FACTOR_2), //
@@ -244,12 +292,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.acChargeCurrentLimitWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[7]::onExecute, 0xE20A,
 						this.maxChargeCurrentLimitWrite), //
-				new FC16WriteRegistersTask(this.writeHandlers[8]::onExecute, 0xE026, this.chargeWindow1StartWrite), //
-				new FC16WriteRegistersTask(this.writeHandlers[9]::onExecute, 0xE027, this.chargeWindow1StopWrite), //
-				new FC16WriteRegistersTask(this.writeHandlers[10]::onExecute, 0xE02D,
-						this.dischargeWindow1StartWrite), //
-				new FC16WriteRegistersTask(this.writeHandlers[11]::onExecute, 0xE02E,
-						this.dischargeWindow1StopWrite));
+				// Atomic (start, stop) block write per window, then a separate enable write.
+				new FC16WriteRegistersTask(this.chargeWindow::onWindowExecute, 0xE026,
+						this.chargeWindow.startWriteElement(), this.chargeWindow.stopWriteElement()), //
+				new FC16WriteRegistersTask(this.chargeWindow::onEnableExecute, 0xE02C,
+						this.chargeWindow.enableWriteElement()), //
+				new FC16WriteRegistersTask(this.dischargeWindow::onWindowExecute, 0xE02D,
+						this.dischargeWindow.startWriteElement(), this.dischargeWindow.stopWriteElement()), //
+				new FC16WriteRegistersTask(this.dischargeWindow::onEnableExecute, 0xE033,
+						this.dischargeWindow.enableWriteElement()));
 	}
 
 	@Override
@@ -279,6 +330,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		for (var handler : this.writeHandlers) {
 			handler.onCycle(READBACK_TIMEOUT_CYCLES);
 		}
+		this.chargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
+		this.dischargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
@@ -304,14 +357,17 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
 				this.config.maxChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.maxChargeCurrentLimitWrite);
-		this.reconcileTime(8, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START,
-				this.config.chargeWindow1Start(), this.chargeWindow1StartWrite);
-		this.reconcileTime(9, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP,
-				this.config.chargeWindow1Stop(), this.chargeWindow1StopWrite);
-		this.reconcileTime(10, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START,
-				this.config.dischargeWindow1Start(), this.dischargeWindow1StartWrite);
-		this.reconcileTime(11, SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP,
-				this.config.dischargeWindow1Stop(), this.dischargeWindow1StopWrite);
+		this.reconcileWindow(this.chargeWindow, //
+				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
+				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
+				SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, //
+				this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), this.config.chargeScheduleEnable());
+		this.reconcileWindow(this.dischargeWindow, //
+				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
+				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
+				SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE, //
+				this.config.dischargeWindow1Start(), this.config.dischargeWindow1Stop(),
+				this.config.dischargeScheduleEnable());
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 	}
 
@@ -338,43 +394,32 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 	}
 
-	// JUSTIFICATION-A3: new reconcile variant + 2 pure validators for the TOU
-	// schedule feature (#67); the numeric reconcile() cannot validate a time
-	// (hour*256+min) so a separate guarded path is required, mirroring reconcile().
-	/**
-	 * Reconciles a TOU schedule-window register (raw value encoded hour*256+min).
-	 *
-	 * <p>
-	 * Same guarded, one-shot, readback-verified path as {@link #reconcile}, but the
-	 * out-of-range guard validates the value as a time (hour 0..23, minute 0..59)
-	 * so a mistyped window cannot be written to the inverter. -1 leaves it unchanged.
-	 *
-	 * @param index            the write-handler index
-	 * @param channelId        the read-back channel for this register
-	 * @param configuredTarget the desired encoded time, or -1 to leave unchanged
-	 * @param writeElement     the FC16 write element for this register
-	 */
-	private void reconcileTime(int index, SrneBatteryInverter.ChannelId channelId, int configuredTarget,
-			UnsignedWordElement writeElement) {
-		if (configuredTarget < 0) {
-			return;
-		}
-		var handler = this.writeHandlers[index];
-		Integer actual = ((IntegerReadChannel) this.channel(channelId)).value().get();
-		if (!isValidEncodedTime(configuredTarget)) {
-			if (handler.reject()) {
-				this.logWarn(this.log, "Rejected schedule time [" + channelId.name() + "] value ["
-						+ configuredTarget + "]; must be hour*256+min with hour 0..23 and minute 0..59");
+	// JUSTIFICATION-A3: guarded reconcile for a coherent TOU schedule window (#67,
+	// PR #24). Reads the three device registers for the window and hands them, with
+	// the configured targets, to the ScheduleWindow state machine which validates
+	// the pair, writes it atomically and only then enables. Not a wrapper around
+	// the scalar reconcile(): the pair validation + verified-then-enable ordering
+	// cannot be expressed by the single-register path.
+	private void reconcileWindow(ScheduleWindow window, SrneBatteryInverter.ChannelId startChannel,
+			SrneBatteryInverter.ChannelId stopChannel, SrneBatteryInverter.ChannelId enableChannel, int cfgStart,
+			int cfgStop, int cfgEnable) {
+		Integer actualStart = ((IntegerReadChannel) this.channel(startChannel)).value().get();
+		Integer actualStop = ((IntegerReadChannel) this.channel(stopChannel)).value().get();
+		Integer actualEnable = ((IntegerReadChannel) this.channel(enableChannel)).value().get();
+		var message = window.reconcile(actualStart, actualStop, actualEnable, cfgStart, cfgStop, cfgEnable);
+		if (message != null) {
+			if (window.getState() == ScheduleWindow.State.FAILED) {
+				this.logWarn(this.log, message);
+			} else {
+				this.logInfo(this.log, message);
 			}
-			return;
-		}
-		if (handler.queueIfChanged(actual, configuredTarget)) {
-			this.logInfo(this.log, "Queued one-shot schedule write [" + channelId.name() + "] from [" + actual
-					+ "] to [" + configuredTarget + "] (" + formatEncodedTime(configuredTarget) + ")");
-			writeElement.setNextWriteValue(configuredTarget);
 		}
 	}
 
+	// JUSTIFICATION-A3: thin static delegates kept so existing unit tests and any
+	// callers resolve time validation/formatting through the component; the
+	// implementation now lives in ScheduleWindow with the rest of the schedule
+	// logic.
 	/**
 	 * Whether a raw schedule value is a valid encoded time (hour*256+min, hour
 	 * 0..23, minute 0..59).
@@ -383,12 +428,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	 * @return true if it decodes to a valid time
 	 */
 	static boolean isValidEncodedTime(int encoded) {
-		if (encoded < 0 || encoded > 0xFFFF) {
-			return false;
-		}
-		var hour = encoded >> 8;
-		var minute = encoded & 0xFF;
-		return hour <= 23 && minute <= 59;
+		return ScheduleWindow.isValidEncodedTime(encoded);
 	}
 
 	/**
@@ -398,7 +438,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	 * @return the HH:mm string
 	 */
 	static String formatEncodedTime(int encoded) {
-		return String.format("%02d:%02d", encoded >> 8, encoded & 0xFF);
+		return ScheduleWindow.formatEncodedTime(encoded);
 	}
 
 	private SafeWriteHandler.State aggregateWriteState() {
@@ -409,7 +449,37 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				result = state;
 			}
 		}
+		for (var windowState : new SafeWriteHandler.State[] {
+				scheduleWindowAsWriteState(this.chargeWindow.getState()),
+				scheduleWindowAsWriteState(this.dischargeWindow.getState()) }) {
+			if (writeStatePrecedence(windowState) > writeStatePrecedence(result)) {
+				result = windowState;
+			}
+		}
 		return result;
+	}
+
+	/**
+	 * Projects a {@link ScheduleWindow.State} onto the shared
+	 * {@link SafeWriteHandler.State} scale so both write paths aggregate into the
+	 * single {@code SAFE_WRITE_STATE} channel.
+	 *
+	 * @param state the schedule-window state
+	 * @return the equivalent settings-write state
+	 */
+	static SafeWriteHandler.State scheduleWindowAsWriteState(ScheduleWindow.State state) {
+		return switch (state) {
+		case FAILED -> SafeWriteHandler.State.FAILED;
+		// The intermediate *_VERIFIED states are in-progress (more of the coherent
+		// operation is still pending), so they must not read as the terminal VERIFIED.
+		case DISABLE_AWAITING_READBACK, WINDOW_AWAITING_READBACK, ENABLE_AWAITING_READBACK, DISABLE_VERIFIED,
+				WINDOW_VERIFIED ->
+			SafeWriteHandler.State.AWAITING_READBACK;
+		case DISABLE_QUEUED, WINDOW_QUEUED, ENABLE_QUEUED -> SafeWriteHandler.State.QUEUED;
+		case DONE -> SafeWriteHandler.State.VERIFIED;
+		case IDLE -> SafeWriteHandler.State.IDLE;
+		case UNDEFINED -> SafeWriteHandler.State.UNDEFINED;
+		};
 	}
 
 	static int writeStatePrecedence(SafeWriteHandler.State state) {

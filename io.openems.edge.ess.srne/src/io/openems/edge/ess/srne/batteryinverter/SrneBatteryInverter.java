@@ -40,6 +40,21 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Discharge window 1 start, encoded hour*256+min (0xE02D)")), //
 		DISCHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
 				.text("Discharge window 1 stop, encoded hour*256+min (0xE02E)")), //
+		// Schedule enable flags: 0 disabled, 1 enabled. Written last, only after the
+		// matching window pair is read-back verified (0xE02C charge, 0xE033 discharge).
+		CHARGE_SCHEDULE_ENABLE(Doc.of(OpenemsType.INTEGER) //
+				.text("Charge time-schedule enable, 0/1 (0xE02C)")), //
+		DISCHARGE_SCHEDULE_ENABLE(Doc.of(OpenemsType.INTEGER) //
+				.text("Discharge time-schedule enable, 0/1 (0xE033)")), //
+		// Inverter real-time clock (read-only). Each register is high*256+low; a wrong
+		// clock makes every schedule window fire at the wrong wall-clock time, so
+		// commissioning must verify these before enabling any schedule.
+		RTC_YEAR_MONTH(Doc.of(OpenemsType.INTEGER) //
+				.text("Inverter RTC year*256+month (0xE034)")), //
+		RTC_DAY_HOUR(Doc.of(OpenemsType.INTEGER) //
+				.text("Inverter RTC day*256+hour (0xE035)")), //
+		RTC_MINUTE_SECOND(Doc.of(OpenemsType.INTEGER) //
+				.text("Inverter RTC minute*256+second (0xE036)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 
