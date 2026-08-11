@@ -366,19 +366,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.stopChargeSoc(), 0, 100, 1, this.stopChargeSocWrite);
 		this.reconcile(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM,
 				this.config.lowSocAlarm(), 0, 100, 1, this.lowSocAlarmWrite);
-		this.reconcile(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC,
-				this.config.switchToLineSoc(), 0, 100, 1, this.switchToLineSocWrite);
-		this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC,
-				this.config.switchToBatterySoc(), 0, 100, 1, this.switchToBatterySocWrite);
 		this.reconcile(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
 				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
 				this.config.maxChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.maxChargeCurrentLimitWrite);
-		// BMS-comms enable is itself a prerequisite for SoC-based transfer, so reconcile
-		// it before output priority. Bounded range only; enum confirmed on the unit (#71).
-		this.reconcile(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION,
-				this.config.bmsCommunication(), 0, 2, 1, this.bmsCommunicationWrite);
-		this.reconcileOutputPriority();
+		// Source transfer: the reserve band (E01F/E020), BMS mode (E215) and output
+		// priority (E204) are reconciled together as one coherent, validated operation.
+		this.reconcileSourceTransfer();
 		this.reconcileWindow(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
@@ -423,19 +417,46 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// comms) have read-back verified, so a failed or still-pending floor write can never
 	// arm battery discharge against a wrong reserve. Cannot use the flat reconcile()
 	// because of this cross-setting gate.
-	private void reconcileOutputPriority() {
-		var target = this.config.outputPriority();
-		if (target < 0) {
-			return;
-		}
+	// JUSTIFICATION-A3: coherent source-transfer reconcile (#71, PR #25 review). Output
+	// priority = SBU transfers the load onto the battery; its reserve band (E01F/E020)
+	// and BMS mode (E215) are safety prerequisites. When an arm is requested the WHOLE
+	// set is validated (present, individually bounded, coherent) BEFORE any of it is
+	// written, so a rejected arm never leaves a bad reserve band or partial writes on the
+	// live device. When no arm is requested the band and BMS remain independent settings.
+	private void reconcileSourceTransfer() {
 		var line = this.config.switchToLineSoc();
 		var battery = this.config.switchToBatterySoc();
 		var bms = this.config.bmsCommunication();
-		// Arming battery-priority output must never rely on unknown existing device
-		// settings: require an explicit, coherent, verified reserve band and BMS mode.
+		var arm = this.config.outputPriority();
+		if (arm < 0) {
+			// A bad reserve band is dangerous whenever the unit is in SBU (its normal
+			// backup posture, settable from the panel), so an incoherent band is never
+			// written even when OpenEMS is not arming: reject both thresholds if both are
+			// configured and inverted. BMS remains an independent write.
+			if (line >= 0 && battery >= 0 && line >= battery) {
+				this.rejectBand(line, battery);
+			} else {
+				this.reconcile(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC, line, 0, 100, 1,
+						this.switchToLineSocWrite);
+				this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC, battery, 0, 100, 1,
+						this.switchToBatterySocWrite);
+			}
+			this.reconcile(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION, bms, 0, 2, 1,
+					this.bmsCommunicationWrite);
+			return;
+		}
+		// Arming: validate the whole set up front and write NOTHING on failure.
+		if (arm > 3) {
+			this.rejectOutputPriority("output priority [" + arm + "] out of range 0..3");
+			return;
+		}
 		if (line < 0 || battery < 0 || bms < 0) {
 			this.rejectOutputPriority(
 					"requires switchToLineSoc, switchToBatterySoc and bmsCommunication to all be configured");
+			return;
+		}
+		if (line > 100 || battery > 100 || bms > 2) {
+			this.rejectOutputPriority("reserve band / BMS out of range (SoC 0..100, BMS 0..2)");
 			return;
 		}
 		if (line >= battery) {
@@ -443,6 +464,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					+ "] must be below switchToBatterySoc [" + battery + "]");
 			return;
 		}
+		// Whole set valid: reconcile the band + BMS, then arm once all three are settled.
+		this.reconcile(4, SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC, line, 0, 100, 1,
+				this.switchToLineSocWrite);
+		this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC, battery, 0, 100, 1,
+				this.switchToBatterySocWrite);
+		this.reconcile(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION, bms, 0, 2, 1, this.bmsCommunicationWrite);
 		var prerequisitesSettled = isPrerequisiteSettled(line, this.writeHandlers[4].getState(),
 				this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC))
 				&& isPrerequisiteSettled(battery, this.writeHandlers[5].getState(),
@@ -456,12 +483,27 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			}
 			return;
 		}
-		this.reconcile(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY, target, 0, 3, 1, this.outputPriorityWrite);
+		this.reconcile(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY, arm, 0, 3, 1, this.outputPriorityWrite);
+	}
+
+	// Package-private for tests: lets a test assert that a reserve-band / BMS write did
+	// NOT queue on a rejected arm (state stays IDLE), not just that the aggregate failed.
+	SafeWriteHandler.State writeHandlerStateForTest(int index) {
+		return this.writeHandlers[index].getState();
 	}
 
 	private void rejectOutputPriority(String reason) {
 		if (this.writeHandlers[8].reject()) {
 			this.logWarn(this.log, "Rejected output-priority arm: " + reason);
+		}
+	}
+
+	private void rejectBand(int line, int battery) {
+		var rejectedLine = this.writeHandlers[4].reject();
+		var rejectedBattery = this.writeHandlers[5].reject();
+		if (rejectedLine || rejectedBattery) {
+			this.logWarn(this.log, "Rejected reserve-band write: switchToLineSoc [" + line
+					+ "] must be below switchToBatterySoc [" + battery + "]");
 		}
 	}
 

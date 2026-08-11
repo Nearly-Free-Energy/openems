@@ -506,4 +506,76 @@ public class SrneBatteryInverterImplTest {
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.FAILED)) //
 				.deactivate();
 	}
+
+	// JUSTIFICATION-A3: new test (PR #25 review) proving a rejected arm writes NOTHING to
+	// the reserve band / BMS - asserts the handlers stay IDLE, not just aggregate FAILED.
+	@Test
+	public void testIncoherentBandArmWritesNothingToReserveBand() throws Exception {
+		// All three config values differ from the device, so if they were reconciled they
+		// would queue; asserting IDLE proves the whole set was validated before any write.
+		var sut = new SrneBatteryInverterImpl();
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) // device E01F=20, E020=80
+						.withRegisters(0xE204, 1, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE215, 1) // device BMS=1
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setSwitchToLineSoc(90) // valid 0..100, differs from device 20
+						.setSwitchToBatterySoc(50) // differs from device 80; band 90 >= 50 -> incoherent
+						.setBmsCommunication(2) // differs from device 1
+						.setOutputPriority(2) // differs from device 1
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.FAILED));
+		// No reserve-band / BMS write may have queued; only output priority is FAILED.
+		assertEquals(SafeWriteHandler.State.IDLE, sut.writeHandlerStateForTest(4)); // switchToLineSoc
+		assertEquals(SafeWriteHandler.State.IDLE, sut.writeHandlerStateForTest(5)); // switchToBatterySoc
+		assertEquals(SafeWriteHandler.State.IDLE, sut.writeHandlerStateForTest(9)); // bmsCommunication
+		assertEquals(SafeWriteHandler.State.FAILED, sut.writeHandlerStateForTest(8)); // output priority
+		test.deactivate();
+	}
+
+	// JUSTIFICATION-A3: new test (PR #25 review) - an incoherent band is rejected even
+	// with no arm requested, since a bad band is dangerous whenever the unit is in SBU.
+	@Test
+	public void testIncoherentBandRejectedWithoutArm() throws Exception {
+		// Both thresholds differ from the device (would queue if reconciled), band is
+		// inverted (90 >= 50), and no outputPriority is set: the band must be rejected.
+		var sut = new SrneBatteryInverterImpl();
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) // device E01F=20, E020=80
+						.withRegisters(0xE204, 1, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE215, 1) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setSwitchToLineSoc(90) // inverted band, no arm requested
+						.setSwitchToBatterySoc(50) //
+						.build()) //
+				.next(new TestCase(), 8) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.FAILED));
+		// The band is rejected (FAILED), not written, even without an arm.
+		assertEquals(SafeWriteHandler.State.FAILED, sut.writeHandlerStateForTest(4)); // switchToLineSoc
+		assertEquals(SafeWriteHandler.State.FAILED, sut.writeHandlerStateForTest(5)); // switchToBatterySoc
+		test.deactivate();
+	}
 }
