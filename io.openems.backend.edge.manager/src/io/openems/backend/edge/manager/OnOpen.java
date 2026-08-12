@@ -7,6 +7,7 @@ import static org.java_websocket.framing.CloseFrame.REFUSE;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import org.java_websocket.WebSocket;
@@ -22,14 +23,17 @@ public class OnOpen implements io.openems.common.websocket.OnOpen {
 
 	private final Logger log = LoggerFactory.getLogger(OnOpen.class);
 	private final Function<String, Optional<String>> getEdgeIdForApikey;
+	private final Predicate<String> isKnownEdgeId;
 	private final Supplier<UpdateMetadataCache.Notification> generateUpdateMetadataCacheNotification;
 	private final BiConsumer<Logger, String> logInfo;
 
 	public OnOpen(//
 			Function<String, Optional<String>> getEdgeIdForApikey, //
+			Predicate<String> isKnownEdgeId, //
 			Supplier<UpdateMetadataCache.Notification> generateUpdateMetadataCacheNotification, //
 			BiConsumer<Logger, String> logInfo) {
 		this.getEdgeIdForApikey = getEdgeIdForApikey;
+		this.isKnownEdgeId = isKnownEdgeId;
 		this.generateUpdateMetadataCacheNotification = generateUpdateMetadataCacheNotification;
 		this.logInfo = logInfo;
 	}
@@ -54,8 +58,9 @@ public class OnOpen implements io.openems.common.websocket.OnOpen {
 		// get websocket attachment
 		final WsData wsData = ws.getAttachment();
 
-		if (id == null || apikey == null //
-				|| this.getEdgeIdForApikey.apply(apikey).filter(id::equals).isEmpty()) {
+		if (id == null //
+				|| apikey == null && this.isKnownEdgeId.test(id) //
+				|| apikey != null && this.getEdgeIdForApikey.apply(apikey).filter(id::equals).isEmpty()) {
 			return OpenemsError.COMMON_AUTHENTICATION_FAILED;
 		}
 
