@@ -15,7 +15,7 @@ on:
         description: Optional OpenEMS release tag represented by this build
         required: false
         type: string
-  pull_request:
+  pull_request_target:
     types: [closed]
 
 permissions:
