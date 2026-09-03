@@ -59,6 +59,11 @@ updates:
     target-branch: "main"
     groups:
       openems-ui:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+      openems-ui-security:
+        applies-to: "security-updates"
         patterns:
           - "*"
 
@@ -77,7 +82,7 @@ updates:
     directory: "/.github/workflows"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 1
     target-branch: "main"
     groups:
       all-actions:

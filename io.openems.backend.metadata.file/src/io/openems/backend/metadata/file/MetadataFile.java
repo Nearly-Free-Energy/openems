@@ -210,7 +210,8 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 							JsonUtils.getAsOptionalString(edge, "setuppassword").orElse(""), //
 							JsonUtils.getAsString(edge, "comment"), //
 							"", // Version
-							"" // Product-Type
+							"", // Product-Type
+							null //
 					));
 				}
 			} catch (OpenemsNamedException e) {
@@ -363,8 +364,8 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 
 	@Override
 	public CompletableFuture<List<EdgeMetadata>> getPageDevice(User user, PaginationOptions paginationOptions) {
-		return CompletableFuture
-				.completedFuture(MetadataUtils.getPageDevice(user, this.edges.values(), paginationOptions));
+		return CompletableFuture.completedFuture(
+				MetadataUtils.getPageDevice(user, this.edges.values(), MyEdge::getSettings, paginationOptions));
 	}
 
 	@Override
@@ -410,6 +411,13 @@ public class MetadataFile extends AbstractMetadata implements Metadata, EventHan
 	@Override
 	public void updateUserSettings(User user, JsonObject settings) {
 		this.settings = settings == null ? new JsonObject() : settings;
+	}
+
+	@Override
+	public CompletableFuture<Void> updateEdgeSettings(String edgeId, JsonObject settings) {
+		var edge = this.edges.get(edgeId);
+		edge.setSettings(settings);
+		return CompletableFuture.completedFuture(null);
 	}
 
 }
