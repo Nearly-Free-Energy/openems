@@ -209,7 +209,8 @@ public class SrneBatteryInverterImplTest {
 				.next(new TestCase(), 14) // >= number of LOW read tasks (12; E033 is last), one per cycle
 				.next(new TestCase() //
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, 0) //
-						// ADR-016 gate before arming: sections 2/3 read 00:00-00:00
+						// Sections 2/3 are exposed and read back (register contents only; this
+						// does not test firmware semantics or enforce an arming interlock)
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_2_START, 0) //
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_2_STOP, 0) //
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_3_START, 0) //

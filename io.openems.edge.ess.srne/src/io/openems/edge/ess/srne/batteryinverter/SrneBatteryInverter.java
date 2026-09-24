@@ -46,9 +46,10 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Discharge window 1 start, encoded hour*256+min (0xE02D)")), //
 		DISCHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
 				.text("Discharge window 1 stop, encoded hour*256+min (0xE02E)")), //
-		// Schedule sections 2 and 3 (read-only). Arming a schedule enable is unsafe
-		// until these are seen to be 00:00-00:00: an empty section might be treated
-		// as "all day" by the firmware. Never written by this driver.
+		// Schedule sections 2 and 3 (read-only, never written by this driver). They
+		// show the register contents only: a 00:00-00:00 read-back does not prove the
+		// firmware treats an empty section as disabled rather than "all day", so it
+		// is not by itself sufficient to arm a schedule enable (see readme).
 		CHARGE_WINDOW_2_START(Doc.of(OpenemsType.INTEGER).text("Charge window 2 start, hour*256+min (0xE028)")), //
 		CHARGE_WINDOW_2_STOP(Doc.of(OpenemsType.INTEGER).text("Charge window 2 stop, hour*256+min (0xE029)")), //
 		CHARGE_WINDOW_3_START(Doc.of(OpenemsType.INTEGER).text("Charge window 3 start, hour*256+min (0xE02A)")), //

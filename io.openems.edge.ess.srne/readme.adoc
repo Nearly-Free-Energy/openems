@@ -120,9 +120,15 @@ cut-off. A read the device rejects marks the whole component defective for a few
 cycles, so confirm the registers answer on a unit before deploying this read.
 
 Schedule sections 2 and 3 (charge `0xE028-E02B`, discharge `0xE02F-E032`) are
-exposed read-only too. Confirm they read `00:00-00:00` before arming a schedule
-enable: the firmware's handling of an empty section is undocumented, and an
-"all day" interpretation would discharge around the clock.
+exposed read-only too, so their contents are visible. Reading `00:00-00:00` there
+is necessary but NOT sufficient to arm a schedule enable: it shows what the
+registers hold, not what the firmware does with an empty section, and an "all
+day" interpretation would discharge around the clock. Arming stays blocked until
+there is evidence that equal zero endpoints disable a section on the target
+firmware, for example vendor confirmation, or a supervised test: arm in daylight
+with the grid present and window 1 outside the current time, and confirm the
+unit does not discharge, with the disarm profile ready. Nothing in this driver
+enforces that gate; it is a commissioning rule.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)
