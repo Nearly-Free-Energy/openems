@@ -192,6 +192,8 @@ public class SrneBatteryInverterImplTest {
 						.withRegisters(0xE02C, 0, 0, 0) // charge enable off; discharge window off
 						.withRegisters(0xE033, 0, 0, 0, 0) // discharge enable off; RTC
 						.withRegisters(0x0101, 524, 0) //
+						.withRegisters(0xE00B, 504, 440, 488, 448) // voltage cut-offs (x4 of V1.7)
+						.withRegister(0xE010, 60) //
 						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
 				.activate(MyConfig.create() //
 						.setId("batteryInverter0") //
@@ -202,7 +204,7 @@ public class SrneBatteryInverterImplTest {
 						.setDischargeWindow1Start(4608) // 18:00
 						.setDischargeWindow1Stop(5947) // 23:59 (end of day; no 24:00)
 						.build()) //
-				.next(new TestCase(), 8) //
+				.next(new TestCase(), 12) // >= number of LOW read tasks (10; E033 is last), one per cycle
 				.next(new TestCase() //
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, 0) //
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
@@ -581,6 +583,31 @@ public class SrneBatteryInverterImplTest {
 		assertEquals(SafeWriteHandler.State.FAILED, sut.writeHandlerStateForTest(4)); // switchToLineSoc
 		assertEquals(SafeWriteHandler.State.FAILED, sut.writeHandlerStateForTest(5)); // switchToBatterySoc
 		test.deactivate();
+	}
+
+	// The battery-voltage protection thresholds are READ-ONLY: every register
+	// E00B-E00E and E010 must be covered by a read task, and by no write task.
+	// E00F stays in its own single-register read (safe-write verification).
+	@Test
+	public void testVoltageCutoffRegistersAreReadOnly() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var addresses = Set.of(0xE00B, 0xE00C, 0xE00D, 0xE00E, 0xE010);
+		var read = new HashSet<Integer>();
+		for (var task : sut.defineModbusProtocol().getTaskManager().getTasks()) {
+			for (var address : addresses) {
+				var covers = address >= task.getStartAddress()
+						&& address < task.getStartAddress() + task.getLength();
+				if (!covers) {
+					continue;
+				}
+				assertFalse(task instanceof WriteTask, "0x" + Integer.toHexString(address) + " must never be written");
+				read.add(address);
+			}
+			if (!(task instanceof WriteTask) && task.getStartAddress() == 0xE00F) {
+				assertEquals(1, task.getLength());
+			}
+		}
+		assertEquals(addresses, read);
 	}
 
 	// Regression guard for the gw-pi2 field failure (2026-09-24): one FC16 task with

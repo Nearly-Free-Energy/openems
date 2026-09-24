@@ -259,6 +259,22 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC3ReadRegistersTask(0xE00F, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.DISCHARGE_CUTOFF_SOC,
 								new UnsignedWordElement(0xE00F))), //
+				// Read-only battery-voltage protection thresholds (see the channel docs).
+				// Separate tasks, so the proven E00F read (safe-write verification) is
+				// never coupled to them. NOTE: a read that the device rejects marks the
+				// whole component defective for a few cycles (all its tasks skipped), so
+				// these must be confirmed to answer on the unit before deploying.
+				new FC3ReadRegistersTask(0xE00B, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.OVER_DISCHARGE_RETURN_VOLTAGE,
+								new UnsignedWordElement(0xE00B), SCALE_FACTOR_2), //
+						m(SrneBatteryInverter.ChannelId.UNDER_VOLTAGE_WARNING_VOLTAGE,
+								new UnsignedWordElement(0xE00C), SCALE_FACTOR_2), //
+						m(SrneBatteryInverter.ChannelId.OVER_DISCHARGE_VOLTAGE,
+								new UnsignedWordElement(0xE00D), SCALE_FACTOR_2), //
+						m(SrneBatteryInverter.ChannelId.LIMITED_DISCHARGE_VOLTAGE,
+								new UnsignedWordElement(0xE00E), SCALE_FACTOR_2)), //
+				new FC3ReadRegistersTask(0xE010, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.OVER_DISCHARGE_DELAY, new UnsignedWordElement(0xE010))), //
 				new FC3ReadRegistersTask(0xE01C, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.STOP_CHARGE_CURRENT, new UnsignedWordElement(0xE01C),
 								SCALE_FACTOR_2), //
