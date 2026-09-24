@@ -8,13 +8,19 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * Coordinates one coherent time-of-use schedule-window write.
  *
  * <p>A schedule window is the (start, stop) time pair plus its enable flag. The
- * two time registers are contiguous, so they are written together as a single
- * atomic FC16 block: the inverter never sees a half-updated window.
+ * start and stop registers are written as two separate single-register FC16
+ * requests, never as one multi-register block. Observed once on gw-pi2
+ * (2026-09-24): the single frame {@code E02D <- [4608, 5947]} read back as
+ * E02D=5947, E02E=0 (both were 0 before). Interpretation: only the last word was
+ * stored, at the start address. Single-register writes are known-good on this
+ * unit. A half-updated window is harmless because the window is only ever
+ * written while the enable register reads 0, and the enable is only raised after
+ * both registers read back correctly.
  *
  * <p>The whole operation is governed by one safety invariant: <b>the enable
  * register must read 0 on the device whenever the window registers are
  * written</b>. So any change to a currently-armed window is sequenced as
- * disarm &rarr; verify-disabled &rarr; atomic window write &rarr; verify-window
+ * disarm &rarr; verify-disabled &rarr; window write &rarr; verify-window
  * &rarr; re-arm. A live enabled window is never mutated in place; a failed or
  * mismatched write leaves the schedule disabled (the safe resting state) and is
  * never retried automatically.
@@ -33,7 +39,7 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * {@link SafeWriteHandler}.
  *
  * <p>Thread-safety: {@code reconcile} runs on the Edge cycle thread while
- * {@code onWindowExecute}/{@code onEnableExecute} and the {@code verify*}
+ * {@code onStartExecute}/{@code onStopExecute}/{@code onEnableExecute} and the {@code verify*}
  * callbacks run on the Modbus bridge worker thread. All mutable state is guarded
  * by intrinsic locking so transitions are atomic and visible across threads.
  */
@@ -85,6 +91,8 @@ final class ScheduleWindow {
 	private Integer targetStop;
 	private Integer targetEnable;
 	private Integer desiredEnable;
+	private boolean startExecuted;
+	private boolean stopExecuted;
 	private boolean startVerified;
 	private boolean stopVerified;
 	private int awaitingReadbackCycles;
@@ -212,9 +220,12 @@ final class ScheduleWindow {
 			if (!actualEnable.equals(0)) {
 				return this.queueEnable(0);
 			}
-			// Device is disarmed: write the start/stop pair atomically.
+			// Device is disarmed: queue the start and stop registers, each as its own
+			// single-register write.
 			this.targetStart = cfgStart;
 			this.targetStop = cfgStop;
+			this.startExecuted = false;
+			this.stopExecuted = false;
 			this.startVerified = false;
 			this.stopVerified = false;
 			this.startWrite.setNextWriteValue(cfgStart);
@@ -239,12 +250,37 @@ final class ScheduleWindow {
 				+ (value == 0 ? " (disarm before window change)" : " (after window verified)");
 	}
 
-	public synchronized void onWindowExecute(ExecuteState executeState) {
+	// JUSTIFICATION-A3: the one block write became two single-register writes, so
+	// the single execute callback splits into start/stop and must wait for both.
+	public synchronized void onStartExecute(ExecuteState executeState) {
 		if (this.state != State.WINDOW_QUEUED || executeState == ExecuteState.NO_OP) {
 			return;
 		}
-		this.awaitingReadbackCycles = 0;
-		this.state = executeState == ExecuteState.OK ? State.WINDOW_AWAITING_READBACK : State.FAILED;
+		this.startExecuted = executeState == ExecuteState.OK;
+		this.afterHalfExecuted(executeState);
+	}
+
+	public synchronized void onStopExecute(ExecuteState executeState) {
+		if (this.state != State.WINDOW_QUEUED || executeState == ExecuteState.NO_OP) {
+			return;
+		}
+		this.stopExecuted = executeState == ExecuteState.OK;
+		this.afterHalfExecuted(executeState);
+	}
+
+	// Any write error fails the window (no retry) and drops the other register's
+	// pending value, so nothing more is written once FAILED. Read-back only starts
+	// once BOTH registers are written, so a read between the two writes can't
+	// verify or fail a half-written window.
+	private void afterHalfExecuted(ExecuteState executeState) {
+		if (executeState != ExecuteState.OK) {
+			this.state = State.FAILED;
+			this.startWrite.setNextWriteValue(null);
+			this.stopWrite.setNextWriteValue(null);
+		} else if (this.startExecuted && this.stopExecuted) {
+			this.awaitingReadbackCycles = 0;
+			this.state = State.WINDOW_AWAITING_READBACK;
+		}
 	}
 
 	public synchronized void onEnableExecute(ExecuteState executeState) {

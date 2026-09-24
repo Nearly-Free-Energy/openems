@@ -87,8 +87,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	/*
 	 * TOU schedule windows for arbitrage. Each window is a coherent (start, stop,
 	 * enable) unit: the contiguous start/stop pair (charge 0xE026/0xE027, discharge
-	 * 0xE02D/0xE02E, encoded hour*256+min) is written as one atomic FC16 block and
-	 * read-back verified; only then is the enable flag (charge 0xE02C, discharge
+	 * 0xE02D/0xE02E, encoded hour*256+min) is written as two single-register FC16
+	 * requests (a two-register write was mis-stored on gw-pi2) and read-back
+	 * verified; only then is the enable flag (charge 0xE02C, discharge
 	 * 0xE033) written. A failure never arms the schedule. See ScheduleWindow.
 	 */
 	private final ScheduleWindow chargeWindow = new ScheduleWindow(0xE026, 0xE02C, "CHARGE");
@@ -325,13 +326,19 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.maxChargeCurrentLimitWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[8]::onExecute, 0xE204, this.outputPriorityWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[9]::onExecute, 0xE215, this.bmsCommunicationWrite), //
-				// Atomic (start, stop) block write per window, then a separate enable write.
-				new FC16WriteRegistersTask(this.chargeWindow::onWindowExecute, 0xE026,
-						this.chargeWindow.startWriteElement(), this.chargeWindow.stopWriteElement()), //
+				// Start and stop each get their OWN single-register task: the SRNE mis-stored
+				// a two-register FC16 here (see ScheduleWindow), and one task would merge the
+				// contiguous elements into one frame. The enable is a separate write, last.
+				new FC16WriteRegistersTask(this.chargeWindow::onStartExecute, 0xE026,
+						this.chargeWindow.startWriteElement()), //
+				new FC16WriteRegistersTask(this.chargeWindow::onStopExecute, 0xE027,
+						this.chargeWindow.stopWriteElement()), //
 				new FC16WriteRegistersTask(this.chargeWindow::onEnableExecute, 0xE02C,
 						this.chargeWindow.enableWriteElement()), //
-				new FC16WriteRegistersTask(this.dischargeWindow::onWindowExecute, 0xE02D,
-						this.dischargeWindow.startWriteElement(), this.dischargeWindow.stopWriteElement()), //
+				new FC16WriteRegistersTask(this.dischargeWindow::onStartExecute, 0xE02D,
+						this.dischargeWindow.startWriteElement()), //
+				new FC16WriteRegistersTask(this.dischargeWindow::onStopExecute, 0xE02E,
+						this.dischargeWindow.stopWriteElement()), //
 				new FC16WriteRegistersTask(this.dischargeWindow::onEnableExecute, 0xE033,
 						this.dischargeWindow.enableWriteElement()));
 	}
@@ -556,7 +563,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// JUSTIFICATION-A3: guarded reconcile for a coherent TOU schedule window (#67,
 	// PR #24). Reads the three device registers for the window and hands them, with
 	// the configured targets, to the ScheduleWindow state machine which validates
-	// the pair, writes it atomically and only then enables. Not a wrapper around
+	// the pair, writes the pair as two single-register requests and only then enables. Not a wrapper around
 	// the scalar reconcile(): the pair validation + verified-then-enable ordering
 	// cannot be expressed by the single-register path.
 	private void reconcileWindow(ScheduleWindow window, SrneBatteryInverter.ChannelId startChannel,
