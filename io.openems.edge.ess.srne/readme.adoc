@@ -102,6 +102,15 @@ to midnight must stop at `23:59` (5947). The inverter real-time clock (`0xE034-0
 is exposed read-only so commissioning can verify the clock before any schedule is
 enabled; a wrong clock fires every window at the wrong wall-clock time.
 
+The battery-voltage protection thresholds are exposed read-only, scaled to mV:
+over-discharge return (`0xE00B`), under-voltage warning (`0xE00C`), over-discharge
+load cut-off (`0xE00D`), limited-discharge immediate cut-off (`0xE00E`) and the
+over-discharge delay in seconds (`0xE010`). Protocol V1.7 lists 9-15.5 V ranges
+(12 V-block scale), so the magnitude read back shows whether this unit reports
+per-block or pack voltage. They can explain a shutdown that happens above the SoC
+cut-off. A read the device rejects marks the whole component defective for a few
+cycles, so confirm the registers answer on a unit before deploying this read.
+
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)
 * `alias` (String): Human-readable component name

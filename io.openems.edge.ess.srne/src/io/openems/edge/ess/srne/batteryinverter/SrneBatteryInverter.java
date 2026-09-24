@@ -61,6 +61,20 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Inverter RTC day*256+hour (0xE035)")), //
 		RTC_MINUTE_SECOND(Doc.of(OpenemsType.INTEGER) //
 				.text("Inverter RTC minute*256+second (0xE036)")), //
+		// Battery-voltage protection thresholds (read-only). Registers are 0.1 V,
+		// scaled to mV like BATTERY_VOLTAGE. Protocol V1.7 lists 9-15.5 V ranges
+		// (12 V-block scale; x4 would be a 48 V pack), so whether this unit reports
+		// per-block or pack voltage is read off the magnitude (~12200 vs ~48800).
+		OVER_DISCHARGE_RETURN_VOLTAGE(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Over-discharge return voltage (0xE00B)")), //
+		UNDER_VOLTAGE_WARNING_VOLTAGE(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Under-voltage warning voltage, alarm only (0xE00C)")), //
+		OVER_DISCHARGE_VOLTAGE(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Over-discharge voltage, load cut off (0xE00D; delay per E00E remark / E010)")), //
+		LIMITED_DISCHARGE_VOLTAGE(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Limited discharge voltage, load cut off immediately (0xE00E)")), //
+		OVER_DISCHARGE_DELAY(Doc.of(OpenemsType.INTEGER).unit(Unit.SECONDS) //
+				.text("Over-discharge delay (0xE010)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 
