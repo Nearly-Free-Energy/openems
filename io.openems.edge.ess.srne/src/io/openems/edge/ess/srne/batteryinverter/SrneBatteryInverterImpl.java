@@ -294,6 +294,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC3ReadRegistersTask(0xE026, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, new UnsignedWordElement(0xE026)), //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, new UnsignedWordElement(0xE027))), //
+				// Read-only schedule sections 2/3 (see the channel docs); separate tasks so
+				// the window/enable reads used for schedule verification stay decoupled.
+				new FC3ReadRegistersTask(0xE028, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_START, new UnsignedWordElement(0xE028)), //
+						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_STOP, new UnsignedWordElement(0xE029)), //
+						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_3_START, new UnsignedWordElement(0xE02A)), //
+						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_3_STOP, new UnsignedWordElement(0xE02B))), //
+				new FC3ReadRegistersTask(0xE02F, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_2_START, new UnsignedWordElement(0xE02F)), //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_2_STOP, new UnsignedWordElement(0xE030)), //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_3_START, new UnsignedWordElement(0xE031)), //
+						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_3_STOP, new UnsignedWordElement(0xE032))), //
 				new FC3ReadRegistersTask(0xE02C, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, new UnsignedWordElement(0xE02C)), //
 						m(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, new UnsignedWordElement(0xE02D)), //
