@@ -36,13 +36,14 @@ public class ScheduleWindowTest {
 		// The exact pair values are queued (start=18:00, stop=23:59), not swapped.
 		assertEquals(Integer.valueOf(4608), sut.queuedStart());
 		assertEquals(Integer.valueOf(5947), sut.queuedStop());
-		// The start+stop pair is queued together (atomic FC16 block).
+		// Start and stop are both queued (each as its own single-register write).
 		assertNotNull(sut.startWriteElement().getNextWriteValueAndReset());
 		assertNotNull(sut.stopWriteElement().getNextWriteValueAndReset());
 		// Enable is NOT queued yet - it is always written after the window verifies.
 		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
 
-		sut.onWindowExecute(ExecuteState.OK);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
 		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
 
 		// Fresh read-back of both registers matches the target -> window verified.
@@ -67,7 +68,8 @@ public class ScheduleWindowTest {
 	void enableIsNeverQueuedWhileWindowStillPending() {
 		var sut = newDischargeWindow();
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
-		sut.onWindowExecute(ExecuteState.OK);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
 		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
 
 		// Reconciling again while the window read-back is still pending must do nothing
@@ -81,7 +83,8 @@ public class ScheduleWindowTest {
 	void partialReadbackFailureNeverEnables() {
 		var sut = newDischargeWindow();
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
-		sut.onWindowExecute(ExecuteState.OK);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
 
 		// Start reads back correctly, stop does not: the whole window fails and the
 		// enable flag is never touched, so the schedule stays disabled (safe).
@@ -98,7 +101,8 @@ public class ScheduleWindowTest {
 	void windowExecuteErrorFailsWithoutRetry() {
 		var sut = newDischargeWindow();
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
-		sut.onWindowExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		sut.onStartExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		sut.onStopExecute(new ExecuteState.Error(new RuntimeException("bus error")));
 		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
 		// No automatic retry.
 		assertNull(sut.reconcile(0, 0, 0, 4608, 5947, 1));
@@ -109,7 +113,8 @@ public class ScheduleWindowTest {
 	void missingWindowReadbackTimesOut() {
 		var sut = newDischargeWindow();
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
-		sut.onWindowExecute(ExecuteState.OK);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
 		for (var i = 1; i < 30; i++) {
 			sut.onCycle(30);
 			assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
@@ -212,7 +217,8 @@ public class ScheduleWindowTest {
 		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
 		assertNotNull(sut.startWriteElement().getNextWriteValueAndReset());
 		assertNotNull(sut.stopWriteElement().getNextWriteValueAndReset());
-		sut.onWindowExecute(ExecuteState.OK);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
 		sut.verifyStart(4608);
 		sut.verifyStop(5947);
 		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
@@ -269,14 +275,15 @@ public class ScheduleWindowTest {
 		sut.verifyEnable(0);
 		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
 
-		// Now disarmed -> the window pair is written atomically.
+		// Now disarmed -> the window pair is written.
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
 		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
 		assertEquals(Integer.valueOf(4608), sut.queuedStart());
 		assertEquals(Integer.valueOf(5947), sut.queuedStop());
 		sut.startWriteElement().getNextWriteValueAndReset();
 		sut.stopWriteElement().getNextWriteValueAndReset();
-		sut.onWindowExecute(ExecuteState.OK);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
 		sut.verifyStart(4608);
 		sut.verifyStop(5947);
 		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
@@ -331,7 +338,8 @@ public class ScheduleWindowTest {
 		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
 		sut.startWriteElement().getNextWriteValueAndReset();
 		sut.stopWriteElement().getNextWriteValueAndReset();
-		sut.onWindowExecute(ExecuteState.OK);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
 		sut.verifyStart(4608);
 		sut.verifyStop(5947);
 		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
@@ -361,5 +369,112 @@ public class ScheduleWindowTest {
 
 		assertEquals("18:00", ScheduleWindow.formatEncodedTime(4608));
 		assertEquals("23:59", ScheduleWindow.formatEncodedTime(5947));
+	}
+
+	// Start and stop are two single-register writes (a two-register FC16 on this
+	// block read back mis-stored on gw-pi2, 2026-09-24, one observation). Read-back
+	// only counts once BOTH executed.
+	@Test
+	void readbackWaitsUntilBothRegistersWritten() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+
+		sut.onStartExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		// A read taken between the two writes must neither verify nor fail the window.
+		sut.verifyStart(4608);
+		sut.verifyStop(0);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+
+		sut.onStopExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
+	}
+
+	@Test
+	void stopWrittenBeforeStartAlsoConverges() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		sut.onStopExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		sut.onStartExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+	}
+
+	@Test
+	void noOpExecuteIsIgnored() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		sut.onStartExecute(ExecuteState.NO_OP);
+		sut.onStopExecute(ExecuteState.NO_OP);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+	}
+
+	@Test
+	void stopWriteErrorAfterStartOkFailsAndNeverEnables() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertNull(sut.reconcile(4608, 0, 0, 4608, 5947, 1));
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void stopWriteErrorFirstDropsPendingStart() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		sut.onStopExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		// The start value (not yet executed) is dropped: nothing written after FAILED.
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void startWriteErrorIsNotRescuedByLaterStopOk() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		sut.onStartExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		// Nothing more may be written once FAILED: the stop value is dropped too.
+		assertNull(sut.stopWriteElement().getNextWriteValueAndReset());
+		sut.onStopExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+	}
+
+	// Regression for the gw-pi2 field result of the old one-frame write: the device
+	// read back start=23:59, stop=00:00. That must fail and never arm.
+	@Test
+	void fieldObservedMisplacedWordFails() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 0);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		sut.verifyStart(5947);
+		sut.verifyStop(0);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	// Recovery from that left-over state after a fresh activation: the device reads
+	// (5947, 0) disabled; the handler rewrites both registers (never arms: enable=0).
+	@Test
+	void freshActivationRewritesLeftoverMisplacedWindow() {
+		var sut = newDischargeWindow();
+		assertNotNull(sut.reconcile(5947, 0, 0, 4608, 5947, 0));
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(4608), sut.queuedStart());
+		assertEquals(Integer.valueOf(5947), sut.queuedStop());
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
 	}
 }

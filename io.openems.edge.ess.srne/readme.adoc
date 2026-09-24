@@ -75,10 +75,18 @@ the machine state is a live-validated running state; every target defaults to
 
 A schedule window is a coherent unit handled by `ScheduleWindow`, governed by one
 invariant: the enable register must read `0` on the device whenever the window
-registers are written. The contiguous start/stop time pair (`0xE026/E027` charge,
-`0xE02D/E02E` discharge, encoded `hour*256+min`) is written as a single atomic
-FC16 block and read-back verified. A currently-armed window is never mutated in
-place: any window change is sequenced disarm -> verify-disabled -> atomic window
+registers are written. The start/stop time pair (`0xE026/E027` charge,
+`0xE02D/E02E` discharge, encoded `hour*256+min`) is written as two separate
+single-register FC16 requests, start then stop, and read-back verified. It is
+NOT one multi-register block: observed once on gw-pi2 (2026-09-24), the frame
+`0xE02D <- [4608, 5947]` read back as `0xE02D=5947`, `0xE02E=0`, although
+protocol V1.7 documents function 10H as supported. Single-register writes are
+known-good on this unit. Writing start first briefly leaves an invalid pair
+(e.g. `18:00..00:00`) on the device; that is harmless while the enable reads
+`0`, but if the inverter validates the pair on write it would answer exception
+code 3 (illegal data value) and the window goes `FAILED` (safe). Check for this
+on the first live window write. A currently-armed window is never mutated in
+place: any window change is sequenced disarm -> verify-disabled -> window
 write -> verify-window -> re-arm. The enable flag (`0xE02C` charge, `0xE033`
 discharge) is the last step; the desired end-enable is captured once, so leaving
 enable unmanaged (`-1`) on an armed device disarms, rewrites and restores the

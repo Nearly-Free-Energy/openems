@@ -619,4 +619,31 @@ public class SrneBatteryInverterImplTest {
 		}
 		assertEquals(addresses, read);
 	}
+
+	// Regression guard for the gw-pi2 field failure (2026-09-24): one FC16 task with
+	// two contiguous window elements is merged by the bridge into a single
+	// two-register frame, which read back mis-stored on gw-pi2 (one observation).
+	// Each window register must be its own single-register write task, so the
+	// frames can never be merged.
+	@Test
+	public void testWindowRegistersAreSeparateSingleRegisterWrites() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var windowAddresses = Set.of(0xE026, 0xE027, 0xE02D, 0xE02E);
+		var found = new HashSet<Integer>();
+		for (var task : sut.defineModbusProtocol().getTaskManager().getTasks()) {
+			if (task instanceof WriteTask) {
+				// No write task may start at, or span across, a window register pair.
+				for (var address : windowAddresses) {
+					var covers = address >= task.getStartAddress()
+							&& address < task.getStartAddress() + task.getLength();
+					if (covers) {
+						assertEquals(address, task.getStartAddress());
+						assertEquals(1, task.getLength());
+						found.add(address);
+					}
+				}
+			}
+		}
+		assertEquals(windowAddresses, found);
+	}
 }
