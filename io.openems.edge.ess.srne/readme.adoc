@@ -125,10 +125,15 @@ is necessary but NOT sufficient to arm a schedule enable: it shows what the
 registers hold, not what the firmware does with an empty section, and an "all
 day" interpretation would discharge around the clock. Arming stays blocked until
 there is evidence that equal zero endpoints disable a section on the target
-firmware, for example vendor confirmation, or a supervised test: arm in daylight
-with the grid present and window 1 outside the current time, and confirm the
-unit does not discharge, with the disarm profile ready. Nothing in this driver
-enforces that gate; it is a commissioning rule.
+firmware: vendor confirmation, or a supervised two-step test in daylight with
+the grid present, the disarm profile ready, and the output priority (`0xE204`)
+unchanged between the steps. First a positive control: arm with window 1
+covering the current time and confirm the unit does discharge; this proves
+scheduled discharge works in that mode. Then set window 1 outside the current
+time with sections 2/3 at `00:00-00:00` and confirm it does not. A "no
+discharge" result without the positive control proves nothing, because the
+mode itself might suppress scheduled discharge. Nothing in this driver enforces
+that gate; it is a commissioning rule.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)

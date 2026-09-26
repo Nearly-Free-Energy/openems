@@ -216,6 +216,8 @@ public class SrneBatteryInverterImplTest {
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_3_START, 0) //
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_3_STOP, 0) //
 						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_START, 0) //
+						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_STOP, 0) //
+						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_3_START, 0) //
 						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_3_STOP, 0) //
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
 				// Every cycle re-runs reconcile; it must stay a single one-shot QUEUED.
