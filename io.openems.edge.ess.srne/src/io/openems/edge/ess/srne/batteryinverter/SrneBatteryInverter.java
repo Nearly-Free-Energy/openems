@@ -46,6 +46,18 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Discharge window 1 start, encoded hour*256+min (0xE02D)")), //
 		DISCHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
 				.text("Discharge window 1 stop, encoded hour*256+min (0xE02E)")), //
+		// Schedule sections 2 and 3 (read-only, never written by this driver). They
+		// show the register contents only: a 00:00-00:00 read-back does not prove the
+		// firmware treats an empty section as disabled rather than "all day", so it
+		// is not by itself sufficient to arm a schedule enable (see readme).
+		CHARGE_WINDOW_2_START(Doc.of(OpenemsType.INTEGER).text("Charge window 2 start, hour*256+min (0xE028)")), //
+		CHARGE_WINDOW_2_STOP(Doc.of(OpenemsType.INTEGER).text("Charge window 2 stop, hour*256+min (0xE029)")), //
+		CHARGE_WINDOW_3_START(Doc.of(OpenemsType.INTEGER).text("Charge window 3 start, hour*256+min (0xE02A)")), //
+		CHARGE_WINDOW_3_STOP(Doc.of(OpenemsType.INTEGER).text("Charge window 3 stop, hour*256+min (0xE02B)")), //
+		DISCHARGE_WINDOW_2_START(Doc.of(OpenemsType.INTEGER).text("Discharge window 2 start, hour*256+min (0xE02F)")), //
+		DISCHARGE_WINDOW_2_STOP(Doc.of(OpenemsType.INTEGER).text("Discharge window 2 stop, hour*256+min (0xE030)")), //
+		DISCHARGE_WINDOW_3_START(Doc.of(OpenemsType.INTEGER).text("Discharge window 3 start, hour*256+min (0xE031)")), //
+		DISCHARGE_WINDOW_3_STOP(Doc.of(OpenemsType.INTEGER).text("Discharge window 3 stop, hour*256+min (0xE032)")), //
 		// Schedule enable flags: 0 disabled, 1 enabled. Written last, only after the
 		// matching window pair is read-back verified (0xE02C charge, 0xE033 discharge).
 		CHARGE_SCHEDULE_ENABLE(Doc.of(OpenemsType.INTEGER) //

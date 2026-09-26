@@ -193,6 +193,8 @@ public class SrneBatteryInverterImplTest {
 						.withRegisters(0xE033, 0, 0, 0, 0) // discharge enable off; RTC
 						.withRegisters(0x0101, 524, 0) //
 						.withRegisters(0xE00B, 504, 440, 488, 448) // voltage cut-offs (x4 of V1.7)
+						.withRegisters(0xE028, 0, 0, 0, 0) // charge sections 2/3 empty
+						.withRegisters(0xE02F, 0, 0, 0, 0) // discharge sections 2/3 empty
 						.withRegister(0xE010, 60) //
 						.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue())) //
 				.activate(MyConfig.create() //
@@ -204,9 +206,19 @@ public class SrneBatteryInverterImplTest {
 						.setDischargeWindow1Start(4608) // 18:00
 						.setDischargeWindow1Stop(5947) // 23:59 (end of day; no 24:00)
 						.build()) //
-				.next(new TestCase(), 12) // >= number of LOW read tasks (10; E033 is last), one per cycle
+				.next(new TestCase(), 14) // >= number of LOW read tasks (12; E033 is last), one per cycle
 				.next(new TestCase() //
 						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, 0) //
+						// Sections 2/3 are exposed and read back (register contents only; this
+						// does not test firmware semantics or enforce an arming interlock)
+						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_2_START, 0) //
+						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_2_STOP, 0) //
+						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_3_START, 0) //
+						.output(SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_3_STOP, 0) //
+						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_START, 0) //
+						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_STOP, 0) //
+						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_3_START, 0) //
+						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_3_STOP, 0) //
 						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, SafeWriteHandler.State.QUEUED)) //
 				// Every cycle re-runs reconcile; it must stay a single one-shot QUEUED.
 				.next(new TestCase(), 5) //
@@ -585,13 +597,14 @@ public class SrneBatteryInverterImplTest {
 		test.deactivate();
 	}
 
-	// The battery-voltage protection thresholds are READ-ONLY: every register
-	// E00B-E00E and E010 must be covered by a read task, and by no write task.
+	// The battery-voltage protection thresholds and schedule sections 2/3 are
+	// READ-ONLY: each register must be covered by a read task, and by no write task.
 	// E00F stays in its own single-register read (safe-write verification).
 	@Test
-	public void testVoltageCutoffRegistersAreReadOnly() throws Exception {
+	public void testDiagnosticRegistersAreReadOnly() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var addresses = Set.of(0xE00B, 0xE00C, 0xE00D, 0xE00E, 0xE010);
+		var addresses = Set.of(0xE00B, 0xE00C, 0xE00D, 0xE00E, 0xE010, // voltage cut-offs
+				0xE028, 0xE029, 0xE02A, 0xE02B, 0xE02F, 0xE030, 0xE031, 0xE032); // sections 2/3
 		var read = new HashSet<Integer>();
 		for (var task : sut.defineModbusProtocol().getTaskManager().getTasks()) {
 			for (var address : addresses) {
