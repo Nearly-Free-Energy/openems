@@ -363,6 +363,21 @@ final class ScheduleWindow {
 		}
 	}
 
+	/**
+	 * Re-opens a converged window so a changed effective enable target is driven
+	 * through the normal verified path. Only a settled ({@code DONE}) window is
+	 * re-opened; a running or failed sequence is left alone.
+	 *
+	 * @return true if the window was re-opened
+	 */
+	public synchronized boolean reopen() {
+		if (this.state != State.DONE) {
+			return false;
+		}
+		this.state = State.IDLE;
+		return true;
+	}
+
 	public synchronized State getState() {
 		return this.state;
 	}

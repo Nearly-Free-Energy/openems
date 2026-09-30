@@ -87,6 +87,12 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Limited discharge voltage, load cut off immediately (0xE00E)")), //
 		OVER_DISCHARGE_DELAY(Doc.of(OpenemsType.INTEGER).unit(Unit.SECONDS) //
 				.text("Over-discharge delay (0xE010)")), //
+		BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
+				.text("Battery state of charge (0x0100); read only when a discharge SoC rule is configured")), //
+		DISCHARGE_SUPPRESSED(Doc.of(OpenemsType.BOOLEAN) //
+				.text("Discharge schedule held disabled by the start-threshold or floor rule")), //
+		DISCHARGE_SUPPRESSION_REASON(Doc.of(DischargeSuppressionReason.values()) //
+				.text("Why the discharge schedule is held disabled")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 
