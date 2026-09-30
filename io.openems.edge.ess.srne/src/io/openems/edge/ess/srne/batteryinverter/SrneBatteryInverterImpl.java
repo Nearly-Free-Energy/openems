@@ -69,10 +69,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable, EventHandler, ClockProvider {
 	private static final int READBACK_TIMEOUT_CYCLES = 30;
 	private static final String DEFAULT_SCHEDULE_ZONE = "Africa/Kampala";
-	// A failed discharge-window write is retried after this many cycles; a failed
-	// suppress is retried at most MAX_SUPPRESS_RETRIES times, a failed restore always.
+	// A failed discharge-window write is retried after a cooldown and never given
+	// up on until the target changes. A failed suppress (enable=0) is retried fast
+	// for MAX_FAST_SUPPRESS_RETRIES attempts, then at the slow cadence; a failed
+	// restore (enable=1) always uses the slow cadence.
 	private static final int FAILED_RETRY_COOLDOWN_CYCLES = 60;
-	private static final int MAX_SUPPRESS_RETRIES = 3;
+	private static final int SUPPRESS_RETRY_COOLDOWN_CYCLES = 8;
+	private static final int MAX_FAST_SUPPRESS_RETRIES = 3;
 	private final Logger log = LoggerFactory.getLogger(SrneBatteryInverterImpl.class);
 
 	private final AtomicReference<TargetGridMode> targetGridMode = new AtomicReference<>(TargetGridMode.GO_ON_GRID);
@@ -514,8 +517,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	 * The enable target handed to the verified-write path: the configured value,
 	 * or 0 while the discharge is suppressed. A settled or failed window is
 	 * re-opened when the target changes so the change goes through the same
-	 * verified write; a failed window is also retried after a cooldown (a failed
-	 * suppress a bounded number of times, a failed restore without limit), and a
+	 * verified write; a failed window is also retried after a cooldown without
+	 * limit (a failed suppress quickly at first, then slowly), and a
 	 * drifted enable register is corrected once per window.
 	 *
 	 * @return the enable target for the discharge window
@@ -560,10 +563,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.failedCycles = 0;
 			return;
 		}
-		if (++this.failedCycles < FAILED_RETRY_COOLDOWN_CYCLES) {
-			return;
-		}
-		if (target == 0 && this.suppressRetries >= MAX_SUPPRESS_RETRIES) {
+		var fast = target == 0 && this.suppressRetries < MAX_FAST_SUPPRESS_RETRIES;
+		if (++this.failedCycles < (fast ? SUPPRESS_RETRY_COOLDOWN_CYCLES : FAILED_RETRY_COOLDOWN_CYCLES)) {
 			return;
 		}
 		if (this.dischargeWindow.reopen()) {

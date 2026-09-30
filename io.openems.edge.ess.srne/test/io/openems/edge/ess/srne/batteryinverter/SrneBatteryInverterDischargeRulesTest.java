@@ -296,7 +296,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	@Test
-	public void testFailedSuppressIsRetriedBoundedAndRestoreStillHappens() throws Exception {
+	public void testFailedSuppressKeepsRetryingPastTheFastCapUntilItSucceeds() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		var clock = clockAt("2026-01-10T18:05:00Z");
 		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS);
@@ -307,23 +307,25 @@ public class SrneBatteryInverterDischargeRulesTest {
 		test.next(new TestCase(), CYCLES);
 		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
 
+		// Fast cadence: each failed suppress is retried within a short cooldown.
 		for (var i = 0; i < 3; i++) {
 			sut.dischargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+			test.next(new TestCase(), 2);
+			assertEquals(State.FAILED, sut.dischargeWindowStateForTest());
+			test.next(new TestCase(), CYCLES);
+			assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		}
+		// Past the fast cap the retry continues at the slow cadence, never stops.
+		for (var i = 0; i < 3; i++) {
+			sut.dischargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+			test.next(new TestCase(), CYCLES);
+			assertEquals(State.FAILED, sut.dischargeWindowStateForTest());
 			test.next(new TestCase(), RETRY_CYCLES);
 			assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
 		}
-		// Retries are capped: the suppress stays failed (discharge stays allowed).
-		sut.dischargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
-		test.next(new TestCase(), 3 * RETRY_CYCLES);
-		assertEquals(State.FAILED, sut.dischargeWindowStateForTest());
-		assertSuppression(sut, false, DischargeSuppressionReason.FLOOR_REACHED);
-
-		// A new target (window over) is never blocked by the cap.
-		test.next(new TestCase().timeleap(clock, 2, ChronoUnit.HOURS));
-		test.next(new TestCase(), CYCLES);
-		// The suppress never reached the device (E033 still 1), so the restore needs no write.
+		deviceWritesEnable(sut, bridge, test, 0);
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
-		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
 	}
 
 	@Test
