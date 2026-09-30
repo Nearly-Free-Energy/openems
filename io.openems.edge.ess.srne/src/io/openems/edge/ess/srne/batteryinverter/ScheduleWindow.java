@@ -236,6 +236,7 @@ final class ScheduleWindow {
 			this.stopVerified = false;
 			this.startWrite.setNextWriteValue(cfgStart);
 			this.stopWrite.setNextWriteValue(cfgStop);
+			this.awaitingReadbackCycles = 0;
 			this.state = State.WINDOW_QUEUED;
 			return "Queued one-shot [" + this.label + "] window write to [" + formatEncodedTime(cfgStart) + ".."
 					+ formatEncodedTime(cfgStop) + "]";
@@ -251,6 +252,7 @@ final class ScheduleWindow {
 	private String queueEnable(int value) {
 		this.targetEnable = value;
 		this.enableWrite.setNextWriteValue(value);
+		this.awaitingReadbackCycles = 0;
 		this.state = value == 0 ? State.DISABLE_QUEUED : State.ENABLE_QUEUED;
 		return "Queued one-shot [" + this.label + "] schedule enable=" + value
 				+ (value == 0 ? " (disarm before window change)" : " (after window verified)");
@@ -352,9 +354,12 @@ final class ScheduleWindow {
 	}
 
 	/**
-	 * Advances the bounded read-back wait without ever retrying a write.
+	 * Advances the bounded waits without ever retrying a write. Both a queued write
+	 * the bridge never executes and a read-back that never arrives end in
+	 * {@code FAILED}; a queued write is withdrawn so it cannot fire late.
 	 *
-	 * @param timeoutCycles number of Edge cycles allowed for a fresh read-back
+	 * @param timeoutCycles number of Edge cycles allowed for an execute or a fresh
+	 *                      read-back
 	 */
 	public synchronized void onCycle(int timeoutCycles) {
 		switch (this.state) {
@@ -363,10 +368,35 @@ final class ScheduleWindow {
 				this.state = State.FAILED;
 			}
 		}
+		case DISABLE_QUEUED, WINDOW_QUEUED, ENABLE_QUEUED -> {
+			if (++this.awaitingReadbackCycles >= timeoutCycles) {
+				this.state = State.FAILED;
+				this.startWrite.setNextWriteValue(null);
+				this.stopWrite.setNextWriteValue(null);
+				this.enableWrite.setNextWriteValue(null);
+			}
+		}
 		default -> {
-			// only the read-back waits are bounded
+			// settled states are not bounded
 		}
 		}
+	}
+
+	/**
+	 * Disarms the schedule without touching the window: the only write the caller
+	 * may make while the unit's machine state is not verified. Acts only from
+	 * {@code IDLE} and only if the device is known to be armed; the window itself
+	 * is left to the normal path.
+	 *
+	 * @param actualEnable the read-back enable register, or null if unknown
+	 * @return a one-shot audit message, or null if nothing was queued
+	 */
+	public synchronized String disarmOnly(Integer actualEnable) {
+		if (this.state != State.IDLE || actualEnable == null || actualEnable.equals(0)) {
+			return null;
+		}
+		this.desiredEnable = 0;
+		return this.queueEnable(0);
 	}
 
 	/**

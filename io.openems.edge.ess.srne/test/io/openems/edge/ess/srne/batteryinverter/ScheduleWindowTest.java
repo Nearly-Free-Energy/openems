@@ -124,15 +124,45 @@ public class ScheduleWindowTest {
 	}
 
 	@Test
-	void queuedWindowDoesNotTimeOutBeforeExecute() {
+	void queuedWindowTimesOutIfTheBridgeNeverExecutesIt() {
 		var sut = newDischargeWindow();
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
-		// onCycle only bounds the read-back wait; a queued-but-not-executed write must
-		// not time out.
-		for (var i = 0; i < 60; i++) {
+		for (var i = 1; i < 30; i++) {
 			sut.onCycle(30);
+			assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
 		}
-		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		sut.onCycle(30);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		// The withdrawn write can no longer fire late, and the failure is retryable.
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.stopWriteElement().getNextWriteValueAndReset());
+		assertTrue(sut.isRetryableFailure());
+		assertTrue(sut.reopen());
+	}
+
+	@Test
+	void queuedEnableTimesOutAndWithdrawsTheWrite() {
+		var sut = newDischargeWindow();
+		sut.reconcile(5376, 5888, 1, 5376, 5888, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		sut.onCycle(2);
+		sut.onCycle(2);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		assertTrue(sut.reopen());
+	}
+
+	@Test
+	void disarmOnlyQueuesTheDisableFromIdleOnlyForAnArmedDevice() {
+		var sut = newDischargeWindow();
+		assertNull(sut.disarmOnly(null));
+		assertNull(sut.disarmOnly(0));
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+		assertNotNull(sut.disarmOnly(1));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.disarmOnly(1));
 	}
 
 	@Test

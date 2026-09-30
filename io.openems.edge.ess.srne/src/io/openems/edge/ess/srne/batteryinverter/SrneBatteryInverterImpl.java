@@ -116,6 +116,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private int failedCycles;
 	private int suppressRetries;
 	private boolean driftCorrected;
+	private int driftCooldown;
 	private boolean mismatchLogged;
 	// One-shot audit flag: log at most once that the output-priority write is held
 	// pending its prerequisites (reconcile runs every cycle).
@@ -434,6 +435,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		MachineState machineState = this.getMachineStateChannel().value().asEnum();
 		if (machineState == null || !machineState.isVerified()) {
+			this.reconcileDisarmUnverified();
 			return;
 		}
 
@@ -466,6 +468,23 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 	}
 
+	// Only the disarm of the discharge schedule bypasses the verified machine-state
+	// gate: E033 is a plain holding-register write and disarming only reduces the
+	// exposure. Arming, restoring and every window write still wait for state 2.
+	private void reconcileDisarmUnverified() {
+		if (!this.dischargeRulesApply()) {
+			return;
+		}
+		if (this.effectiveDischargeEnable() != 0) {
+			return;
+		}
+		var message = this.dischargeWindow
+				.disarmOnly(this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE));
+		if (message != null) {
+			this.logWarn(this.log, message + "; machine state is not verified, disarm only");
+		}
+	}
+
 	// Fail open: an out-of-range threshold or an incoherent pair turns the affected
 	// rule(s) off, so a typo can never suppress every night unattended.
 	private DischargeGuard createDischargeGuard(Config config) {
@@ -473,8 +492,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		var floorSoc = this.validRuleThreshold("dischargeFloorSoc", config.dischargeFloorSoc());
 		if (startMinSoc >= 0 && floorSoc >= 0 && floorSoc >= startMinSoc) {
 			this.logError(this.log, "dischargeFloorSoc [" + floorSoc + "] must be below dischargeStartMinSoc ["
-					+ startMinSoc + "]; both discharge rules are off");
-			return new DischargeGuard(-1, -1);
+					+ startMinSoc + "]; the start rule is off, the floor rule stays on");
+			return new DischargeGuard(-1, floorSoc);
 		}
 		return new DischargeGuard(startMinSoc, floorSoc);
 	}
@@ -562,9 +581,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		var suppressed = this.dischargeGuard.evaluateCurrent() != DischargeSuppressionReason.NONE;
 		int effective = suppressed ? 0 : configured;
+		if (!suppressed && this.dischargeGuard.isHoldingArm()
+				&& Integer.valueOf(0).equals(this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE))) {
+			// A candidate is unconfirmed or SoC is not yet known: never newly arm.
+			effective = 0;
+		}
 		if (this.appliedDischargeEnable == null) {
 			this.appliedDischargeEnable = effective;
-		} else if (this.appliedDischargeEnable != effective && this.dischargeWindow.reopen()) {
+		} else if (this.appliedDischargeEnable != effective
+				&& (this.dischargeWindow.getState() == ScheduleWindow.State.IDLE || this.dischargeWindow.reopen())) {
 			this.logInfo(this.log, "Discharge schedule enable target changed to [" + effective + "]");
 			this.appliedDischargeEnable = effective;
 			this.suppressRetries = 0;
@@ -579,15 +604,24 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	private void retryOrCorrect(int target) {
 		var state = this.dischargeWindow.getState();
+		if (this.driftCooldown > 0) {
+			this.driftCooldown--;
+		}
 		if (state == ScheduleWindow.State.DONE) {
 			this.suppressRetries = 0;
 			this.failedCycles = 0;
 			var actual = this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
-			if (this.dischargeGuard.isInsideWindow() && !this.driftCorrected && actual != null && actual != target
-					&& this.dischargeWindow.reopen()) {
-				this.driftCorrected = true;
-				this.logWarn(this.log,
-						"Discharge schedule enable drifted to [" + actual + "], target [" + target + "]; correcting once");
+			if (this.dischargeGuard.isInsideWindow() && actual != null && actual != target) {
+				// While suppressed the correction is unlimited but rate-limited; otherwise
+				// it is allowed once per window.
+				var suppressed = target == 0;
+				var due = suppressed ? this.driftCooldown == 0 : !this.driftCorrected;
+				if (due && this.dischargeWindow.reopen()) {
+					this.driftCorrected = true;
+					this.driftCooldown = FAILED_RETRY_COOLDOWN_CYCLES;
+					this.logWarn(this.log, "Discharge schedule enable drifted to [" + actual + "], target [" + target
+							+ "]; correcting" + (suppressed ? "" : " once"));
+				}
 			}
 			return;
 		}

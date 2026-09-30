@@ -46,6 +46,7 @@ final class DischargeGuard {
 	private LocalDate dwellDate;
 	private boolean lowStartUsed;
 	private boolean restoredThisDate;
+	private boolean usableSocSeen;
 	private boolean unusableSocSeen;
 	private boolean unusableSocWarned;
 	private boolean clockStepPending;
@@ -70,6 +71,18 @@ final class DischargeGuard {
 	 */
 	boolean isInsideWindow() {
 		return this.insideWindow;
+	}
+
+	/**
+	 * Whether the schedule must not be newly armed right now: inside the window,
+	 * nothing latched yet, and either a candidate is awaiting its confirmation or no
+	 * usable SoC has been read yet in this window.
+	 *
+	 * @return true if arming must be held back
+	 */
+	boolean isHoldingArm() {
+		return this.isActive() && this.insideWindow && this.reason == DischargeSuppressionReason.NONE
+				&& (this.pending != DischargeSuppressionReason.NONE || !this.usableSocSeen);
 	}
 
 	/**
@@ -131,6 +144,7 @@ final class DischargeGuard {
 			this.pending = DischargeSuppressionReason.NONE;
 			this.pendingCount = 0;
 			this.startPassed = false;
+			this.usableSocSeen = false;
 			this.unusableSocSeen = false;
 			this.unusableSocWarned = false;
 			return this.reason;
@@ -142,6 +156,7 @@ final class DischargeGuard {
 			this.pendingCount = 0;
 			return this.reason;
 		}
+		this.usableSocSeen = true;
 		if (this.reason != DischargeSuppressionReason.NONE) {
 			return this.reason;
 		}

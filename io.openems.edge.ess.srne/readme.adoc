@@ -177,11 +177,30 @@ is not.
 * Drift: if `0xE033` reads a value other than the target after the write settled,
   inside the window, it is corrected once per window (the allowance is renewed for
   the next window). This also reverts a manual disarm made in the window, once.
+  While a suppression is latched the correction is unlimited instead, rate-limited
+  to one per 60 cycles, so a later drift back to 1 below the floor is always undone.
+* No new arm before the decision is safe: inside the window, while a floor/start
+  candidate is still awaiting its second confirming cycle, or before the first usable
+  SoC reading of the window, a device that reads `0xE033=0` is held at 0 (no
+  `0xE033=1` is queued). A device already armed is left as it is. If the SoC is
+  never readable in the window, a disarmed device therefore stays disarmed for that
+  window (a warning is logged).
+* Verified machine state: all settings and window writes still require
+  `MachineState` 2 (the only live-validated value). The single exception is the
+  disarm (`0xE033=0`) of a latched suppression, which is sent in any other
+  state (for example 5 `INVERTER_POWERED` or 7 `MAINS_TO_INVERTER`), because it is a
+  plain holding-register write, is the exposure-reducing direction and would otherwise
+  leave the unit discharging below the floor. Restore, arm and window writes wait
+  for state 2. Residual risk: how the unit behaves when the schedule is disarmed
+  while off-grid is unconfirmed. Before enabling the floor, confirm on the live unit
+  which `MachineState` is reported during the 21:00-23:00 discharge.
+* Queued writes: a schedule write that the bridge never executes fails after 30
+  cycles (the pending value is withdrawn) and the normal retry takes over.
 * Threshold validation: `dischargeStartMinSoc` and `dischargeFloorSoc` must be in
   `0..99` (or `-1` = off). A value outside that range is logged as an error and only
   that rule is off. When both are set, `dischargeFloorSoc` must be below
-  `dischargeStartMinSoc`; otherwise an error is logged and both rules are off, i.e.
-  the normal schedule runs.
+  `dischargeStartMinSoc`; otherwise an error is logged, the start rule is turned off
+  and the floor (the safety rule) stays on.
 * Inert rules: on activation a warning is logged if a rule is configured but cannot act
   (`controlEnabled=false`, `dischargeScheduleEnable` not `1`, or the discharge window
   unset).
@@ -200,9 +219,9 @@ permanent suppress):
   the floor.
 * A restart within the first 10 minutes can latch `LOW_START` from a partly discharged
   SoC that would have passed at the window start.
-* After a restart within the first 10 minutes while `0xE033` is still 0 from a skip, the
-  decision needs two confirming cycles before it latches, so a restore may be queued and
-  completed first and the disarm follows; the schedule can be armed briefly.
+* After a restart while `0xE033` is still 0, the decision needs two confirming cycles
+  before it latches; during that time the disarmed device is held at 0 and never armed
+  first (see "No new arm" above).
 * If the SoC is unknown for the whole window there is no floor protection (a single
   warning is logged).
 * The in-window drift correction reverts a manual disarm once per window.

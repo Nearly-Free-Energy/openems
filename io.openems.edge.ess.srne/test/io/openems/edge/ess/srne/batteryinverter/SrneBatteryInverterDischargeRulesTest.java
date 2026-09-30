@@ -186,19 +186,144 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	@Test
-	public void testOutageDefersWriteUntilStateTwoReturns() throws Exception {
+	public void testOutageOnlyLetsTheDisarmThroughUntilStateTwoReturns() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var bridge = bridge(60, MachineState.INVERTER_POWERED);
 		final var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
 				.next(new TestCase(), CYCLES);
-		// Decision is visible, but nothing is written during the outage.
+		// The disarm is the only write that bypasses the verified-state gate.
 		assertSuppression(sut, false, DischargeSuppressionReason.LOW_START);
-		assertNull(sut.dischargeQueuedEnableForTest());
-		assertEquals(State.IDLE, sut.dischargeWindowStateForTest());
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DISABLE_VERIFIED, sut.dischargeWindowStateForTest());
 
+		// Verified again: the sequence completes normally.
 		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
 		test.next(new TestCase(), CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+	}
+
+	@Test
+	public void testUnverifiedStateNeverArmsOrWritesTheWindow() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE02C, 0, 0, 0) //
+				.withRegisters(0xE033, 0, 0, 0, 0) //
+				.withRegisters(0x0100, 80) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.dischargeQueuedEnableForTest());
+		assertEquals(State.IDLE, sut.dischargeWindowStateForTest());
+	}
+
+	@Test
+	public void testFloorDisarmGoesThroughForMachineStatesFiveAndSeven() throws Exception {
+		for (var state : new MachineState[] { MachineState.INVERTER_POWERED, MachineState.MAINS_TO_INVERTER }) {
+			var sut = new SrneBatteryInverterImpl();
+			start(sut, bridge(40, state), clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+					.next(new TestCase(), CYCLES);
+			assertSuppression(sut, false, DischargeSuppressionReason.FLOOR_REACHED);
+			assertEquals(0, sut.dischargeQueuedEnableForTest(), state.name());
+			assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest(), state.name());
+		}
+	}
+
+	@Test
+	public void testRestartDisarmedAtOrBelowFloorNeverQueuesAnArm() throws Exception {
+		for (var soc : new int[] { 45, 30 }) {
+			var sut = new SrneBatteryInverterImpl();
+			// Restart inside the window: the device already reads enable=0.
+			var bridge = bridge(soc, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0);
+			var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build());
+			for (var i = 0; i < 4; i++) {
+				test.next(new TestCase(), CYCLES);
+				assertNull(sut.dischargeQueuedEnableForTest(), "soc " + soc);
+			}
+			assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+			assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+		}
+	}
+
+	@Test
+	public void testUnknownSocAtFirstReconcileDoesNotArmUntilSocIsKnown() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE02C, 0, START, STOP) //
+				.withRegisters(0xE033, 0, 0, 0, 0) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		final var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.getBatterySocForTest());
+		assertNull(sut.dischargeQueuedEnableForTest());
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+
+		// A usable, healthy SoC lets the configured arm through.
+		bridge.withRegisters(0x0100, 80);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testFloorNotBelowStartKeepsTheFloorAndDropsTheStartRule() throws Exception {
+		for (var pair : new int[][] { { 50, 50 }, { 45, 75 } }) {
+			var atFloor = new SrneBatteryInverterImpl();
+			start(atFloor, bridge(pair[1], MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+					config(pair[0], pair[1]).build()) //
+					.next(new TestCase(), CYCLES);
+			assertSuppression(atFloor, false, DischargeSuppressionReason.FLOOR_REACHED);
+			assertEquals(0, atFloor.dischargeQueuedEnableForTest());
+
+			// Above the floor the (dropped) start rule must not suppress.
+			var above = new SrneBatteryInverterImpl();
+			start(above, bridge(pair[1] + 1, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+					config(pair[0], pair[1]).build()) //
+					.next(new TestCase(), CYCLES);
+			assertSuppression(above, false, DischargeSuppressionReason.NONE);
+			assertNull(above.dischargeQueuedEnableForTest());
+		}
+	}
+
+	@Test
+	public void testDriftBackToArmedAfterFloorLatchIsCorrectedRepeatedly() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+
+		// The register drifts back to 1: corrected, and again after the next drift.
+		for (var round = 0; round < 3; round++) {
+			bridge.withRegisters(0xE033, 1);
+			test.next(new TestCase(), RETRY_CYCLES);
+			assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest(), "round " + round);
+			assertEquals(0, sut.dischargeQueuedEnableForTest());
+			deviceWritesEnable(sut, bridge, test, 0);
+			assertEquals(State.DONE, sut.dischargeWindowStateForTest(), "round " + round);
+		}
+	}
+
+	@Test
+	public void testQueuedSuppressThatIsNeverExecutedFailsAndIsRetried() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		// The bridge never executes the write: it must fail and then be queued again.
+		var sawFailed = false;
+		for (var i = 0; i < 60 && !sawFailed; i++) {
+			test.next(new TestCase());
+			sawFailed = sut.dischargeWindowStateForTest() == State.FAILED;
+		}
+		assertTrue(sawFailed);
+		test.next(new TestCase(), RETRY_CYCLES);
 		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		assertTrue(sut.dischargeWindowStateForTest() != State.IDLE);
 	}
 
 	// Task list of the component without any rule, in registration order. The rules
@@ -343,7 +468,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 		// The window ends while the disarm is still in flight: reopen is refused, the
 		// running sequence is not disturbed.
 		test.next(new TestCase().timeleap(clock, 2, ChronoUnit.HOURS));
-		test.next(new TestCase(), CYCLES);
+		test.next(new TestCase(), 8); // stays below the queued-write timeout
 		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
 		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
 		assertEquals(0, sut.dischargeQueuedEnableForTest());
@@ -536,16 +661,11 @@ public class SrneBatteryInverterDischargeRulesTest {
 		var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0);
 		var test = start(sut, bridge, clockAt("2026-01-10T18:08:00Z"), config(75, 45).build()) //
 				.next(new TestCase(), CYCLES);
-		// The decision is latched after two confirmations; the restore queued before that
-		// (device still 0, decision still NONE) runs to completion first, then the
-		// disarm follows (documented brief re-arm after such a restart).
+		// The decision is latched after two confirmations; until then the disarmed device
+		// is held at 0 and never armed first.
 		assertEquals(DischargeSuppressionReason.LOW_START,
 				sut.getDischargeSuppressionReasonChannelForTest().value().asEnum());
-		assertEquals(1, sut.dischargeQueuedEnableForTest());
-		deviceWritesEnable(sut, bridge, test, 1);
-		test.next(new TestCase(), CYCLES);
-		assertEquals(0, sut.dischargeQueuedEnableForTest());
-		deviceWritesEnable(sut, bridge, test, 0);
+		assertNull(sut.dischargeQueuedEnableForTest());
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
 		assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
 
@@ -576,7 +696,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 		// {startMin, floor}: each row must leave the discharge rules off (or the invalid
 		// rule off) so a low SoC never suppresses the night.
 		for (var pair : new int[][] { { 100, -1 }, { 150, -1 }, { -1, 100 }, { -1, 120 }, { -5, -1 }, { -1, -7 },
-				{ 50, 50 }, { 45, 75 }, { 100, 100 } }) {
+				{ 100, 100 } }) {
 			var sut = new SrneBatteryInverterImpl();
 			start(sut, bridge(10, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
 					config(pair[0], pair[1]).build()) //
