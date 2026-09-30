@@ -182,9 +182,10 @@ is not.
 * No new arm before the decision is safe: inside the window, while a floor/start
   candidate is still awaiting its second confirming cycle, or before the first usable
   SoC reading of the window, a device that reads `0xE033=0` is held at 0 (no
-  `0xE033=1` is queued). A device already armed is left as it is. If the SoC is
-  never readable in the window, a disarmed device therefore stays disarmed for that
-  window (a warning is logged).
+  `0xE033=1` is queued). A device already armed is left as it is. The wait for the
+  first usable SoC is capped at 10 minutes of window time (wall clock, a clock step
+  of more than 5 minutes is not counted); after that the hold is released and the
+  configured enable applies (fail open, a warning is logged once).
 * Verified machine state: all settings and window writes still require
   `MachineState` 2 (the only live-validated value). The single exception is the
   disarm (`0xE033=0`) of a latched suppression, which is sent in any other
@@ -194,8 +195,11 @@ is not.
   for state 2. Residual risk: how the unit behaves when the schedule is disarmed
   while off-grid is unconfirmed. Before enabling the floor, confirm on the live unit
   which `MachineState` is reported during the 21:00-23:00 discharge.
-* Queued writes: a schedule write that the bridge never executes fails after 30
-  cycles (the pending value is withdrawn) and the normal retry takes over.
+* Queued writes: for the rules-managed discharge window only, a schedule write that
+  the bridge never executes fails after 30 cycles (the pending value is withdrawn)
+  and the normal retry takes over. The charge window and a discharge window with both
+  rules off keep the original behaviour: a write queued while the link is down
+  executes when it returns.
 * Threshold validation: `dischargeStartMinSoc` and `dischargeFloorSoc` must be in
   `0..99` (or `-1` = off). A value outside that range is logged as an error and only
   that rule is off. When both are set, `dischargeFloorSoc` must be below
@@ -210,6 +214,18 @@ is not.
   is written. The SoC read task (`0x0100`) is added whenever a valid rule is set,
   independent of `controlEnabled`.
 
+*Review round 4*
+
+* Queued-write timeout only for the rules-managed discharge window; the charge window
+  and the rules-off discharge window are exactly as before the rules existed.
+* Arm hold without a usable SoC is capped at 10 minutes, then fails open; the warning
+  text says what actually happens.
+* While a window sequence is in progress the desired end enable state follows the
+  current target, so a guard latch during the sequence is not undone by a stale
+  value. An unmanaged enable (`-1`) still restores the state captured at the start.
+* Drift correction while suppressed no longer consumes the single correction allowed
+  in a non-suppressed state.
+
 *Fail-open trade-offs* (deliberate; the normal schedule is preferred over a silent
 permanent suppress):
 
@@ -222,8 +238,9 @@ permanent suppress):
 * After a restart while `0xE033` is still 0, the decision needs two confirming cycles
   before it latches; during that time the disarmed device is held at 0 and never armed
   first (see "No new arm" above).
-* If the SoC is unknown for the whole window there is no floor protection (a single
-  warning is logged).
+* If the SoC is unknown for the whole window there is no floor protection, and after
+  10 minutes without a usable SoC a disarmed device is armed as configured (warnings
+  are logged).
 * The in-window drift correction reverts a manual disarm once per window.
 * If a configuration change leaves `0xE033=0` from a suppression and the driver no
   longer manages the enable (`dischargeScheduleEnable=-1` or the rules removed while
