@@ -287,6 +287,31 @@ is not.
   is rejected. The effect is bounded by the confirmation cycles plus one disarm and
   re-arm sequence.
 
+*Review round 7*
+
+* A withdrawn `enable=1` that the bridge had already taken (in flight) now always
+  queues a disarm, also when the device still reads `0xE033=0`: the 1 can land after
+  that reading and, while the machine state is unverified, nothing else would correct
+  it. If the bridge had not taken the write, the withdrawal is unchanged (nothing to
+  disarm, the window goes to `DONE`).
+* The stale-execute flag is also cleared when the queued-write timeout fires, so an
+  abandoned disarm leaves no flag behind. Residual: if the stale callback never arrives
+  (no-op or none), the disarm's own execute is taken for it and the disarm ends in the
+  queued timeout and is retried like any failed write; the retry's execute is honoured.
+* Restart late in the window with the SoC unreadable beyond the hold cap: the guard
+  lets a disarmed device arm (fail open). If the first usable SoC then arrives while
+  the device reads `0xE033=1` only because of that arm, the start rule is still applied
+  once (a low SoC latches `LOW_START` and the night is disarmed), the same result as
+  without the restart. A device that already read 1 at the restart without this arm
+  keeps the floor-only behaviour.
+* Limitation (no code change): a device reading `0xE033=1` at a late restart is treated
+  as a legitimately running discharge, even if the disarm of an earlier suppression
+  failed to land. Only the floor rule stops it.
+* After a late restart no arm is queued or held while the enable register is unknown
+  (the window waits for a known enable); covered by a test. The bound of 12 cycles from
+  a latch to the queued disarm, asserted in the tests, depends on the read order of the
+  dummy bridge and is not a device guarantee.
+
 *Fail-open trade-offs* (deliberate; the normal schedule is preferred over a silent
 permanent suppress):
 
