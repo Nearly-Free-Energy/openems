@@ -21,6 +21,9 @@ import java.time.LocalDateTime;
  * <li>a discontinuous local-time step of more than {@link #CLOCK_STEP_MINUTES}
  * minutes between two evaluations holds the last decision for that
  * evaluation,</li>
+ * <li>arming is held back while no usable SoC has been read in the window, but
+ * for at most {@link #HOLD_CAP_MINUTES} minutes (fail open: a night must not be
+ * skipped silently because the SoC is unreadable),</li>
  * <li>per local date the start rule can suppress at most once and never again
  * after the window was restored; the floor rule is always allowed.</li>
  * </ul>
@@ -33,6 +36,7 @@ final class DischargeGuard {
 	static final int START_RULE_MINUTES = 10;
 	static final int CLOCK_STEP_MINUTES = 5;
 	static final int CONFIRMATIONS = 2;
+	static final int HOLD_CAP_MINUTES = 10;
 
 	private final int startMinSoc;
 	private final int floorSoc;
@@ -50,6 +54,8 @@ final class DischargeGuard {
 	private boolean unusableSocSeen;
 	private boolean unusableSocWarned;
 	private boolean clockStepPending;
+	private long noSocSeconds;
+	private boolean holdCapWarnPending;
 
 	DischargeGuard(int startMinSoc, int floorSoc) {
 		this.startMinSoc = startMinSoc;
@@ -76,13 +82,30 @@ final class DischargeGuard {
 	/**
 	 * Whether the schedule must not be newly armed right now: inside the window,
 	 * nothing latched yet, and either a candidate is awaiting its confirmation or no
-	 * usable SoC has been read yet in this window.
+	 * usable SoC has been read yet in this window. The wait for a first usable SoC
+	 * is capped at {@link #HOLD_CAP_MINUTES} minutes of window time, after which
+	 * the hold is released.
 	 *
 	 * @return true if arming must be held back
 	 */
 	boolean isHoldingArm() {
 		return this.isActive() && this.insideWindow && this.reason == DischargeSuppressionReason.NONE
-				&& (this.pending != DischargeSuppressionReason.NONE || !this.usableSocSeen);
+				&& (this.pending != DischargeSuppressionReason.NONE || !this.usableSocSeen && !this.isHoldCapReached());
+	}
+
+	private boolean isHoldCapReached() {
+		return this.noSocSeconds >= HOLD_CAP_MINUTES * 60L;
+	}
+
+	/**
+	 * One-shot: true once per window when the hold for a first usable SoC ran out.
+	 *
+	 * @return true if a warning is due
+	 */
+	boolean pollHoldCapWarning() {
+		var due = this.holdCapWarnPending;
+		this.holdCapWarnPending = false;
+		return due;
 	}
 
 	/**
@@ -147,9 +170,19 @@ final class DischargeGuard {
 			this.usableSocSeen = false;
 			this.unusableSocSeen = false;
 			this.unusableSocWarned = false;
+			this.noSocSeconds = 0;
+			this.holdCapWarnPending = false;
 			return this.reason;
 		}
+		var wasInside = this.insideWindow;
 		this.insideWindow = true;
+		// Wall-clock time inside the window without a usable SoC. A clock step returned
+		// above, so the step itself is never counted.
+		if (!this.usableSocSeen && wasInside && previous != null) {
+			var before = this.isHoldCapReached();
+			this.noSocSeconds += Math.max(0, Duration.between(previous, now).toSeconds());
+			this.holdCapWarnPending |= !before && this.isHoldCapReached();
+		}
 		if (soc == null || soc < 0 || soc > 100) {
 			this.unusableSocSeen = true;
 			this.pending = DischargeSuppressionReason.NONE;

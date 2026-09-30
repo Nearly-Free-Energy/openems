@@ -268,6 +268,30 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	@Test
+	public void testUnreadableSocDoesNotSkipTheNightForever() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE02C, 0, START, STOP) //
+				.withRegisters(0xE033, 0, 0, 0, 0) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		final var test = start(sut, bridge, clock, config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.dischargeQueuedEnableForTest());
+		// Still unreadable inside the cap: held back.
+		test.next(new TestCase().timeleap(clock, 4, ChronoUnit.MINUTES));
+		test.next(new TestCase(), CYCLES);
+		test.next(new TestCase().timeleap(clock, 4, ChronoUnit.MINUTES));
+		test.next(new TestCase(), CYCLES);
+		assertNull(sut.dischargeQueuedEnableForTest());
+		// Past the cap without any SoC: fail open and arm as configured.
+		test.next(new TestCase().timeleap(clock, 4, ChronoUnit.MINUTES));
+		test.next(new TestCase(), CYCLES);
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
 	public void testFloorNotBelowStartKeepsTheFloorAndDropsTheStartRule() throws Exception {
 		for (var pair : new int[][] { { 50, 50 }, { 45, 75 } }) {
 			var atFloor = new SrneBatteryInverterImpl();

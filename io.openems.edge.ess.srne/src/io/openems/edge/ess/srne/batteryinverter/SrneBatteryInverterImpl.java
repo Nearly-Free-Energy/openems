@@ -538,14 +538,20 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			return;
 		}
 		var now = LocalDateTime.now(this.getClock().withZone(this.scheduleZone));
-		var reason = this.dischargeGuard.evaluate(now, this.config.dischargeWindow1Start(),
+		final var reason = this.dischargeGuard.evaluate(now, this.config.dischargeWindow1Start(),
 				this.config.dischargeWindow1Stop(), this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC));
 		if (this.dischargeGuard.pollClockStepWarning()) {
 			this.logWarn(this.log, "Local time stepped by more than " + DischargeGuard.CLOCK_STEP_MINUTES
 					+ " minutes between cycles; holding the discharge decision for this cycle");
 		}
 		if (this.dischargeGuard.pollUnusableSocWarning()) {
-			this.logWarn(this.log, "Battery SoC is unknown or outside 0..100; discharge decision unchanged this window");
+			this.logWarn(this.log, "Battery SoC is unknown or outside 0..100; no rule can latch, and a disarmed "
+					+ "schedule is not armed until a usable SoC is read (at most " + DischargeGuard.HOLD_CAP_MINUTES
+					+ " minutes, then it fails open)");
+		}
+		if (this.dischargeGuard.pollHoldCapWarning()) {
+			this.logWarn(this.log, "No usable battery SoC for " + DischargeGuard.HOLD_CAP_MINUTES
+					+ " minutes in the discharge window; no longer holding the arm back (fail open)");
 		}
 		var deviceEnable = this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
 		this.channel(SrneBatteryInverter.ChannelId.DISCHARGE_SUPPRESSION_REASON).setNextValue(reason);

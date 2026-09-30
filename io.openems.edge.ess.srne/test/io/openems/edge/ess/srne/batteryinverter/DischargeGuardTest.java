@@ -196,4 +196,49 @@ public class DischargeGuardTest {
 		assertEquals(NONE, run(new DischargeGuard(75, -1), at(21, 0), at(21, 1), 80));
 		assertEquals(LOW_START, run(new DischargeGuard(75, -1), at(21, 0), at(21, 1), 10));
 	}
+
+	@Test
+	public void testHoldWithoutUsableSocIsCappedAndReleasedOnce() {
+		var guard = new DischargeGuard(75, 45);
+		assertFalse(guard.isHoldingArm()); // outside the window
+		// One evaluation per minute from 21:00 without any SoC.
+		for (var minute = 0; minute < DischargeGuard.HOLD_CAP_MINUTES; minute++) {
+			guard.evaluate(at(21, minute), START, STOP, null);
+			assertTrue(guard.isHoldingArm(), "minute " + minute);
+			assertFalse(guard.pollHoldCapWarning());
+		}
+		// The cap is reached 10 minutes after window entry: fail open, warn exactly once.
+		guard.evaluate(at(21, DischargeGuard.HOLD_CAP_MINUTES), START, STOP, null);
+		assertFalse(guard.isHoldingArm());
+		assertTrue(guard.pollHoldCapWarning());
+		guard.evaluate(at(21, DischargeGuard.HOLD_CAP_MINUTES + 1), START, STOP, null);
+		assertFalse(guard.isHoldingArm());
+		assertFalse(guard.pollHoldCapWarning());
+	}
+
+	@Test
+	public void testUsableSocBeforeTheCapEndsTheHoldWithoutWarning() {
+		var guard = new DischargeGuard(75, 45);
+		run(guard, at(21, 0), at(21, 5), null);
+		assertTrue(guard.isHoldingArm());
+		guard.evaluate(at(21, 6), START, STOP, 90);
+		assertFalse(guard.isHoldingArm());
+		run(guard, at(21, 7), at(21, 30), null);
+		assertFalse(guard.pollHoldCapWarning());
+	}
+
+	@Test
+	public void testClockStepIsNotCountedTowardsTheHoldCap() {
+		var guard = new DischargeGuard(75, 45);
+		guard.evaluate(at(21, 0), START, STOP, null);
+		// A forward step of 30 minutes is held for that evaluation and adds nothing.
+		guard.evaluate(at(21, 30), START, STOP, null);
+		assertTrue(guard.isHoldingArm());
+		guard.evaluate(at(21, 31), START, STOP, null);
+		assertTrue(guard.isHoldingArm());
+		run(guard, at(21, 32), at(21, 39), null);
+		assertTrue(guard.isHoldingArm());
+		run(guard, at(21, 40), at(21, 42), null);
+		assertFalse(guard.isHoldingArm());
+	}
 }
