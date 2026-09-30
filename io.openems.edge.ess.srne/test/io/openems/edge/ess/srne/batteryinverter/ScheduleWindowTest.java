@@ -126,6 +126,7 @@ public class ScheduleWindowTest {
 	@Test
 	void queuedWindowTimesOutIfTheBridgeNeverExecutesIt() {
 		var sut = newDischargeWindow();
+		sut.setQueuedTimeout(true);
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
 		for (var i = 1; i < 30; i++) {
 			sut.onCycle(30);
@@ -141,8 +142,33 @@ public class ScheduleWindowTest {
 	}
 
 	@Test
+	void queuedWritesNeverTimeOutWithoutTheQueuedTimeout() {
+		// Charge window and rules-off discharge window: a write queued while the link is
+		// down must still execute when it returns, however long that takes.
+		var window = newDischargeWindow();
+		window.reconcile(0, 0, 0, 4608, 5947, 1);
+		for (var i = 0; i < 1000; i++) {
+			window.onCycle(30);
+		}
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, window.getState());
+		assertNotNull(window.startWriteElement().getNextWriteValueAndReset());
+		assertNotNull(window.stopWriteElement().getNextWriteValueAndReset());
+
+		var enable = newDischargeWindow();
+		enable.reconcile(5376, 5888, 1, 5376, 5888, 0);
+		for (var i = 0; i < 1000; i++) {
+			enable.onCycle(2);
+		}
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, enable.getState());
+		assertNotNull(enable.enableWriteElement().getNextWriteValueAndReset());
+		enable.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, enable.getState());
+	}
+
+	@Test
 	void queuedEnableTimesOutAndWithdrawsTheWrite() {
 		var sut = newDischargeWindow();
+		sut.setQueuedTimeout(true);
 		sut.reconcile(5376, 5888, 1, 5376, 5888, 0);
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
 		sut.onCycle(2);

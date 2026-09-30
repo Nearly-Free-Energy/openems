@@ -98,12 +98,25 @@ final class ScheduleWindow {
 	private boolean stopVerified;
 	private int awaitingReadbackCycles;
 	private boolean rejected;
+	private boolean queuedTimeout;
 
 	ScheduleWindow(int startAddress, int enableAddress, String label) {
 		this.label = label;
 		this.startWrite = new UnsignedWordElement(startAddress);
 		this.stopWrite = new UnsignedWordElement(startAddress + 1);
 		this.enableWrite = new UnsignedWordElement(enableAddress);
+	}
+
+	/**
+	 * Enables or disables the bound on how long a write may stay queued. Off by
+	 * default: a write queued while the link is down then executes when it returns,
+	 * exactly as before the discharge rules existed. Only the rules-managed
+	 * discharge window turns it on, because only it is retried after a failure.
+	 *
+	 * @param enabled true to fail and withdraw a write that stays queued too long
+	 */
+	synchronized void setQueuedTimeout(boolean enabled) {
+		this.queuedTimeout = enabled;
 	}
 
 	UnsignedWordElement startWriteElement() {
@@ -354,9 +367,10 @@ final class ScheduleWindow {
 	}
 
 	/**
-	 * Advances the bounded waits without ever retrying a write. Both a queued write
-	 * the bridge never executes and a read-back that never arrives end in
-	 * {@code FAILED}; a queued write is withdrawn so it cannot fire late.
+	 * Advances the bounded waits without ever retrying a write. A read-back that
+	 * never arrives ends in {@code FAILED}; so does a queued write the bridge never
+	 * executes, but only if {@link #setQueuedTimeout(boolean)} is on, and it is then
+	 * withdrawn so it cannot fire late.
 	 *
 	 * @param timeoutCycles number of Edge cycles allowed for an execute or a fresh
 	 *                      read-back
@@ -369,7 +383,7 @@ final class ScheduleWindow {
 			}
 		}
 		case DISABLE_QUEUED, WINDOW_QUEUED, ENABLE_QUEUED -> {
-			if (++this.awaitingReadbackCycles >= timeoutCycles) {
+			if (this.queuedTimeout && ++this.awaitingReadbackCycles >= timeoutCycles) {
 				this.state = State.FAILED;
 				this.startWrite.setNextWriteValue(null);
 				this.stopWrite.setNextWriteValue(null);

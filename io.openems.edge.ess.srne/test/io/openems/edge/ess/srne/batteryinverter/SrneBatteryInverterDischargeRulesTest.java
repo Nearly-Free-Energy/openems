@@ -377,6 +377,32 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	@Test
+	public void testRulesOffDischargeWindowWriteStaysQueuedWhileTheLinkIsSlow() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(10, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, -1).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		// Never executed for far longer than the queued timeout: no failure, no withdrawal.
+		test.next(new TestCase(), 3 * RETRY_CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+	}
+
+	@Test
+	public void testChargeWindowWriteStaysQueuedWhileTheLinkIsSlow() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0xE026, 0, 0);
+		var config = config(75, 45).setChargeWindow1Start(START).setChargeWindow1Stop(STOP)
+				.setChargeScheduleEnable(0).build();
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.chargeWindowForTest().getState());
+		test.next(new TestCase(), 3 * RETRY_CYCLES);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.chargeWindowForTest().getState());
+	}
+
+	@Test
 	public void testRulesOnlyAddTheSocRead() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		start(sut, bridge(80, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),

@@ -427,6 +427,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			handler.onCycle(READBACK_TIMEOUT_CYCLES);
 		}
 		this.chargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
+		// Only the rules-managed discharge window is retried, so only it may give up on
+		// a write that stays queued; every other window behaves as without the rules.
+		this.dischargeWindow.setQueuedTimeout(this.config != null && this.dischargeRulesApply());
 		this.dischargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
 		this.updateDischargeSuppression();
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
@@ -761,6 +764,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	Integer getBatterySocForTest() {
 		return this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC);
+	}
+
+	ScheduleWindow chargeWindowForTest() {
+		return this.chargeWindow;
 	}
 
 	ScheduleWindow dischargeWindowForTest() {
