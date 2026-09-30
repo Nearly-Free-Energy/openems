@@ -100,6 +100,7 @@ final class ScheduleWindow {
 	private int awaitingReadbackCycles;
 	private boolean rejected;
 	private boolean queuedTimeout;
+	private boolean staleEnableExecutePending;
 
 	ScheduleWindow(int startAddress, int enableAddress, String label) {
 		this.label = label;
@@ -192,12 +193,16 @@ final class ScheduleWindow {
 			return null;
 		}
 		this.desiredEnable = 0;
-		this.enableWrite.setNextWriteValue(null);
+		// An already taken value means the bridge has the 1 in flight: its execute
+		// callback will still arrive and must not be taken for the disarm's.
+		var inFlight = this.enableWrite.getNextWriteValueAndReset() == null;
 		if (Integer.valueOf(0).equals(actualEnable)) {
 			this.state = State.DONE;
 			return "Withdrew queued [" + this.label + "] schedule enable=1; the target is now 0";
 		}
-		return this.queueEnable(0);
+		var message = this.queueEnable(0);
+		this.staleEnableExecutePending = inFlight;
+		return message;
 	}
 
 	// Validates the request, captures the desired end enable state once, then takes
@@ -288,6 +293,7 @@ final class ScheduleWindow {
 	}
 
 	private String queueEnable(int value) {
+		this.staleEnableExecutePending = false;
 		this.targetEnable = value;
 		this.enableWrite.setNextWriteValue(value);
 		this.awaitingReadbackCycles = 0;
@@ -335,6 +341,11 @@ final class ScheduleWindow {
 		}
 		switch (this.state) {
 		case DISABLE_QUEUED -> {
+			if (this.staleEnableExecutePending) {
+				// Belongs to the withdrawn enable=1 write, not to the disarm.
+				this.staleEnableExecutePending = false;
+				return;
+			}
 			this.awaitingReadbackCycles = 0;
 			this.state = executeState == ExecuteState.OK ? State.DISABLE_AWAITING_READBACK : State.FAILED;
 		}
@@ -424,13 +435,17 @@ final class ScheduleWindow {
 	/**
 	 * Disarms the schedule without touching the window: the only write the caller
 	 * may make while the unit's machine state is not verified. Acts only from
-	 * {@code IDLE} and only if the device is known to be armed; the window itself
-	 * is left to the normal path.
+	 * {@code IDLE} and only if the device is known to be armed, or withdraws an arm
+	 * that is queued but not yet written; the window itself is left to the normal
+	 * path.
 	 *
 	 * @param actualEnable the read-back enable register, or null if unknown
 	 * @return a one-shot audit message, or null if nothing was queued
 	 */
 	public synchronized String disarmOnly(Integer actualEnable) {
+		if (this.state == State.ENABLE_QUEUED) {
+			return this.withdrawQueuedArm(actualEnable, 0);
+		}
 		if (this.state != State.IDLE || actualEnable == null || actualEnable.equals(0)) {
 			return null;
 		}
@@ -449,6 +464,7 @@ final class ScheduleWindow {
 	 * @return true if the window was re-opened
 	 */
 	public synchronized boolean reopen() {
+		this.staleEnableExecutePending = false;
 		if (this.state == State.FAILED && !this.rejected) {
 			this.startWrite.setNextWriteValue(null);
 			this.stopWrite.setNextWriteValue(null);

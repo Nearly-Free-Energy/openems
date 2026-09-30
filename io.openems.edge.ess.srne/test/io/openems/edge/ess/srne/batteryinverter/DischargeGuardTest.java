@@ -301,4 +301,55 @@ public class DischargeGuardTest {
 		guard.evaluate(nextDay(23, 0), START, STOP, null);
 		assertFalse(guard.pollWindowEndWithoutSocWarning());
 	}
+
+	@Test
+	public void testRestartLateInTheWindowWithADisarmedDeviceAppliesTheStartRuleOnce() {
+		var guard = new DischargeGuard(75, -1);
+		assertEquals(NONE, guard.evaluate(at(21, 30), START, STOP, 60, 0));
+		assertEquals(LOW_START, guard.evaluate(at(21, 30, 1), START, STOP, 60, 0));
+		// Latched for the rest of the window.
+		assertEquals(LOW_START, guard.evaluate(at(21, 31), START, STOP, 90, 0));
+	}
+
+	@Test
+	public void testRestartLateInTheWindowWithAnArmedDeviceNeverSuppressesOnTheStartRule() {
+		var guard = new DischargeGuard(75, 45);
+		for (var minute = 30; minute < 40; minute++) {
+			assertEquals(NONE, guard.evaluate(at(21, minute), START, STOP, 60, 1));
+		}
+		// The floor rule alone governs a running discharge.
+		assertEquals(NONE, guard.evaluate(at(21, 40), START, STOP, 45, 1));
+		assertEquals(FLOOR_REACHED, guard.evaluate(at(21, 41), START, STOP, 45, 1));
+	}
+
+	@Test
+	public void testRestartLateInTheWindowWaitsForAKnownDeviceEnable() {
+		var guard = new DischargeGuard(75, -1);
+		assertEquals(NONE, guard.evaluate(at(21, 30), START, STOP, 60, null));
+		assertEquals(NONE, guard.evaluate(at(21, 31), START, STOP, 60, null));
+		assertEquals(NONE, guard.evaluate(at(21, 32), START, STOP, 60, 0));
+		assertEquals(LOW_START, guard.evaluate(at(21, 33), START, STOP, 60, 0));
+	}
+
+	@Test
+	public void testRestartLateInTheWindowWithAHealthySocClosesTheStartRule() {
+		var guard = new DischargeGuard(75, -1);
+		assertEquals(NONE, guard.evaluate(at(21, 30), START, STOP, 80, 0));
+		assertEquals(NONE, guard.evaluate(at(21, 31), START, STOP, 60, 0));
+		assertEquals(NONE, guard.evaluate(at(21, 32), START, STOP, 60, 0));
+	}
+
+	@Test
+	public void testRestartInsideTheStartRuleMinutesIgnoresTheDeviceEnable() {
+		assertEquals(LOW_START, run5(new DischargeGuard(75, 45), at(21, 2), at(21, 3), 60, 1));
+	}
+
+	private static DischargeSuppressionReason run5(DischargeGuard guard, LocalDateTime from, LocalDateTime to,
+			Integer soc, Integer deviceEnable) {
+		DischargeSuppressionReason result = null;
+		for (var t = from; !t.isAfter(to); t = t.plusMinutes(1)) {
+			result = guard.evaluate(t, START, STOP, soc, deviceEnable);
+		}
+		return result;
+	}
 }

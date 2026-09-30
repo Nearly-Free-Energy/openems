@@ -28,6 +28,10 @@ import java.time.LocalDateTime;
  * without a usable SoC is reported,</li>
  * <li>a SoC first readable after the hold cap fired still gets the start rule
  * once,</li>
+ * <li>after a restart in the middle of the window the start rule is applied once on
+ * the first usable SoC, but only while the device reads enable=0 (we would be arming
+ * it now); a device that already reads enable=1 is a discharge legitimately running,
+ * which only the floor rule may stop,</li>
  * <li>per local date the start rule can suppress at most once and never again
  * after the window was restored; the floor rule is always allowed.</li>
  * </ul>
@@ -63,6 +67,7 @@ final class DischargeGuard {
 	private long holdCapSeconds = HOLD_CAP_MINUTES * 60L;
 	private boolean windowEndWarnPending;
 	private boolean lateStartRule;
+	private boolean restartStartRulePending;
 
 	DischargeGuard(int startMinSoc, int floorSoc) {
 		this.startMinSoc = startMinSoc;
@@ -162,6 +167,23 @@ final class DischargeGuard {
 	 * @return the current suppression reason
 	 */
 	DischargeSuppressionReason evaluate(LocalDateTime now, int startMinute, int stopMinute, Integer soc) {
+		return this.evaluate(now, startMinute, stopMinute, soc, null);
+	}
+
+	/**
+	 * Evaluates the rules for the current time, SoC and device enable state.
+	 *
+	 * @param now          the local date-time in the configured time zone
+	 * @param startMinute  the encoded window start (hour*256+min)
+	 * @param stopMinute   the encoded window stop (hour*256+min)
+	 * @param soc          the current SoC in percent, or null if unknown
+	 * @param deviceEnable the enable register as read from the device, or null if
+	 *                     unknown; decides whether the start rule applies once after
+	 *                     a restart in the middle of the window
+	 * @return the current suppression reason
+	 */
+	DischargeSuppressionReason evaluate(LocalDateTime now, int startMinute, int stopMinute, Integer soc,
+			Integer deviceEnable) {
 		var previous = this.lastNow;
 		this.lastNow = now;
 		if (previous != null
@@ -197,6 +219,7 @@ final class DischargeGuard {
 			this.holdCapWarnPending = false;
 			this.holdCapSeconds = HOLD_CAP_MINUTES * 60L;
 			this.lateStartRule = false;
+			this.restartStartRulePending = false;
 			return this.reason;
 		}
 		var wasInside = this.insideWindow;
@@ -206,6 +229,7 @@ final class DischargeGuard {
 			// the window start and this first evaluation (e.g. after a restart).
 			var remaining = (stop - nowMinutes) * 60L - now.getSecond();
 			this.holdCapSeconds = Math.min(HOLD_CAP_MINUTES * 60L, remaining);
+			this.restartStartRulePending = nowMinutes >= start + START_RULE_MINUTES;
 		}
 		// Wall-clock time inside the window without a usable SoC. A clock step returned
 		// above, so the step itself is never counted.
@@ -224,6 +248,14 @@ final class DischargeGuard {
 		this.usableSocSeen = true;
 		if (this.reason != DischargeSuppressionReason.NONE) {
 			return this.reason;
+		}
+		if (this.restartStartRulePending && deviceEnable != null) {
+			this.restartStartRulePending = false;
+			if (deviceEnable == 0) {
+				this.lateStartRule = true;
+			} else {
+				this.startPassed = true;
+			}
 		}
 		// A SoC first readable after the hold cap fired still gets the start rule once,
 		// so a low start is not armed just because the SoC was late.

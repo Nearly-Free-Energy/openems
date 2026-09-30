@@ -37,6 +37,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 	private static final int STOP = 5888; // 23:00
 	private static final int CYCLES = 16; // >= number of LOW read tasks
 	private static final int RETRY_CYCLES = 65; // > the retry cooldown
+	private static final int MAX_LATCH_TO_DISARM_CYCLES = 12; // measured: 12 cycles (dummy-bridge read order + 2 confirmations)
 
 	private static TimeLeapClock clockAt(String utc) {
 		return new TimeLeapClock(Instant.parse(utc), ZoneOffset.UTC);
@@ -596,8 +597,23 @@ public class SrneBatteryInverterDischargeRulesTest {
 		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
 	}
 
+	// Steps one cycle at a time; returns the cycles needed to reach the state, or -1.
+	private static int cyclesUntil(ComponentTest test, SrneBatteryInverterImpl sut, State state, int max)
+			throws Exception {
+		for (var i = 1; i <= max; i++) {
+			test.next(new TestCase());
+			if (sut.dischargeWindowStateForTest() == state) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	// Guards the path from a verified arm (DONE with target 1) through the live target
+	// change to a queued disarm; it does not isolate the drift correction, which would
+	// reach the same disarm.
 	@Test
-	public void testLatchAfterTheArmWasWrittenDisarmsAgain() throws Exception {
+	public void testLatchAfterTheArmWasWrittenAndVerifiedQueuesTheDisarmWithinFewCycles() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = staleWindowBridge(80);
 		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
@@ -610,13 +626,42 @@ public class SrneBatteryInverterDischargeRulesTest {
 		sut.dischargeWindowForTest().onEnableExecute(ExecuteState.OK);
 		bridge.withRegisters(0xE033, 1);
 		bridge.withRegisters(0x0100, 40);
-		test.next(new TestCase(), CYCLES);
 
-		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		var cycles = cyclesUntil(test, sut, State.DISABLE_QUEUED, CYCLES);
+		assertTrue(cycles > 0 && cycles <= MAX_LATCH_TO_DISARM_CYCLES, "disarm queued after " + cycles + " cycles");
 		assertEquals(0, sut.dischargeQueuedEnableForTest());
 		deviceWritesEnable(sut, bridge, test, 0);
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
 		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+	}
+
+	@Test
+	public void testLatchWhileTheArmIsQueuedAndTheMachineStateIsUnverifiedNeverLetsTheEnableThrough()
+			throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = staleWindowBridge(80);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		deviceWritesWindow(sut, bridge, test);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+
+		// Grid outage and the floor latch at once: the gated reconcile is unreachable.
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		bridge.withRegisters(0x0100, 40);
+		for (var i = 0; i < 3; i++) {
+			test.next(new TestCase(), 4);
+			assertNull(pendingEnableOtherThanZero(sut));
+		}
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertEquals(0, sut.dischargeWindowForTest().desiredEnable());
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+	}
+
+	private static Integer pendingEnableOtherThanZero(SrneBatteryInverterImpl sut) {
+		var pending = sut.dischargeWindowForTest().enableWriteElement().getNextWriteValueAndReset();
+		return pending != null && pending[0].getValue() != 0 ? pending[0].getValue() : null;
 	}
 
 	@Test
@@ -846,15 +891,62 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	@Test
-	public void testRestartAfterStartRuleExpiryOfALatchedLowStartRestoresTheEnable() throws Exception {
-		// Skipped at 21:00 (device enable 0); restart at 21:30: the start rule is over,
-		// only the floor applies, so the enable is restored (a night that ends up allowed).
+	public void testRestartAfterStartRuleExpiryOfALatchedLowStartKeepsTheNightSuppressed() throws Exception {
+		// Skipped at 21:00 (device enable 0, SoC 60); restart at 21:30. The start rule is
+		// applied once on the first usable SoC because we would be arming the device now.
+		// With no floor configured nothing else bounds the discharge.
+		for (var floor : new int[] { -1, 45 }) {
+			var sut = new SrneBatteryInverterImpl();
+			var test = start(sut, bridge(60, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0),
+					clockAt("2026-01-10T18:30:00Z"), config(75, floor).build());
+			for (var i = 0; i < 4; i++) {
+				test.next(new TestCase(), CYCLES);
+				assertNull(sut.dischargeQueuedEnableForTest(), "floor " + floor);
+			}
+			assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+			assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
+		}
+	}
+
+	@Test
+	public void testRestartAfterStartRuleExpiryWithARunningDischargeIsNotSuppressed() throws Exception {
+		// Armed at 21:00 with a healthy SoC; it dropped below the start threshold during
+		// the discharge and the component restarts at 21:30: the device reads enable=1, so
+		// only the floor rule governs and the running discharge stays armed.
 		var sut = new SrneBatteryInverterImpl();
-		start(sut, bridge(60, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0),
-				clockAt("2026-01-10T18:30:00Z"), config(75, 45).build()) //
+		var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:30:00Z"), config(75, 45).build());
+		for (var i = 0; i < 4; i++) {
+			test.next(new TestCase(), CYCLES);
+			assertNull(sut.dischargeQueuedEnableForTest());
+		}
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+
+		// The floor still disarms it.
+		bridge.withRegisters(0x0100, 45);
+		test.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.FLOOR_REACHED);
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testRestartAfterStartRuleExpiryWithAnUnreadableSocThenALowSocStaysDisarmed() throws Exception {
+		// Same outcome whether the SoC is readable at the restart or only later.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE02C, 0, START, STOP) //
+				.withRegisters(0xE033, 0, 0, 0, 0) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		var test = start(sut, bridge, clockAt("2026-01-10T18:30:00Z"), config(75, -1).build()) //
 				.next(new TestCase(), CYCLES);
-		assertSuppression(sut, true, DischargeSuppressionReason.NONE);
-		assertEquals(1, sut.dischargeQueuedEnableForTest());
+		bridge.withRegisters(0x0100, 60);
+		for (var i = 0; i < 4; i++) {
+			test.next(new TestCase(), CYCLES);
+			assertNull(sut.dischargeQueuedEnableForTest());
+		}
+		assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
 	}
 
 	@Test

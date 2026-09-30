@@ -638,4 +638,101 @@ public class ScheduleWindowTest {
 		sut.reconcile(0, 0, 0, 4608, 5947, -1);
 		assertEquals(Integer.valueOf(1), sut.desiredEnable());
 	}
+
+	// Drives a disarmed device to ENABLE_QUEUED (enable=1 pending for the bridge).
+	private static ScheduleWindow windowWithQueuedArm() {
+		var sut = newDischargeWindow();
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		return sut;
+	}
+
+	@Test
+	void latchDuringDisableAwaitingReadbackNeverArms() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 1, 4608, 5947, 1);
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset()); // taken by the bridge
+		sut.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+
+		// The latch arrives while the disarm is being read back: nothing changes yet.
+		sut.reconcile(0, 0, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+
+		sut.reconcile(0, 0, 0, 4608, 5947, 0);
+		assertEquals(Integer.valueOf(0), sut.desiredEnable());
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void latchDuringWindowAwaitingReadbackNeverArms() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+
+		sut.reconcile(0, 0, 0, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
+
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
+		assertEquals(Integer.valueOf(0), sut.desiredEnable());
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void staleExecuteOfAWithdrawnArmDoesNotAdvanceTheDisarm() {
+		var sut = windowWithQueuedArm();
+		// The bridge already took the 1 and has it in flight.
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+
+		sut.onEnableExecute(ExecuteState.OK); // belongs to the superseded 1-write
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset());
+
+		sut.onEnableExecute(ExecuteState.OK); // the disarm's own execute
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+	}
+
+	@Test
+	void executeOfAWithdrawnArmIsNotStaleWhenTheBridgeNeverTookIt() {
+		var sut = windowWithQueuedArm();
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		var pending = sut.enableWriteElement().getNextWriteValueAndReset();
+		assertNotNull(pending);
+		assertEquals(0, pending[0].getValue());
+
+		sut.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+	}
+
+	@Test
+	void disarmOnlyWithdrawsAQueuedArm() {
+		var sut = windowWithQueuedArm();
+		assertNotNull(sut.disarmOnly(0));
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+
+		var armed = windowWithQueuedArm();
+		assertNotNull(armed.disarmOnly(1));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, armed.getState());
+		assertEquals(Integer.valueOf(0), armed.queuedEnable());
+	}
 }

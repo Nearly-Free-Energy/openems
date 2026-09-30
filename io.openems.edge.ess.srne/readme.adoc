@@ -240,8 +240,8 @@ is not.
   the charge window, nothing changed.
 * The start rule is evaluated once on the first usable SoC even when it is first read
   after the 10 minute hold cap fired, so a low SoC first seen at minute 12 still
-  latches `LOW_START`. A restart later in the window does not get this: the cap has
-  not fired there, so only the floor applies.
+  latches `LOW_START`. A restart later in the window is handled separately (see
+  round 6).
 * An armed device that reads below the floor after a fail-open arm: the first
   confirming cycle forces nothing new (an armed device stays as it is); after the second
   confirmation the floor latches and the disarm is queued in the next cycle (tested).
@@ -255,6 +255,37 @@ is not.
   bridge worker thread has already picked up. A late execute callback is ignored in
   `FAILED`, so the device can be armed while the state is `FAILED` until the retry
   re-reads it (every 8 cycles while suppressing, then every 60). No code change.
+
+*Review round 6*
+
+* A restart after the 10 minute start rule period (for example at 21:30) no longer
+  re-arms a night that the start rule had suppressed. On the first usable SoC after
+  such a restart the start rule is applied once, but only when the device currently
+  reads `0xE033=0` (we would be arming it now): a low SoC then latches `LOW_START` and
+  the device stays disarmed, also with `dischargeFloorSoc=-1`. If the device already
+  reads `0xE033=1` (a discharge legitimately running whose SoC fell below the start
+  threshold), the start rule is closed for the window and only the floor rule governs
+  it. If the enable register is unknown the decision waits until it is read. A
+  readable and an unreadable SoC after the restart now end in the same state.
+* A queued `enable=1` is also withdrawn while the machine state is not verified (grid
+  outage): the unverified path calls the same withdraw as the gated path, only when the
+  discharge rules apply. With both rules off nothing changed.
+* When a withdrawal finds that the bridge has already taken the `enable=1` (its value
+  is gone from the write element), the window remembers that one execute callback is
+  still to come and ignores it, so it is not taken for the execute of the disarm that
+  follows. Without this a read-back of 1 ended in `FAILED` and a retry only after 8
+  cycles. Residual: the check of the write element is not atomic with the bridge
+  thread; in that rare race the stale callback is taken for the disarm's and the old
+  behaviour applies (the armed period lasts at least 8 cycles until the retry).
+* Test coverage: a latch during `DISABLE_AWAITING_READBACK` and
+  `WINDOW_AWAITING_READBACK` never arms (unit level); a latch after a verified arm
+  queues the disarm within 12 cycles (measured with the dummy bridge); a latch during `ENABLE_QUEUED` with
+  an unverified machine state never lets `enable=1` through.
+* Residual (no code change): hold plus stale read. If a pending start or floor
+  candidate appears right after an arm whose enable channel has not refreshed yet, the
+  live target drops to 0 and forces a disarm that is re-armed later once the candidate
+  is rejected. The effect is bounded by the confirmation cycles plus one disarm and
+  re-arm sequence.
 
 *Fail-open trade-offs* (deliberate; the normal schedule is preferred over a silent
 permanent suppress):
@@ -278,9 +309,9 @@ permanent suppress):
   `dischargeScheduleEnable` explicitly, or re-arm it manually.
 
 The decision is latched per window and rebuilt from current state, so an edge restart
-mid-window reaches the same result, with one known effect: a restart after the start
-rule expired, while `0xE033` is still 0 from an earlier suppression, restores the
-enable (an allow). During a grid outage (machine state not `2`) no write
+mid-window reaches the same result: a restart after the start rule expired applies the
+start rule once on the first usable SoC if the device reads `0xE033=0` (round 6), so a
+night skipped at the window start stays skipped. During a grid outage (machine state not `2`) no write
 happens; the decision is applied when state `2` returns. The change of the enable
 target reuses the existing verified `ScheduleWindow` write path (disarm/arm, read
 back), there is no second write path. SoC source: register `0x0100`, the same one

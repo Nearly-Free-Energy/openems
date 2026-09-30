@@ -473,7 +473,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	// Only the disarm of the discharge schedule bypasses the verified machine-state
 	// gate: E033 is a plain holding-register write and disarming only reduces the
-	// exposure. Arming, restoring and every window write still wait for state 2.
+	// exposure. Arming, restoring and every window write still wait for state 2. A
+	// queued arm is withdrawn here too, so a latch cannot leave it waiting for state 2.
 	private void reconcileDisarmUnverified() {
 		if (!this.dischargeRulesApply()) {
 			return;
@@ -539,7 +540,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		var now = LocalDateTime.now(this.getClock().withZone(this.scheduleZone));
 		final var reason = this.dischargeGuard.evaluate(now, this.config.dischargeWindow1Start(),
-				this.config.dischargeWindow1Stop(), this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC));
+				this.config.dischargeWindow1Stop(), this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC),
+				this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE));
 		if (this.dischargeGuard.pollClockStepWarning()) {
 			this.logWarn(this.log, "Local time stepped by more than " + DischargeGuard.CLOCK_STEP_MINUTES
 					+ " minutes between cycles; holding the discharge decision for this cycle");
