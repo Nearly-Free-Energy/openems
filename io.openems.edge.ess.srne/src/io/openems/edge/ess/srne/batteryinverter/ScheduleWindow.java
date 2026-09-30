@@ -196,7 +196,9 @@ final class ScheduleWindow {
 		// An already taken value means the bridge has the 1 in flight: its execute
 		// callback will still arrive and must not be taken for the disarm's.
 		var inFlight = this.enableWrite.getNextWriteValueAndReset() == null;
-		if (Integer.valueOf(0).equals(actualEnable)) {
+		// Only a 1 the bridge never took is certainly gone; one in flight may still land
+		// on a device that reads 0 now, so the disarm is queued anyway.
+		if (Integer.valueOf(0).equals(actualEnable) && !inFlight) {
 			this.state = State.DONE;
 			return "Withdrew queued [" + this.label + "] schedule enable=1; the target is now 0";
 		}
@@ -421,6 +423,8 @@ final class ScheduleWindow {
 		case DISABLE_QUEUED, WINDOW_QUEUED, ENABLE_QUEUED -> {
 			if (this.queuedTimeout && ++this.awaitingReadbackCycles >= timeoutCycles) {
 				this.state = State.FAILED;
+				// The abandoned disarm must not leave a stale-execute flag behind.
+				this.staleEnableExecutePending = false;
 				this.startWrite.setNextWriteValue(null);
 				this.stopWrite.setNextWriteValue(null);
 				this.enableWrite.setNextWriteValue(null);

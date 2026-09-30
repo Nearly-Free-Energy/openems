@@ -68,6 +68,7 @@ final class DischargeGuard {
 	private boolean windowEndWarnPending;
 	private boolean lateStartRule;
 	private boolean restartStartRulePending;
+	private boolean armedFailOpen;
 
 	DischargeGuard(int startMinSoc, int floorSoc) {
 		this.startMinSoc = startMinSoc;
@@ -101,6 +102,9 @@ final class DischargeGuard {
 	 * @return true if arming must be held back
 	 */
 	boolean isHoldingArm() {
+		// restartStartRulePending needs no term here: after a late restart with an unknown
+		// enable nothing is queued (the window waits for a known enable), and with a known
+		// disarmed device the no-usable-SoC hold above already applies until the first SoC.
 		return this.isActive() && this.insideWindow && this.reason == DischargeSuppressionReason.NONE
 				&& (this.pending != DischargeSuppressionReason.NONE || !this.usableSocSeen && !this.isHoldCapReached());
 	}
@@ -220,6 +224,7 @@ final class DischargeGuard {
 			this.holdCapSeconds = HOLD_CAP_MINUTES * 60L;
 			this.lateStartRule = false;
 			this.restartStartRulePending = false;
+			this.armedFailOpen = false;
 			return this.reason;
 		}
 		var wasInside = this.insideWindow;
@@ -238,6 +243,9 @@ final class DischargeGuard {
 			this.noSocSeconds += Math.max(0, Duration.between(previous, now).toSeconds());
 			this.holdCapWarnPending |= !before && this.isHoldCapReached();
 		}
+		// A disarmed device with the hold released is armed by this component now, so a
+		// later enable=1 reading is not evidence of a discharge that was already running.
+		this.armedFailOpen |= !this.usableSocSeen && this.isHoldCapReached() && Integer.valueOf(0).equals(deviceEnable);
 		if (soc == null || soc < 0 || soc > 100) {
 			this.unusableSocSeen = true;
 			this.pending = DischargeSuppressionReason.NONE;
@@ -251,7 +259,7 @@ final class DischargeGuard {
 		}
 		if (this.restartStartRulePending && deviceEnable != null) {
 			this.restartStartRulePending = false;
-			if (deviceEnable == 0) {
+			if (deviceEnable == 0 || this.armedFailOpen) {
 				this.lateStartRule = true;
 			} else {
 				this.startPassed = true;

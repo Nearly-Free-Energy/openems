@@ -735,4 +735,49 @@ public class ScheduleWindowTest {
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, armed.getState());
 		assertEquals(Integer.valueOf(0), armed.queuedEnable());
 	}
+
+	@Test
+	void inFlightArmWithdrawnOnADisarmedReadingStillQueuesADisarm() {
+		var sut = windowWithQueuedArm();
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset()); // the 1 is in flight
+		// The device still reads 0, but the 1 can land after this reading.
+		assertNotNull(sut.reconcile(4608, 5947, 0, 4608, 5947, 0));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		sut.onEnableExecute(ExecuteState.OK); // the stale 1
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(ExecuteState.OK); // the disarm
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+	}
+
+	@Test
+	void withdrawnArmOnADisarmedReadingStaysDoneWhenTheBridgeNeverTookIt() {
+		var sut = windowWithQueuedArm();
+		assertNotNull(sut.reconcile(4608, 5947, 0, 4608, 5947, 0));
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void disarmExecuteIsHonouredWhenNoStaleCallbackEverArrives() {
+		var sut = newDischargeWindow();
+		sut.setQueuedTimeout(true);
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 1);
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset()); // in flight
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+
+		// Neither the stale callback nor the disarm's arrives: the queued wait times out.
+		for (var i = 0; i < 5; i++) {
+			sut.onCycle(5);
+		}
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+
+		// The retry's disarm is not mistaken for a stale execute.
+		assertTrue(sut.reopen());
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+	}
 }

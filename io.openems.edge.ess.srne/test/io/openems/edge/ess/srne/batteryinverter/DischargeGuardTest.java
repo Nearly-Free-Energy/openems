@@ -5,6 +5,7 @@ import static io.openems.edge.ess.srne.batteryinverter.DischargeSuppressionReaso
 import static io.openems.edge.ess.srne.batteryinverter.DischargeSuppressionReason.NONE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.LocalDateTime;
@@ -342,6 +343,40 @@ public class DischargeGuardTest {
 	@Test
 	public void testRestartInsideTheStartRuleMinutesIgnoresTheDeviceEnable() {
 		assertEquals(LOW_START, run5(new DischargeGuard(75, 45), at(21, 2), at(21, 3), 60, 1));
+	}
+
+	@Test
+	public void testRestartLateWithAnUnreadableSocPastTheCapStillGetsTheStartRuleOnce() {
+		var guard = new DischargeGuard(75, -1);
+		// Restart late, device disarmed, SoC unreadable: the cap fires and the guard lets it arm.
+		run5(guard, at(21, 30), at(21, 40), null, 0);
+		assertFalse(guard.isHoldingArm());
+		// The device now reads 1 because of that arm; the first usable SoC is low.
+		assertEquals(NONE, guard.evaluate(at(21, 41), START, STOP, 60, 1));
+		assertEquals(LOW_START, guard.evaluate(at(21, 42), START, STOP, 60, 1));
+		assertEquals(LOW_START, guard.evaluate(at(21, 43), START, STOP, 90, 1));
+	}
+
+	@Test
+	public void testRestartLateWithAnArmedDeviceAndAnUnreadableSocPastTheCapKeepsFloorOnly() {
+		var guard = new DischargeGuard(75, 45);
+		run5(guard, at(21, 30), at(21, 40), null, 1);
+		assertEquals(NONE, guard.evaluate(at(21, 41), START, STOP, 60, 1));
+		assertEquals(NONE, guard.evaluate(at(21, 42), START, STOP, 60, 1));
+		assertEquals(NONE, guard.evaluate(at(21, 43), START, STOP, 46, 1));
+	}
+
+	@Test
+	public void testNoArmIsHeldBackOnlyWhileTheSocIsUnknownAfterALateRestart() {
+		var guard = new DischargeGuard(75, -1);
+		// Unknown enable and unknown SoC: the hold applies, so nothing may be armed.
+		guard.evaluate(at(21, 30), START, STOP, null, null);
+		assertTrue(guard.isHoldingArm());
+		var window = new ScheduleWindow(0xE02D, 0xE033, "test");
+		assertNull(window.reconcile(4608, 5947, null, 4608, 5947, 1));
+		assertNull(window.queuedEnable());
+		assertNull(window.enableWriteElement().getNextWriteValueAndReset());
+		assertEquals(ScheduleWindow.State.IDLE, window.getState());
 	}
 
 	private static DischargeSuppressionReason run5(DischargeGuard guard, LocalDateTime from, LocalDateTime to,
