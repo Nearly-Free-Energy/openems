@@ -115,7 +115,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private Integer appliedDischargeEnable;
 	private int failedCycles;
 	private int suppressRetries;
-	private boolean driftCorrected;
+	private boolean driftCorrectedUnsuppressed;
 	private int driftCooldown;
 	private boolean mismatchLogged;
 	// One-shot audit flag: log at most once that the output-priority write is held
@@ -605,7 +605,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.failedCycles = 0;
 		}
 		if (!this.dischargeGuard.isInsideWindow() && !suppressed) {
-			this.driftCorrected = false;
+			this.driftCorrectedUnsuppressed = false;
 		}
 		this.retryOrCorrect(this.appliedDischargeEnable);
 		return this.appliedDischargeEnable;
@@ -624,9 +624,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				// While suppressed the correction is unlimited but rate-limited; otherwise
 				// it is allowed once per window.
 				var suppressed = target == 0;
-				var due = suppressed ? this.driftCooldown == 0 : !this.driftCorrected;
+				var due = suppressed ? this.driftCooldown == 0 : !this.driftCorrectedUnsuppressed;
 				if (due && this.dischargeWindow.reopen()) {
-					this.driftCorrected = true;
+					this.driftCorrectedUnsuppressed |= !suppressed;
 					this.driftCooldown = FAILED_RETRY_COOLDOWN_CYCLES;
 					this.logWarn(this.log, "Discharge schedule enable drifted to [" + actual + "], target [" + target
 							+ "]; correcting" + (suppressed ? "" : " once"));
@@ -770,6 +770,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	Integer getBatterySocForTest() {
 		return this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC);
+	}
+
+	boolean driftCorrectedUnsuppressedForTest() {
+		return this.driftCorrectedUnsuppressed;
 	}
 
 	ScheduleWindow chargeWindowForTest() {

@@ -600,4 +600,42 @@ public class ScheduleWindowTest {
 		assertFalse(sut.reopen());
 		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
 	}
+
+	@Test
+	void desiredEnableFollowsTheTargetWhileASequenceIsInProgress() {
+		var sut = newDischargeWindow();
+		// Armed device with a different window; the target is armed when the sequence starts.
+		sut.reconcile(0, 0, 1, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(1), sut.desiredEnable());
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+
+		// The discharge rules latch meanwhile: the target is now 0.
+		sut.reconcile(0, 0, 0, 4608, 5947, 0);
+		assertEquals(Integer.valueOf(0), sut.desiredEnable());
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
+
+		// The window is done and the schedule is never re-armed from the stale capture.
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void unmanagedEnableKeepsTheCapturedEndState() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 1, 4608, 5947, -1);
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(0);
+		sut.reconcile(0, 0, 0, 4608, 5947, -1);
+		assertEquals(Integer.valueOf(1), sut.desiredEnable());
+	}
 }

@@ -26,9 +26,10 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * never retried by this class itself; only an explicit {@link #reopen()} by the
  * caller (the discharge rules, see the component) starts a new attempt.
  *
- * <p>The desired end enable state is captured once: {@code enable=0}/{@code 1}
- * are taken from config, while {@code enable=-1} (unmanaged) captures whatever
- * the device currently reads, so a window change on an armed device is disarmed,
+ * <p>The desired end enable state is captured when a sequence starts and, for an
+ * explicit {@code enable=0}/{@code 1}, refreshed from config at each later step of
+ * that sequence; {@code enable=-1} (unmanaged) keeps whatever
+ * the device read at the start, so a window change on an armed device is disarmed,
  * rewritten and then restored to its original armed state. {@code enable=1}
  * requires a complete configured window; {@code enable} outside 0/1 is rejected.
  *
@@ -170,7 +171,14 @@ final class ScheduleWindow {
 			int cfgStop, int cfgEnable) {
 		return switch (this.state) {
 		case IDLE -> this.start(actualStart, actualStop, actualEnable, cfgStart, cfgStop, cfgEnable);
-		case DISABLE_VERIFIED, WINDOW_VERIFIED -> this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
+		case DISABLE_VERIFIED, WINDOW_VERIFIED -> {
+			// A sequence in progress follows the current target: a guard latch after the
+			// sequence began must not be undone by a stale captured end state.
+			if (cfgEnable >= 0) {
+				this.desiredEnable = cfgEnable;
+			}
+			yield this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
+		}
 		default -> null;
 		};
 	}

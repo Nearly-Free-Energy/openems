@@ -329,6 +329,8 @@ public class SrneBatteryInverterDischargeRulesTest {
 			deviceWritesEnable(sut, bridge, test, 0);
 			assertEquals(State.DONE, sut.dischargeWindowStateForTest(), "round " + round);
 		}
+		// Corrections while suppressed never consume the single unsuppressed correction.
+		assertFalse(sut.driftCorrectedUnsuppressedForTest());
 	}
 
 	@Test
@@ -670,6 +672,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 		assertEquals(1, sut.dischargeQueuedEnableForTest());
 		deviceWritesEnable(sut, bridge, test, 1);
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertTrue(sut.driftCorrectedUnsuppressedForTest());
 
 		// A second drift in the same window is not corrected again.
 		bridge.withRegisters(0xE033, 0);
