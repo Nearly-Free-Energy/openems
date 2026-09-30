@@ -101,10 +101,10 @@ import io.openems.edge.ess.srne.SrneConstants;
 
 	// Automatic discharge rules, evaluated against the edge clock (the inverter RTC
 	// is not readable). -1 disables a rule; both -1 keeps today's behaviour.
-	@AttributeDefinition(name = "Discharge start min SoC", description = "Skip the discharge window if SoC is below this percent at or after window start; -1 = off.")
+	@AttributeDefinition(name = "Discharge start min SoC", description = "Skip the discharge window if SoC is below this percent at or after window start; range 0..99 and above the floor; -1 = off.")
 	int dischargeStartMinSoc() default -1;
 
-	@AttributeDefinition(name = "Discharge floor SoC", description = "Stop discharging for the rest of the window once SoC is at or below this percent; -1 = off.")
+	@AttributeDefinition(name = "Discharge floor SoC", description = "Stop discharging for the rest of the window once SoC is at or below this percent; range 0..99 and below the start threshold; -1 = off.")
 	int dischargeFloorSoc() default -1;
 
 	@AttributeDefinition(name = "Schedule time zone", description = "Time zone used to evaluate the discharge window against the edge clock.")

@@ -76,6 +76,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private static final int FAILED_RETRY_COOLDOWN_CYCLES = 60;
 	private static final int SUPPRESS_RETRY_COOLDOWN_CYCLES = 8;
 	private static final int MAX_FAST_SUPPRESS_RETRIES = 3;
+	private static final int MAX_RULE_SOC = 99;
 	private final Logger log = LoggerFactory.getLogger(SrneBatteryInverterImpl.class);
 
 	private final AtomicReference<TargetGridMode> targetGridMode = new AtomicReference<>(TargetGridMode.GO_ON_GRID);
@@ -152,7 +153,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Activate
 	private void activate(ComponentContext context, Config config) throws OpenemsException {
 		this.config = config;
-		this.dischargeGuard = new DischargeGuard(config.dischargeStartMinSoc(), config.dischargeFloorSoc());
+		this.dischargeGuard = this.createDischargeGuard(config);
 		/*
 		 * There is intentionally no @Modified method. A settings configuration update
 		 * causes DS to replace this component instance, giving every setting a fresh
@@ -163,6 +164,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
 		if (this.dischargeGuard.isActive()) {
 			this.scheduleZone = this.parseScheduleZone(config.scheduleTimeZone());
+			this.warnIfRulesInert(config);
 		}
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
@@ -462,6 +464,36 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.dischargeWindow1Start(), this.config.dischargeWindow1Stop(),
 				this.effectiveDischargeEnable());
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+	}
+
+	// Fail open: an out-of-range threshold or an incoherent pair turns the affected
+	// rule(s) off, so a typo can never suppress every night unattended.
+	private DischargeGuard createDischargeGuard(Config config) {
+		var startMinSoc = this.validRuleThreshold("dischargeStartMinSoc", config.dischargeStartMinSoc());
+		var floorSoc = this.validRuleThreshold("dischargeFloorSoc", config.dischargeFloorSoc());
+		if (startMinSoc >= 0 && floorSoc >= 0 && floorSoc >= startMinSoc) {
+			this.logError(this.log, "dischargeFloorSoc [" + floorSoc + "] must be below dischargeStartMinSoc ["
+					+ startMinSoc + "]; both discharge rules are off");
+			return new DischargeGuard(-1, -1);
+		}
+		return new DischargeGuard(startMinSoc, floorSoc);
+	}
+
+	private int validRuleThreshold(String name, int value) {
+		if (value == -1 || value >= 0 && value <= MAX_RULE_SOC) {
+			return value;
+		}
+		this.logError(this.log, "Invalid " + name + " [" + value + "]; must be 0.." + MAX_RULE_SOC
+				+ " or -1 (off). This rule is off");
+		return -1;
+	}
+
+	private void warnIfRulesInert(Config config) {
+		if (!config.controlEnabled() || config.dischargeScheduleEnable() != 1 || config.dischargeWindow1Start() < 0
+				|| config.dischargeWindow1Stop() < 0) {
+			this.logWarn(this.log, "Discharge rules are configured but inert: they need controlEnabled=true, "
+					+ "dischargeScheduleEnable=1 and a discharge window");
+		}
 	}
 
 	private ZoneId parseScheduleZone(String zone) {

@@ -501,4 +501,125 @@ public class SrneBatteryInverterDischargeRulesTest {
 		test.next(new TestCase(), RETRY_CYCLES);
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
 	}
+
+	@Test
+	public void testDriftCorrectionBudgetResetsForTheNextWindow() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clock, config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+
+		// Window 1: the first drift is corrected, the second one is not.
+		bridge.withRegisters(0xE033, 0);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		deviceWritesEnable(sut, bridge, test, 1);
+		bridge.withRegisters(0xE033, 0);
+		test.next(new TestCase(), RETRY_CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+
+		// Window 2 (next evening): the budget is back, the drift is corrected again.
+		test.next(new TestCase().timeleap(clock, 3, ChronoUnit.HOURS));
+		test.next(new TestCase(), CYCLES);
+		test.next(new TestCase().timeleap(clock, 21, ChronoUnit.HOURS));
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testRestartInsideStartRuleMinutesRelatchesLowStartFromPartlyDischargedSoc() throws Exception {
+		// The night was skipped at 21:00 (device enable 0). A restart at 21:08 with a SoC
+		// that has since dropped below the threshold latches LOW_START again.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:08:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		// The decision is latched after two confirmations; the restore queued before that
+		// (device still 0, decision still NONE) runs to completion first, then the
+		// disarm follows (documented brief re-arm after such a restart).
+		assertEquals(DischargeSuppressionReason.LOW_START,
+				sut.getDischargeSuppressionReasonChannelForTest().value().asEnum());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 1);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
+
+		// A night that was allowed (SoC 80 at 21:00, enable 1) is skipped by a restart at
+		// 21:08 once the SoC has fallen to 74: the documented fail-open trade-off.
+		var allowed = new SrneBatteryInverterImpl();
+		start(allowed, bridge(74, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:08:00Z"),
+				config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(allowed, false, DischargeSuppressionReason.LOW_START);
+		assertEquals(0, allowed.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testRestartAfterStartRuleExpiryOfALatchedLowStartRestoresTheEnable() throws Exception {
+		// Skipped at 21:00 (device enable 0); restart at 21:30: the start rule is over,
+		// only the floor applies, so the enable is restored (a night that ends up allowed).
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(60, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0),
+				clockAt("2026-01-10T18:30:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(sut, true, DischargeSuppressionReason.NONE);
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testOutOfRangeAndIncoherentThresholdsFailOpen() throws Exception {
+		// {startMin, floor}: each row must leave the discharge rules off (or the invalid
+		// rule off) so a low SoC never suppresses the night.
+		for (var pair : new int[][] { { 100, -1 }, { 150, -1 }, { -1, 100 }, { -1, 120 }, { -5, -1 }, { -1, -7 },
+				{ 50, 50 }, { 45, 75 }, { 100, 100 } }) {
+			var sut = new SrneBatteryInverterImpl();
+			start(sut, bridge(10, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+					config(pair[0], pair[1]).build()) //
+					.next(new TestCase(), CYCLES);
+			var label = pair[0] + "/" + pair[1];
+			assertEquals(BASELINE_TASKS, taskList(sut), label);
+			assertNull(sut.getDischargeSuppressedChannelForTest().value().get(), label);
+			assertNull(sut.dischargeQueuedEnableForTest(), label);
+			assertEquals(State.DONE, sut.dischargeWindowStateForTest(), label);
+		}
+	}
+
+	@Test
+	public void testOneInvalidThresholdOnlyDisablesItself() throws Exception {
+		// Floor 100 is invalid, the valid start rule keeps working.
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(60, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, 100).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.LOW_START);
+
+		// Start 100 is invalid, the valid floor rule keeps working (and start is not applied).
+		var floorOnly = new SrneBatteryInverterImpl();
+		start(floorOnly, bridge(60, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(100, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(floorOnly, false, DischargeSuppressionReason.NONE);
+		var atFloor = new SrneBatteryInverterImpl();
+		start(atFloor, bridge(45, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(100, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(atFloor, false, DischargeSuppressionReason.FLOOR_REACHED);
+	}
+
+	@Test
+	public void testInertRulesStillActivate() throws Exception {
+		// controlEnabled=false: the rule is inert (a warning is logged on activate) and
+		// nothing is published or written.
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(10, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, 45).setControlEnabled(false).build()) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.getDischargeSuppressedChannelForTest().value().get());
+		assertNull(sut.dischargeQueuedEnableForTest());
+	}
 }

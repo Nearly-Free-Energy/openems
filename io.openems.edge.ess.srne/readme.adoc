@@ -167,17 +167,49 @@ is not.
   cycle holds the last decision. Per local date the start rule suppresses at most
   once and never again after the window was restored; the floor rule is always
   allowed.
-* Failed writes: a failed (or timed-out) discharge-window write is not terminal.
-  It is retried after 60 cycles: a failed restore (`0xE033=1`) without limit, a
-  failed suppress at most 3 times; a new target (for example the window ending) always
-  re-opens it. A configuration rejection is never retried. While the write is
-  failed, `SafeWriteState` is `FAILED` and a warning is logged when the device
-  enable disagrees with the decision.
+* Failed writes: a failed (or timed-out) discharge-window write is not terminal, and
+  retrying never stops until the target changes (for example the window ending). A
+  failed suppress (`0xE033=0`) is retried after 8 cycles for the first 3 retries and
+  then every 60 cycles, so the schedule is not left armed below the floor; a failed
+  restore (`0xE033=1`) is retried every 60 cycles. A configuration rejection is never
+  retried. While the write is failed, `SafeWriteState` is `FAILED` and a warning is
+  logged when the device enable disagrees with the decision.
 * Drift: if `0xE033` reads a value other than the target after the write settled,
-  inside the window, it is corrected once per window.
+  inside the window, it is corrected once per window (the allowance is renewed for
+  the next window). This also reverts a manual disarm made in the window, once.
+* Threshold validation: `dischargeStartMinSoc` and `dischargeFloorSoc` must be in
+  `0..99` (or `-1` = off). A value outside that range is logged as an error and only
+  that rule is off. When both are set, `dischargeFloorSoc` must be below
+  `dischargeStartMinSoc`; otherwise an error is logged and both rules are off, i.e.
+  the normal schedule runs.
+* Inert rules: on activation a warning is logged if a rule is configured but cannot act
+  (`controlEnabled=false`, `dischargeScheduleEnable` not `1`, or the discharge window
+  unset).
 * Channels: `DischargeSuppressed` reports the device (`0xE033` reads 0), or is unknown
   if the register is unread; `DischargeSuppressionReason` is the driver's decision.
-  With `controlEnabled=false` neither is published, since nothing is written.
+  With `controlEnabled=false` the channels are declared but not populated, since nothing
+  is written. The SoC read task (`0x0100`) is added whenever a valid rule is set,
+  independent of `controlEnabled`.
+
+*Fail-open trade-offs* (deliberate; the normal schedule is preferred over a silent
+permanent suppress):
+
+* A restart or configuration change mid-window creates a fresh guard, so a `LOW_START`
+  skip decided at the window start is not persistent. After the first 10 minutes only
+  the floor applies, so the device may be re-armed (`0xE033=1`) and discharge down to
+  the floor.
+* A restart within the first 10 minutes can latch `LOW_START` from a partly discharged
+  SoC that would have passed at the window start.
+* After a restart within the first 10 minutes while `0xE033` is still 0 from a skip, the
+  decision needs two confirming cycles before it latches, so a restore may be queued and
+  completed first and the disarm follows; the schedule can be armed briefly.
+* If the SoC is unknown for the whole window there is no floor protection (a single
+  warning is logged).
+* The in-window drift correction reverts a manual disarm once per window.
+* If a configuration change leaves `0xE033=0` from a suppression and the driver no
+  longer manages the enable (`dischargeScheduleEnable=-1` or the rules removed while
+  the enable is not configured), the register is not restored on deactivation; set
+  `dischargeScheduleEnable` explicitly, or re-arm it manually.
 
 The decision is latched per window and rebuilt from current state, so an edge restart
 mid-window reaches the same result, with one known effect: a restart after the start
@@ -186,7 +218,7 @@ enable (an allow). During a grid outage (machine state not `2`) no write
 happens; the decision is applied when state `2` returns. The change of the enable
 target reuses the existing verified `ScheduleWindow` write path (disarm/arm, read
 back), there is no second write path. SoC source: register `0x0100`, the same one
-`Srne.Ess` maps to `SymmetricEss.SOC`, read by this component only when a rule is
+`Srne.Ess` maps to `SymmetricEss.SOC`, read by this component only when a valid rule is
 configured. Channels: `DischargeSuppressed` (boolean), `DischargeSuppressionReason`
 (`NONE` / `LOW_START` / `FLOOR_REACHED`) and `BatterySoc`.
 
