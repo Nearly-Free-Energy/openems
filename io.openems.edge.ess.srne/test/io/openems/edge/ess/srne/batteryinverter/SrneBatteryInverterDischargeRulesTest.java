@@ -2,10 +2,12 @@ package io.openems.edge.ess.srne.batteryinverter;
 
 import static io.openems.edge.ess.srne.SrneConstants.DEFAULT_UNIT_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.util.List;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 
@@ -15,6 +17,7 @@ import io.openems.common.test.TimeLeapClock;
 import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 import io.openems.edge.bridge.modbus.api.task.WriteTask;
 import io.openems.edge.bridge.modbus.test.DummyModbusBridge;
+import io.openems.edge.common.channel.Channel;
 import io.openems.edge.common.test.AbstractComponentTest.TestCase;
 import io.openems.edge.common.test.ComponentTest;
 import io.openems.edge.common.test.DummyComponentManager;
@@ -23,14 +26,17 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
 
 /**
  * Discharge start-threshold / floor rules through the real component with a
- * controllable clock and SoC. The window is 18:00-23:59 in Africa/Kampala
- * (UTC+3), so 15:05Z is 18:05 local.
+ * controllable clock and SoC. The window is the production one, 21:00-23:00 in
+ * Africa/Kampala (UTC+3), so 18:05Z is 21:05 local. The dummy bridge does not
+ * execute writes, so a test plays the device by invoking the same execute
+ * callback the write task uses and then presenting the register read-back.
  */
 public class SrneBatteryInverterDischargeRulesTest {
 
-	private static final int START = 4608; // 18:00
-	private static final int STOP = 5947; // 23:59
+	private static final int START = 5376; // 21:00
+	private static final int STOP = 5888; // 23:00
 	private static final int CYCLES = 16; // >= number of LOW read tasks
+	private static final int RETRY_CYCLES = 65; // > the retry cooldown
 
 	private static TimeLeapClock clockAt(String utc) {
 		return new TimeLeapClock(Instant.parse(utc), ZoneOffset.UTC);
@@ -60,33 +66,52 @@ public class SrneBatteryInverterDischargeRulesTest {
 				.setDischargeFloorSoc(floor);
 	}
 
-	private static void assertSuppression(SrneBatteryInverterImpl sut, boolean suppressed,
+	private static ComponentTest start(SrneBatteryInverterImpl sut, DummyModbusBridge bridge, TimeLeapClock clock,
+			MyConfig config) throws Exception {
+		return new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(config);
+	}
+
+	private static void assertSuppression(SrneBatteryInverterImpl sut, Boolean suppressed,
 			DischargeSuppressionReason reason) {
 		assertEquals(suppressed, sut.getDischargeSuppressedChannelForTest().value().get());
 		assertEquals(reason, sut.getDischargeSuppressionReasonChannelForTest().value().asEnum());
 	}
 
+	private static SafeWriteHandler.State safeWriteState(SrneBatteryInverterImpl sut) {
+		Channel<SafeWriteHandler.State> channel = sut.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE);
+		return channel.value().asEnum();
+	}
+
+	// Plays the device for one queued E033 write: execute callback, then read-back.
+	private static void deviceWritesEnable(SrneBatteryInverterImpl sut, DummyModbusBridge bridge, ComponentTest test,
+			int value) throws Exception {
+		sut.dischargeWindowForTest().onEnableExecute(ExecuteState.OK);
+		bridge.withRegisters(0xE033, value);
+		test.next(new TestCase(), CYCLES);
+	}
+
 	@Test
 	public void testSkipAtStartWhenSocLow() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var clock = clockAt("2026-01-10T15:05:00Z");
-		new ComponentTest(sut) //
-				.addReference("setModbus", bridge(60, MachineState.RUNNING_MAINS_BYPASS)) //
-				.addReference("componentManager", new DummyComponentManager(clock)) //
-				.activate(config(75, 45).build()) //
+		var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
 				.next(new TestCase(), CYCLES);
-		assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
+		// Decided, queued, but the device is not yet disabled.
+		assertSuppression(sut, false, DischargeSuppressionReason.LOW_START);
 		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
 	}
 
 	@Test
 	public void testNoSkipWhenSocAtThreshold() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var clock = clockAt("2026-01-10T15:05:00Z");
-		new ComponentTest(sut) //
-				.addReference("setModbus", bridge(75, MachineState.RUNNING_MAINS_BYPASS)) //
-				.addReference("componentManager", new DummyComponentManager(clock)) //
-				.activate(config(75, 45).build()) //
+		start(sut, bridge(75, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, 45).build()) //
 				.next(new TestCase(), CYCLES);
 		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
 		assertNull(sut.dischargeQueuedEnableForTest());
@@ -96,73 +121,78 @@ public class SrneBatteryInverterDischargeRulesTest {
 	@Test
 	public void testFloorMidWindowThenRestoreAfterWindow() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var clock = clockAt("2026-01-10T15:05:00Z"); // 18:05 local
+		var clock = clockAt("2026-01-10T18:05:00Z"); // 21:05 local
 		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS);
-		var test = new ComponentTest(sut) //
-				.addReference("setModbus", bridge) //
-				.addReference("componentManager", new DummyComponentManager(clock)) //
-				.activate(config(75, 45).build()) //
+		var test = start(sut, bridge, clock, config(75, 45).build()) //
 				.next(new TestCase(), CYCLES);
 		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
 		assertNull(sut.dischargeQueuedEnableForTest());
 
 		// Mid-window the SoC falls to the floor: disarm is queued.
-		test.next(new TestCase().timeleap(clock, 2, ChronoUnit.HOURS));
+		test.next(new TestCase().timeleap(clock, 1, ChronoUnit.HOURS));
 		bridge.withRegisters(0x0100, 45);
 		test.next(new TestCase(), CYCLES);
-		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+		assertSuppression(sut, false, DischargeSuppressionReason.FLOOR_REACHED);
 		assertEquals(0, sut.dischargeQueuedEnableForTest());
 
-		// The dummy bridge does not execute writes, so play the device: the write
-		// executes, then E033 reads back 0. The disarm is verified and held.
-		sut.dischargeWindowForTest().onEnableExecute(ExecuteState.OK);
-		bridge.withRegisters(0xE033, 0);
-		test.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
 		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
 
-		// Window over (02:05 next day local): suppression clears, enable restored to 1.
-		test.next(new TestCase().timeleap(clock, 6, ChronoUnit.HOURS));
+		// Window over (00:05 next day local): suppression clears, enable restored to 1.
+		test.next(new TestCase().timeleap(clock, 2, ChronoUnit.HOURS));
 		test.next(new TestCase(), CYCLES);
-		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertSuppression(sut, true, DischargeSuppressionReason.NONE); // device still 0 until restored
 		assertEquals(1, sut.dischargeQueuedEnableForTest());
-		sut.dischargeWindowForTest().onEnableExecute(ExecuteState.OK);
-		bridge.withRegisters(0xE033, 1);
-		test.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 1);
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
 	}
 
 	@Test
-	public void testRestartMidWindowReachesSameDecision() throws Exception {
+	public void testRestartAtWindowStartReachesSameDecision() throws Exception {
 		for (var soc : new int[] { 40, 60 }) {
 			var reason = soc == 40 ? DischargeSuppressionReason.FLOOR_REACHED : DischargeSuppressionReason.LOW_START;
 			// Two fresh instances (a restart) see the same state and decide the same.
 			for (var i = 0; i < 2; i++) {
 				var sut = new SrneBatteryInverterImpl();
-				new ComponentTest(sut) //
-						.addReference("setModbus", bridge(soc, MachineState.RUNNING_MAINS_BYPASS)) //
-						.addReference("componentManager",
-								new DummyComponentManager(clockAt("2026-01-10T18:00:00Z"))) // 21:00 local
-						.activate(config(75, 45).build()) //
+				start(sut, bridge(soc, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:00:00Z"),
+						config(75, 45).build()) // 21:00 local
 						.next(new TestCase(), CYCLES);
-				assertSuppression(sut, true, reason);
+				assertSuppression(sut, false, reason);
 				assertEquals(0, sut.dischargeQueuedEnableForTest());
 			}
 		}
 	}
 
 	@Test
+	public void testRestartMidWindowAfterStartRuleExpiryDoesNotLatchLowStart() throws Exception {
+		// 21:30 local, SoC below the start threshold after normal discharge, above floor.
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(60, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:30:00Z"),
+				config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertNull(sut.dischargeQueuedEnableForTest());
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+
+		// The floor rule still applies after a restart.
+		var floored = new SrneBatteryInverterImpl();
+		start(floored, bridge(40, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:30:00Z"),
+				config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(floored, false, DischargeSuppressionReason.FLOOR_REACHED);
+		assertEquals(0, floored.dischargeQueuedEnableForTest());
+	}
+
+	@Test
 	public void testOutageDefersWriteUntilStateTwoReturns() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var clock = clockAt("2026-01-10T15:05:00Z");
 		final var bridge = bridge(60, MachineState.INVERTER_POWERED);
-		final var test = new ComponentTest(sut) //
-				.addReference("setModbus", bridge) //
-				.addReference("componentManager", new DummyComponentManager(clock)) //
-				.activate(config(75, 45).build()) //
+		final var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
 				.next(new TestCase(), CYCLES);
 		// Decision is visible, but nothing is written during the outage.
-		assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
+		assertSuppression(sut, false, DischargeSuppressionReason.LOW_START);
 		assertNull(sut.dischargeQueuedEnableForTest());
 		assertEquals(State.IDLE, sut.dischargeWindowStateForTest());
 
@@ -171,21 +201,302 @@ public class SrneBatteryInverterDischargeRulesTest {
 		assertEquals(0, sut.dischargeQueuedEnableForTest());
 	}
 
+	// Task list of the component without any rule, in registration order. The rules
+	// only ever add the 0x0100 SoC read; with both rules off it must be absent.
+	private static final List<String> BASELINE_TASKS = List.of(
+			"FC3ReadRegistersTask@57359", "FC3ReadRegistersTask@57355", "FC3ReadRegistersTask@57360",
+			"FC3ReadRegistersTask@57372", "FC3ReadRegistersTask@57860", "FC3ReadRegistersTask@57866",
+			"FC3ReadRegistersTask@57877", "FC3ReadRegistersTask@57382", "FC3ReadRegistersTask@57384",
+			"FC3ReadRegistersTask@57391", "FC3ReadRegistersTask@57388", "FC3ReadRegistersTask@57395",
+			"FC3ReadRegistersTask@257", "FC3ReadRegistersTask@528", "FC16WriteRegistersTask@57359",
+			"FC16WriteRegistersTask@57372", "FC16WriteRegistersTask@57373", "FC16WriteRegistersTask@57374",
+			"FC16WriteRegistersTask@57375", "FC16WriteRegistersTask@57376", "FC16WriteRegistersTask@57861",
+			"FC16WriteRegistersTask@57866", "FC16WriteRegistersTask@57860", "FC16WriteRegistersTask@57877",
+			"FC16WriteRegistersTask@57382", "FC16WriteRegistersTask@57383", "FC16WriteRegistersTask@57388",
+			"FC16WriteRegistersTask@57389", "FC16WriteRegistersTask@57390", "FC16WriteRegistersTask@57395");
+
+	private static List<String> taskList(SrneBatteryInverterImpl sut) throws Exception {
+		return sut.defineModbusProtocol().getTaskManager().getTasks().stream()
+				.map(t -> t.getClass().getSimpleName() + "@" + t.getStartAddress()).toList();
+	}
+
 	@Test
 	public void testPropertiesOffKeepsBehaviourAndTrafficUnchanged() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var clock = clockAt("2026-01-10T15:05:00Z");
-		new ComponentTest(sut) //
-				.addReference("setModbus", bridge(10, MachineState.RUNNING_MAINS_BYPASS)) //
-				.addReference("componentManager", new DummyComponentManager(clock)) //
-				.activate(config(-1, -1).build()) //
+		start(sut, bridge(10, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(-1, -1).build()) //
 				.next(new TestCase(), CYCLES);
+		assertEquals(BASELINE_TASKS, taskList(sut));
 		assertNull(sut.getDischargeSuppressedChannelForTest().value().get());
+		assertEquals(DischargeSuppressionReason.UNDEFINED,
+				sut.getDischargeSuppressionReasonChannelForTest().value().asEnum());
 		assertNull(sut.dischargeQueuedEnableForTest());
 		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
-		// The SoC register 0x0100 is not read at all.
-		for (var task : sut.defineModbusProtocol().getTaskManager().getTasks()) {
-			assertTrue(task instanceof WriteTask || task.getStartAddress() != 0x0100);
+		// Nothing is pending on any write element (identical write traffic: none).
+		assertNull(sut.dischargeWindowForTest().enableWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.dischargeWindowForTest().startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.dischargeWindowForTest().stopWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	public void testPropertiesOffStillManagesConfiguredEnableExactlyAsBefore() throws Exception {
+		// Device disabled while the config says enabled: baseline queues enable=1, even
+		// at a SoC and time a rule would have suppressed.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(10, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0);
+		start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, -1).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(BASELINE_TASKS, taskList(sut));
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+	}
+
+	@Test
+	public void testRulesOnlyAddTheSocRead() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(80, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, -1).build());
+		var tasks = new java.util.ArrayList<>(taskList(sut));
+		assertTrue(tasks.remove("FC3ReadRegistersTask@256"));
+		assertEquals(BASELINE_TASKS, tasks);
+	}
+
+	@Test
+	public void testFailedRestoreIsRetriedUntilItSucceeds() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clock, config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		test.next(new TestCase().timeleap(clock, 1, ChronoUnit.HOURS));
+		bridge.withRegisters(0x0100, 45);
+		test.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+
+		// Window over: the restore is queued, but the write fails.
+		test.next(new TestCase().timeleap(clock, 2, ChronoUnit.HOURS));
+		test.next(new TestCase(), CYCLES);
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+		sut.dischargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		test.next(new TestCase(), 2);
+		assertEquals(State.FAILED, sut.dischargeWindowStateForTest());
+		assertEquals(SafeWriteHandler.State.FAILED, safeWriteState(sut));
+		// The channel reports the device (still disabled), not the decision (allow).
+		assertSuppression(sut, true, DischargeSuppressionReason.NONE);
+
+		// After the cooldown the restore is attempted again through the verified path.
+		test.next(new TestCase(), RETRY_CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 1);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertFalse(safeWriteState(sut) == SafeWriteHandler.State.FAILED);
+	}
+
+	@Test
+	public void testFailedSuppressIsRetriedBoundedAndRestoreStillHappens() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clock, config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		test.next(new TestCase().timeleap(clock, 1, ChronoUnit.HOURS));
+		bridge.withRegisters(0x0100, 45);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+
+		for (var i = 0; i < 3; i++) {
+			sut.dischargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+			test.next(new TestCase(), RETRY_CYCLES);
+			assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
 		}
+		// Retries are capped: the suppress stays failed (discharge stays allowed).
+		sut.dischargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		test.next(new TestCase(), 3 * RETRY_CYCLES);
+		assertEquals(State.FAILED, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.FLOOR_REACHED);
+
+		// A new target (window over) is never blocked by the cap.
+		test.next(new TestCase().timeleap(clock, 2, ChronoUnit.HOURS));
+		test.next(new TestCase(), CYCLES);
+		// The suppress never reached the device (E033 still 1), so the restore needs no write.
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+	}
+
+	@Test
+	public void testTargetFlipMidWriteWaitsForTheSequenceThenApplies() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clock, config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		test.next(new TestCase().timeleap(clock, 1, ChronoUnit.HOURS));
+		bridge.withRegisters(0x0100, 45);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+
+		// The window ends while the disarm is still in flight: reopen is refused, the
+		// running sequence is not disturbed.
+		test.next(new TestCase().timeleap(clock, 2, ChronoUnit.HOURS));
+		test.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+
+		// Once the sequence settles the flip is applied through the verified path.
+		deviceWritesEnable(sut, bridge, test, 0);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testUnknownSocChangesNothing() throws Exception {
+		// 0x0100 is not present on the dummy device: the read yields no value.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE02C, 0, START, STOP) //
+				.withRegisters(0xE033, 1, 0, 0, 0) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.getBatterySocForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertNull(sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testSocOutOfRangeIsIgnored() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(0xFFFF, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(65535, sut.getBatterySocForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertNull(sut.dischargeQueuedEnableForTest());
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+	}
+
+	@Test
+	public void testSocZeroNeedsConsecutiveReadingsToLatchStart() throws Exception {
+		// One failed-read 0, then real readings: no suppression, start check passes.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(0, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, -1).build()) //
+				.next(new TestCase());
+		assertEquals(DischargeSuppressionReason.NONE,
+				sut.getDischargeSuppressionReasonChannelForTest().getNextValue().asEnum());
+		bridge.withRegisters(0x0100, 80);
+		test.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		bridge.withRegisters(0x0100, 0);
+		test.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+		assertNull(sut.dischargeQueuedEnableForTest());
+
+		// A sustained 0 from the start is a real reading and does latch.
+		var sustained = new SrneBatteryInverterImpl();
+		start(sustained, bridge(0, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, -1).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(sustained, false, DischargeSuppressionReason.LOW_START);
+		assertEquals(0, sustained.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testFloorOnlyConfigThroughComponent() throws Exception {
+		var high = new SrneBatteryInverterImpl();
+		start(high, bridge(60, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(high, false, DischargeSuppressionReason.NONE);
+		assertNull(high.dischargeQueuedEnableForTest());
+
+		var low = new SrneBatteryInverterImpl();
+		var bridge = bridge(45, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(low, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(low, false, DischargeSuppressionReason.FLOOR_REACHED);
+		assertEquals(0, low.dischargeQueuedEnableForTest());
+		deviceWritesEnable(low, bridge, test, 0);
+		assertSuppression(low, true, DischargeSuppressionReason.FLOOR_REACHED);
+	}
+
+	@Test
+	public void testClockStepHoldsTheDecisionForOneCycle() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var bridge = bridge(45, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clock, config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.FLOOR_REACHED);
+
+		// The clock steps past the window end: that cycle holds, the next one applies.
+		test.next(new TestCase().timeleap(clock, 3, ChronoUnit.HOURS));
+		assertEquals(DischargeSuppressionReason.FLOOR_REACHED,
+				sut.getDischargeSuppressionReasonChannelForTest().getNextValue().asEnum());
+		test.next(new TestCase());
+		assertEquals(DischargeSuppressionReason.NONE,
+				sut.getDischargeSuppressionReasonChannelForTest().getNextValue().asEnum());
+	}
+
+	@Test
+	public void testInvalidTimeZoneWithRulesOffDoesNotFailActivation() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(80, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(-1, -1).setScheduleTimeZone("Not/AZone").build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertNull(sut.getDischargeSuppressedChannelForTest().value().get());
+	}
+
+	@Test
+	public void testInvalidTimeZoneWithRulesOnFallsBackToKampala() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		// 18:05Z is inside the window only in the fallback zone (21:05 Kampala).
+		start(sut, bridge(60, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, 45).setScheduleTimeZone("Not/AZone").build()) //
+				.next(new TestCase(), CYCLES);
+		assertSuppression(sut, false, DischargeSuppressionReason.LOW_START);
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testControlDisabledPublishesAndWritesNothing() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(60, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:05:00Z"),
+				config(75, 45).setControlEnabled(false).build()) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.getDischargeSuppressedChannelForTest().value().get());
+		assertEquals(DischargeSuppressionReason.UNDEFINED,
+				sut.getDischargeSuppressionReasonChannelForTest().value().asEnum());
+		assertNull(sut.dischargeQueuedEnableForTest());
+		assertEquals(State.IDLE, sut.dischargeWindowStateForTest());
+	}
+
+	@Test
+	public void testDriftedEnableIsCorrectedOncePerWindow() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+
+		// Someone disables the schedule on the device inside the window.
+		bridge.withRegisters(0xE033, 0);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 1);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+
+		// A second drift in the same window is not corrected again.
+		bridge.withRegisters(0xE033, 0);
+		test.next(new TestCase(), RETRY_CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
 	}
 }

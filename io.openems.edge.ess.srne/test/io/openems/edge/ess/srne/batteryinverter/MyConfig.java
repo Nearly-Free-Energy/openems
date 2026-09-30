@@ -133,6 +133,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 			return this;
 		}
 
+		public Builder setScheduleTimeZone(String value) {
+			this.scheduleTimeZone = value;
+			return this;
+		}
+
 		public MyConfig build() {
 			return new MyConfig(this);
 		}

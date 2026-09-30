@@ -477,4 +477,71 @@ public class ScheduleWindowTest {
 		assertEquals(ScheduleWindow.State.DONE, sut.getState());
 		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
 	}
+
+	@Test
+	void reopenIsRefusedMidSequenceAndAllowedFromDone() {
+		var sut = newDischargeWindow();
+		assertFalse(sut.reopen()); // IDLE
+		sut.reconcile(0, 0, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		assertFalse(sut.reopen());
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+		assertFalse(sut.reopen());
+		sut.verifyStart(5376);
+		sut.verifyStop(5888);
+		assertFalse(sut.reopen()); // WINDOW_VERIFIED
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		assertFalse(sut.reopen());
+		sut.onEnableExecute(ExecuteState.OK);
+		assertFalse(sut.reopen()); // ENABLE_AWAITING_READBACK
+		sut.verifyEnable(1);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertTrue(sut.reopen());
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+	}
+
+	@Test
+	void failedEnableWriteCanBeReopenedAndRecovers() {
+		var sut = newDischargeWindow();
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertTrue(sut.isRetryableFailure());
+		// FAILED is terminal for reconcile itself.
+		assertNull(sut.reconcile(5376, 5888, 0, 5376, 5888, 1));
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+
+		assertTrue(sut.reopen());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(1);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+	}
+
+	@Test
+	void failedReadbackTimeoutCanBeReopened() {
+		var sut = newDischargeWindow();
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.onCycle(2);
+		sut.onCycle(2);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertTrue(sut.reopen());
+	}
+
+	@Test
+	void rejectedConfigurationIsNeverReopened() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 5888, 5376, 1); // start >= stop
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertFalse(sut.isRetryableFailure());
+		assertFalse(sut.reopen());
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+	}
 }

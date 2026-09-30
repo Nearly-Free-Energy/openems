@@ -23,7 +23,8 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * disarm &rarr; verify-disabled &rarr; window write &rarr; verify-window
  * &rarr; re-arm. A live enabled window is never mutated in place; a failed or
  * mismatched write leaves the schedule disabled (the safe resting state) and is
- * never retried automatically.
+ * never retried by this class itself; only an explicit {@link #reopen()} by the
+ * caller (the discharge rules, see the component) starts a new attempt.
  *
  * <p>The desired end enable state is captured once: {@code enable=0}/{@code 1}
  * are taken from config, while {@code enable=-1} (unmanaged) captures whatever
@@ -96,6 +97,7 @@ final class ScheduleWindow {
 	private boolean startVerified;
 	private boolean stopVerified;
 	private int awaitingReadbackCycles;
+	private boolean rejected;
 
 	ScheduleWindow(int startAddress, int enableAddress, String label) {
 		this.label = label;
@@ -172,23 +174,27 @@ final class ScheduleWindow {
 		// never write a garbage value to the schedule-enable register.
 		if (cfgEnable < -1 || cfgEnable > 1) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule enable [" + cfgEnable + "]; must be 0 or 1";
 		}
 		// A window is the start+stop pair; both must be configured together so a
 		// half-specified window is never written.
 		if ((cfgStart < 0) != (cfgStop < 0)) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule: window needs both start and stop set together";
 		}
 		var windowManaged = cfgStart >= 0;
 		if (windowManaged && !isValidWindow(cfgStart, cfgStop)) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule window [" + cfgStart + "," + cfgStop
 					+ "]; must be valid times with start < stop (encode end-of-day as 23:59)";
 		}
 		// Arming requires a complete window this component can set and verify.
 		if (cfgEnable == 1 && !windowManaged) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule enable=1 without a complete window";
 		}
 		// Need the current enable (to respect the invariant and capture the end state)
@@ -364,18 +370,34 @@ final class ScheduleWindow {
 	}
 
 	/**
-	 * Re-opens a converged window so a changed effective enable target is driven
-	 * through the normal verified path. Only a settled ({@code DONE}) window is
-	 * re-opened; a running or failed sequence is left alone.
+	 * Re-opens a settled window so a changed effective enable target is driven
+	 * through the normal verified path. A {@code DONE} window is re-opened, and so
+	 * is a {@code FAILED} one whose failure was a runtime write/read-back error, so
+	 * the caller can retry (a failed restore must never leave the schedule disabled
+	 * for good). A configuration rejection is never re-opened, and a running
+	 * sequence is left alone.
 	 *
 	 * @return true if the window was re-opened
 	 */
 	public synchronized boolean reopen() {
-		if (this.state != State.DONE) {
+		if (this.state == State.FAILED && !this.rejected) {
+			this.startWrite.setNextWriteValue(null);
+			this.stopWrite.setNextWriteValue(null);
+			this.enableWrite.setNextWriteValue(null);
+		} else if (this.state != State.DONE) {
 			return false;
 		}
 		this.state = State.IDLE;
 		return true;
+	}
+
+	/**
+	 * Whether the window is in a runtime failure that {@link #reopen()} can retry.
+	 *
+	 * @return true if failed but not because of a rejected configuration
+	 */
+	public synchronized boolean isRetryableFailure() {
+		return this.state == State.FAILED && !this.rejected;
 	}
 
 	public synchronized State getState() {
