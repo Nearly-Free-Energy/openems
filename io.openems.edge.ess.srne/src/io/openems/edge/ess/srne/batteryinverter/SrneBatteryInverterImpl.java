@@ -549,6 +549,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					+ "schedule is not armed until a usable SoC is read (at most " + DischargeGuard.HOLD_CAP_MINUTES
 					+ " minutes, then it fails open)");
 		}
+		if (this.dischargeGuard.pollWindowEndWithoutSocWarning()) {
+			this.logWarn(this.log, "The discharge window ended without a usable battery SoC; the schedule was "
+					+ "not armed by this component during the window");
+		}
 		if (this.dischargeGuard.pollHoldCapWarning()) {
 			this.logWarn(this.log, "No usable battery SoC for " + DischargeGuard.HOLD_CAP_MINUTES
 					+ " minutes in the discharge window; no longer holding the arm back (fail open)");
@@ -597,12 +601,17 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		if (this.appliedDischargeEnable == null) {
 			this.appliedDischargeEnable = effective;
-		} else if (this.appliedDischargeEnable != effective
-				&& (this.dischargeWindow.getState() == ScheduleWindow.State.IDLE || this.dischargeWindow.reopen())) {
+		} else if (this.appliedDischargeEnable != effective && (this.dischargeWindow.getState() == ScheduleWindow.State.IDLE
+				|| this.dischargeWindow.isSequenceInProgress() || this.dischargeWindow.reopen())) {
+			// A running sequence follows the live target too, so an arm not yet written is
+			// turned into a disarm; the value reaches the window every cycle.
 			this.logInfo(this.log, "Discharge schedule enable target changed to [" + effective + "]");
 			this.appliedDischargeEnable = effective;
 			this.suppressRetries = 0;
 			this.failedCycles = 0;
+			if (effective == 0) {
+				this.driftCooldown = 0;
+			}
 		}
 		if (!this.dischargeGuard.isInsideWindow() && !suppressed) {
 			this.driftCorrectedUnsuppressed = false;

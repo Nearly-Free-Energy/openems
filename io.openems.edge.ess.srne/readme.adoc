@@ -226,6 +226,36 @@ is not.
 * Drift correction while suppressed no longer consumes the single correction allowed
   in a non-suppressed state.
 
+*Review round 5*
+
+* The live effective target (0 when suppressed, or when holding and the device is
+  not armed; otherwise the configured value) now reaches the discharge window every
+  cycle, also while a write sequence is in progress. So a suppression that latches
+  while the sequence is running takes effect before the arm is written: the end state
+  follows the target, and an `enable=1` that is queued but not yet executed is
+  withdrawn and replaced by a disarm (or by nothing, if the device already reads 0).
+  If the arm was already picked up by the bridge, the driver disarms again as soon as
+  the sequence has settled (the drift cooldown is reset when the target becomes 0).
+  Only the rules-managed discharge window is affected; with both rules off, and for
+  the charge window, nothing changed.
+* The start rule is evaluated once on the first usable SoC even when it is first read
+  after the 10 minute hold cap fired, so a low SoC first seen at minute 12 still
+  latches `LOW_START`. A restart later in the window does not get this: the cap has
+  not fired there, so only the floor applies.
+* An armed device that reads below the floor after a fail-open arm: the first
+  confirming cycle forces nothing new (an armed device stays as it is); after the second
+  confirmation the floor latches and the disarm is queued in the next cycle (tested).
+* The hold cap is `min(10 minutes, time left in the window)`, counted from the later of
+  the window start and the first evaluation (a restart mid-window restarts the count
+  there, not at the window start). A window that ends without any usable SoC and
+  without the cap having fired logs a WARN. For a window shorter than the cap the
+  hold therefore lasts the whole window (the device stays disarmed) and that WARN is
+  the only signal.
+* Residual: withdrawing a queued write (`setNextWriteValue(null)`) can race a write the
+  bridge worker thread has already picked up. A late execute callback is ignored in
+  `FAILED`, so the device can be armed while the state is `FAILED` until the retry
+  re-reads it (every 8 cycles while suppressing, then every 60). No code change.
+
 *Fail-open trade-offs* (deliberate; the normal schedule is preferred over a silent
 permanent suppress):
 

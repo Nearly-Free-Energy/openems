@@ -532,6 +532,119 @@ public class SrneBatteryInverterDischargeRulesTest {
 		assertEquals(1, sut.dischargeQueuedEnableForTest());
 	}
 
+	// Armed device whose window differs from the config, so an arm sequence
+	// (disarm, window write, re-arm) is needed.
+	private static DummyModbusBridge staleWindowBridge(int soc) {
+		return new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE02C, 0, START - 256, STOP) //
+				.withRegisters(0xE033, 1, 0, 0, 0) //
+				.withRegisters(0x0100, soc) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+	}
+
+	private static void deviceWritesWindow(SrneBatteryInverterImpl sut, DummyModbusBridge bridge, ComponentTest test)
+			throws Exception {
+		sut.dischargeWindowForTest().onStartExecute(ExecuteState.OK);
+		sut.dischargeWindowForTest().onStopExecute(ExecuteState.OK);
+		bridge.withRegisters(0xE02D, START, STOP);
+		test.next(new TestCase(), CYCLES);
+	}
+
+	@Test
+	public void testLatchWhileWindowIsBeingWrittenNeverQueuesTheArm() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = staleWindowBridge(80);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.WINDOW_QUEUED, sut.dischargeWindowStateForTest());
+
+		// The floor is reached while the window is being written.
+		bridge.withRegisters(0x0100, 40);
+		test.next(new TestCase(), CYCLES);
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+		deviceWritesWindow(sut, bridge, test);
+		test.next(new TestCase(), CYCLES);
+
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		assertEquals(0, sut.dischargeWindowForTest().desiredEnable());
+		// The dummy bridge never consumes the earlier disarm; what matters is that no 1 is pending.
+		var pending = sut.dischargeWindowForTest().enableWriteElement().getNextWriteValueAndReset();
+		assertTrue(pending == null || pending[0].getValue() == 0);
+	}
+
+	@Test
+	public void testLatchWhileTheArmIsQueuedWithdrawsIt() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = staleWindowBridge(80);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		deviceWritesWindow(sut, bridge, test);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+
+		bridge.withRegisters(0x0100, 40);
+		test.next(new TestCase(), CYCLES);
+
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertEquals(0, sut.dischargeWindowForTest().desiredEnable());
+		assertNull(sut.dischargeWindowForTest().enableWriteElement().getNextWriteValueAndReset());
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+	}
+
+	@Test
+	public void testLatchAfterTheArmWasWrittenDisarmsAgain() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = staleWindowBridge(80);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		deviceWritesWindow(sut, bridge, test);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+
+		// The arm went out just before the floor was reached.
+		sut.dischargeWindowForTest().onEnableExecute(ExecuteState.OK);
+		bridge.withRegisters(0xE033, 1);
+		bridge.withRegisters(0x0100, 40);
+		test.next(new TestCase(), CYCLES);
+
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+	}
+
+	@Test
+	public void testArmedAfterFailOpenIsDisarmedOnceTheFloorLatches() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		// Armed device, SoC unreadable at first; the hold cap fails open.
+		var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE02C, 0, START, STOP) //
+				.withRegisters(0xE033, 1, 0, 0, 0) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var test = start(sut, bridge, clock, config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		test.next(new TestCase().timeleap(clock, 11, ChronoUnit.MINUTES));
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertNull(sut.dischargeQueuedEnableForTest());
+
+		// The SoC becomes readable and is below the floor: armed device is disarmed.
+		bridge.withRegisters(0x0100, 40);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+	}
+
 	@Test
 	public void testUnknownSocChangesNothing() throws Exception {
 		// 0x0100 is not present on the dummy device: the read yields no value.

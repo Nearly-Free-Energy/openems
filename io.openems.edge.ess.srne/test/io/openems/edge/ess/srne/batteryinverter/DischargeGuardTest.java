@@ -241,4 +241,64 @@ public class DischargeGuardTest {
 		run(guard, at(21, 40), at(21, 42), null);
 		assertFalse(guard.isHoldingArm());
 	}
+
+	@Test
+	public void testLowSocFirstReadableAfterTheCapStillLatchesLowStart() {
+		var guard = new DischargeGuard(75, 45);
+		run(guard, at(21, 0), at(21, 11), null);
+		assertFalse(guard.isHoldingArm());
+		assertEquals(NONE, guard.evaluate(at(21, 12), START, STOP, 60));
+		assertEquals(LOW_START, guard.evaluate(at(21, 13), START, STOP, 60));
+	}
+
+	@Test
+	public void testHealthySocFirstReadableAfterTheCapLatchesNothingAndClosesTheStartRule() {
+		var guard = new DischargeGuard(75, 45);
+		run(guard, at(21, 0), at(21, 11), null);
+		assertEquals(NONE, run(guard, at(21, 12), at(21, 13), 80));
+		assertEquals(NONE, run(guard, at(21, 14), at(21, 16), 60));
+	}
+
+	@Test
+	public void testLateStartRuleDoesNotApplyToARestartWithAUsableSoc() {
+		assertEquals(NONE, run(new DischargeGuard(75, 45), at(21, 30), at(21, 32), 60));
+	}
+
+	@Test
+	public void testHoldIsBoundedByTheRemainingWindowAndTheEndIsWarned() {
+		var guard = new DischargeGuard(75, 45);
+		var shortStop = 21 * 256 + 5;
+		for (var minute = 0; minute < 5; minute++) {
+			guard.evaluate(at(21, minute), START, shortStop, null);
+			assertTrue(guard.isHoldingArm());
+		}
+		assertFalse(guard.pollWindowEndWithoutSocWarning());
+		guard.evaluate(at(21, 5), START, shortStop, null);
+		assertFalse(guard.isHoldingArm());
+		assertTrue(guard.pollWindowEndWithoutSocWarning());
+		assertFalse(guard.pollWindowEndWithoutSocWarning());
+		assertFalse(guard.pollHoldCapWarning());
+	}
+
+	@Test
+	public void testRestartLateInTheWindowCountsTheCapFromTheFirstEvaluation() {
+		var guard = new DischargeGuard(75, 45);
+		run(guard, at(22, 0), at(22, 9), null);
+		assertTrue(guard.isHoldingArm());
+		guard.evaluate(at(22, 10), START, STOP, null);
+		assertFalse(guard.isHoldingArm());
+		assertTrue(guard.pollHoldCapWarning());
+		assertFalse(guard.pollWindowEndWithoutSocWarning());
+	}
+
+	@Test
+	public void testWindowEndWithUsableSocOrAfterTheCapDoesNotWarn() {
+		var guard = new DischargeGuard(75, 45);
+		run(guard, at(21, 0), at(21, 5), 80);
+		guard.evaluate(at(23, 0), START, STOP, 80);
+		assertFalse(guard.pollWindowEndWithoutSocWarning());
+		run(guard, nextDay(21, 0), nextDay(21, 12), null);
+		guard.evaluate(nextDay(23, 0), START, STOP, null);
+		assertFalse(guard.pollWindowEndWithoutSocWarning());
+	}
 }

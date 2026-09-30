@@ -179,8 +179,25 @@ final class ScheduleWindow {
 			}
 			yield this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
 		}
+		case ENABLE_QUEUED -> this.withdrawQueuedArm(actualEnable, cfgEnable);
 		default -> null;
 		};
+	}
+
+	// A suppression that latches while the arm is queued but not yet executed turns it
+	// into a disarm (or nothing, if the device already reads 0). An arm the bridge has
+	// already picked up cannot be recalled; the caller's drift correction disarms it.
+	private String withdrawQueuedArm(Integer actualEnable, int cfgEnable) {
+		if (cfgEnable != 0 || !Integer.valueOf(1).equals(this.targetEnable)) {
+			return null;
+		}
+		this.desiredEnable = 0;
+		this.enableWrite.setNextWriteValue(null);
+		if (Integer.valueOf(0).equals(actualEnable)) {
+			this.state = State.DONE;
+			return "Withdrew queued [" + this.label + "] schedule enable=1; the target is now 0";
+		}
+		return this.queueEnable(0);
 	}
 
 	// Validates the request, captures the desired end enable state once, then takes
@@ -450,6 +467,17 @@ final class ScheduleWindow {
 	 */
 	public synchronized boolean isRetryableFailure() {
 		return this.state == State.FAILED && !this.rejected;
+	}
+
+	/**
+	 * Whether a write sequence is running, i.e. the window is neither settled
+	 * ({@code IDLE}, {@code DONE}) nor failed.
+	 *
+	 * @return true if a sequence is in progress
+	 */
+	public synchronized boolean isSequenceInProgress() {
+		return this.state != State.IDLE && this.state != State.DONE && this.state != State.FAILED
+				&& this.state != State.UNDEFINED;
 	}
 
 	public synchronized State getState() {

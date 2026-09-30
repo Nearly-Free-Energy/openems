@@ -24,6 +24,10 @@ import java.time.LocalDateTime;
  * <li>arming is held back while no usable SoC has been read in the window, but
  * for at most {@link #HOLD_CAP_MINUTES} minutes (fail open: a night must not be
  * skipped silently because the SoC is unreadable),</li>
+ * <li>the hold is bounded by the time left in the window, and a window that ends
+ * without a usable SoC is reported,</li>
+ * <li>a SoC first readable after the hold cap fired still gets the start rule
+ * once,</li>
  * <li>per local date the start rule can suppress at most once and never again
  * after the window was restored; the floor rule is always allowed.</li>
  * </ul>
@@ -56,6 +60,9 @@ final class DischargeGuard {
 	private boolean clockStepPending;
 	private long noSocSeconds;
 	private boolean holdCapWarnPending;
+	private long holdCapSeconds = HOLD_CAP_MINUTES * 60L;
+	private boolean windowEndWarnPending;
+	private boolean lateStartRule;
 
 	DischargeGuard(int startMinSoc, int floorSoc) {
 		this.startMinSoc = startMinSoc;
@@ -94,7 +101,7 @@ final class DischargeGuard {
 	}
 
 	private boolean isHoldCapReached() {
-		return this.noSocSeconds >= HOLD_CAP_MINUTES * 60L;
+		return this.noSocSeconds >= this.holdCapSeconds;
 	}
 
 	/**
@@ -105,6 +112,19 @@ final class DischargeGuard {
 	boolean pollHoldCapWarning() {
 		var due = this.holdCapWarnPending;
 		this.holdCapWarnPending = false;
+		return due;
+	}
+
+	/**
+	 * One-shot: true when a window ended without a usable SoC ever being read and
+	 * the hold cap had not fired (a window shorter than the cap, or a restart late in
+	 * the window), so the night ended disarmed without any other warning.
+	 *
+	 * @return true if a warning is due
+	 */
+	boolean pollWindowEndWithoutSocWarning() {
+		var due = this.windowEndWarnPending;
+		this.windowEndWarnPending = false;
 		return due;
 	}
 
@@ -162,6 +182,9 @@ final class DischargeGuard {
 			if (this.reason != DischargeSuppressionReason.NONE) {
 				this.restoredThisDate = true;
 			}
+			if (this.insideWindow && !this.usableSocSeen && !this.isHoldCapReached()) {
+				this.windowEndWarnPending = true;
+			}
 			this.insideWindow = false;
 			this.reason = DischargeSuppressionReason.NONE;
 			this.pending = DischargeSuppressionReason.NONE;
@@ -172,10 +195,18 @@ final class DischargeGuard {
 			this.unusableSocWarned = false;
 			this.noSocSeconds = 0;
 			this.holdCapWarnPending = false;
+			this.holdCapSeconds = HOLD_CAP_MINUTES * 60L;
+			this.lateStartRule = false;
 			return this.reason;
 		}
 		var wasInside = this.insideWindow;
 		this.insideWindow = true;
+		if (!wasInside) {
+			// The hold is bounded by the time left in the window, counted from the later of
+			// the window start and this first evaluation (e.g. after a restart).
+			var remaining = (stop - nowMinutes) * 60L - now.getSecond();
+			this.holdCapSeconds = Math.min(HOLD_CAP_MINUTES * 60L, remaining);
+		}
 		// Wall-clock time inside the window without a usable SoC. A clock step returned
 		// above, so the step itself is never counted.
 		if (!this.usableSocSeen && wasInside && previous != null) {
@@ -189,11 +220,15 @@ final class DischargeGuard {
 			this.pendingCount = 0;
 			return this.reason;
 		}
+		this.lateStartRule |= !this.usableSocSeen && this.isHoldCapReached();
 		this.usableSocSeen = true;
 		if (this.reason != DischargeSuppressionReason.NONE) {
 			return this.reason;
 		}
-		var startRuleOpen = this.startMinSoc >= 0 && !this.startPassed && nowMinutes < start + START_RULE_MINUTES;
+		// A SoC first readable after the hold cap fired still gets the start rule once,
+		// so a low start is not armed just because the SoC was late.
+		var startRuleOpen = this.startMinSoc >= 0 && !this.startPassed
+				&& (nowMinutes < start + START_RULE_MINUTES || this.lateStartRule);
 		var candidate = DischargeSuppressionReason.NONE;
 		if (this.floorSoc >= 0 && soc <= this.floorSoc) {
 			candidate = DischargeSuppressionReason.FLOOR_REACHED;
@@ -209,6 +244,7 @@ final class DischargeGuard {
 		if (candidate == DischargeSuppressionReason.NONE) {
 			this.pending = candidate;
 			this.pendingCount = 0;
+			this.lateStartRule = false;
 			return this.reason;
 		}
 		this.pendingCount = candidate == this.pending ? this.pendingCount + 1 : 1;
@@ -216,6 +252,7 @@ final class DischargeGuard {
 		if (this.pendingCount >= CONFIRMATIONS) {
 			this.reason = candidate;
 			this.lowStartUsed |= candidate == DischargeSuppressionReason.LOW_START;
+			this.lateStartRule = false;
 		}
 		return this.reason;
 	}
