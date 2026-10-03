@@ -313,6 +313,27 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	@Test
+	public void testDriftBackToArmedIsCorrectedWhileMachineStateStaysUnverified() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.INVERTER_POWERED);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DISABLE_VERIFIED, sut.dischargeWindowStateForTest());
+
+		// E033 reads 1 again while the state is never 2: another disarm, still no window write.
+		for (var round = 0; round < 3; round++) {
+			bridge.withRegisters(0xE033, 1);
+			test.next(new TestCase(), RETRY_CYCLES);
+			assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest(), "round " + round);
+			assertEquals(0, sut.dischargeQueuedEnableForTest());
+			assertNull(sut.dischargeWindowForTest().queuedStart());
+			deviceWritesEnable(sut, bridge, test, 0);
+			assertEquals(State.DISABLE_VERIFIED, sut.dischargeWindowStateForTest(), "round " + round);
+		}
+	}
+
+	@Test
 	public void testDriftBackToArmedAfterFloorLatchIsCorrectedRepeatedly() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(40, MachineState.RUNNING_MAINS_BYPASS);

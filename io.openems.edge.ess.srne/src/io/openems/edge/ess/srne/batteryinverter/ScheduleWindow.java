@@ -439,7 +439,7 @@ final class ScheduleWindow {
 	/**
 	 * Disarms the schedule without touching the window: the only write the caller
 	 * may make while the unit's machine state is not verified. Acts only from
-	 * {@code IDLE} and only if the device is known to be armed, or withdraws an arm
+	 * {@code IDLE} or a settled {@code DISABLE_VERIFIED} and only if the device is known to be armed, or withdraws an arm
 	 * that is queued but not yet written; the window itself is left to the normal
 	 * path.
 	 *
@@ -450,7 +450,11 @@ final class ScheduleWindow {
 		if (this.state == State.ENABLE_QUEUED) {
 			return this.withdrawQueuedArm(actualEnable, 0);
 		}
-		if (this.state != State.IDLE || actualEnable == null || actualEnable.equals(0)) {
+		// DISABLE_VERIFIED is a settled disarm waiting for the verified machine state to
+		// continue the window path; if the register drifted back to armed it is disarmed
+		// again, still without advancing any window write.
+		if ((this.state != State.IDLE && this.state != State.DISABLE_VERIFIED) || actualEnable == null
+				|| actualEnable.equals(0)) {
 			return null;
 		}
 		this.desiredEnable = 0;
