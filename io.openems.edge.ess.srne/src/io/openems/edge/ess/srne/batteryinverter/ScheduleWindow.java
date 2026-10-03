@@ -439,9 +439,9 @@ final class ScheduleWindow {
 	/**
 	 * Disarms the schedule without touching the window: the only write the caller
 	 * may make while the unit's machine state is not verified. Acts only from
-	 * {@code IDLE} or a settled {@code DISABLE_VERIFIED} and only if the device is known to be armed, or withdraws an arm
-	 * that is queued but not yet written; the window itself is left to the normal
-	 * path.
+	 * {@code IDLE} or a settled {@code DISABLE_VERIFIED}/{@code WINDOW_VERIFIED}
+	 * and only if the device is known to be armed, or withdraws an arm that is
+	 * queued but not yet written; the window itself is left to the normal path.
 	 *
 	 * @param actualEnable the read-back enable register, or null if unknown
 	 * @return a one-shot audit message, or null if nothing was queued
@@ -450,15 +450,28 @@ final class ScheduleWindow {
 		if (this.state == State.ENABLE_QUEUED) {
 			return this.withdrawQueuedArm(actualEnable, 0);
 		}
-		// DISABLE_VERIFIED is a settled disarm waiting for the verified machine state to
-		// continue the window path; if the register drifted back to armed it is disarmed
-		// again, still without advancing any window write.
-		if ((this.state != State.IDLE && this.state != State.DISABLE_VERIFIED) || actualEnable == null
-				|| actualEnable.equals(0)) {
+		// DISABLE_VERIFIED and WINDOW_VERIFIED are settled steps waiting for the verified
+		// machine state to continue the sequence; if the register drifted back to armed it
+		// is disarmed again, still without advancing any window write.
+		if ((this.state != State.IDLE && !this.isSettledStep()) || actualEnable == null || actualEnable.equals(0)) {
 			return null;
 		}
 		this.desiredEnable = 0;
 		return this.queueEnable(0);
+	}
+
+	private boolean isSettledStep() {
+		return this.state == State.DISABLE_VERIFIED || this.state == State.WINDOW_VERIFIED;
+	}
+
+	/**
+	 * Whether the window rests in a verified step that only the verified machine
+	 * state advances.
+	 *
+	 * @return true if in {@code DISABLE_VERIFIED} or {@code WINDOW_VERIFIED}
+	 */
+	public synchronized boolean isWaitingForVerifiedState() {
+		return this.isSettledStep();
 	}
 
 	/**

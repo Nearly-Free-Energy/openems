@@ -333,6 +333,118 @@ public class SrneBatteryInverterDischargeRulesTest {
 		}
 	}
 
+	// Unverified machine state (5): the window stays disarm-only, so every settled or
+	// failing state must still get its drifted-back-to-armed register disarmed again.
+	private static void assertUnverifiedDriftIsDisarmed(SrneBatteryInverterImpl sut, DummyModbusBridge bridge,
+			ComponentTest test) throws Exception {
+		// The dummy bridge never consumes writes: drop what was queued before the drift.
+		sut.dischargeWindowForTest().startWriteElement().getNextWriteValueAndReset();
+		sut.dischargeWindowForTest().stopWriteElement().getNextWriteValueAndReset();
+		bridge.withRegisters(0xE033, 1);
+		var queued = false;
+		for (var i = 0; i < RETRY_CYCLES * 3 && !queued; i++) {
+			test.next(new TestCase());
+			assertNull(pendingEnableOtherThanZero(sut));
+			queued = sut.dischargeWindowStateForTest() == State.DISABLE_QUEUED;
+		}
+		assertTrue(queued, "state " + sut.dischargeWindowStateForTest());
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+		assertNull(sut.dischargeWindowForTest().startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.dischargeWindowForTest().stopWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	public void testDriftWhileWindowVerifiedAndMachineStateUnverifiedIsDisarmedAgain() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = staleWindowBridge(80);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.WINDOW_QUEUED, sut.dischargeWindowStateForTest());
+		// Floor latches and the state drops while the window is written: it waits at WINDOW_VERIFIED.
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		bridge.withRegisters(0x0100, 40);
+		test.next(new TestCase(), CYCLES);
+		deviceWritesWindow(sut, bridge, test);
+		assertEquals(State.WINDOW_VERIFIED, sut.dischargeWindowStateForTest());
+		assertUnverifiedDriftIsDisarmed(sut, bridge, test);
+	}
+
+	@Test
+	public void testDriftWhileDoneAndMachineStateUnverifiedIsDisarmedAgain() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.RUNNING_MAINS_BYPASS);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		assertUnverifiedDriftIsDisarmed(sut, bridge, test);
+	}
+
+	@Test
+	public void testDriftAfterFailedDisarmAndMachineStateUnverifiedIsDisarmedAgain() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.INVERTER_POWERED);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		// The queued disarm is executed with an error: FAILED, then retried.
+		sut.dischargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertEquals(State.FAILED, sut.dischargeWindowStateForTest());
+		assertUnverifiedDriftIsDisarmed(sut, bridge, test);
+	}
+
+	@Test
+	public void testStuckDisarmAndMachineStateUnverifiedFailsAndIsQueuedAgain() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.INVERTER_POWERED);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(State.DISABLE_QUEUED, sut.dischargeWindowStateForTest());
+		// Never executed: bounded to FAILED, then queued again while still unverified.
+		assertTrue(cyclesUntil(test, sut, State.FAILED, 60) > 0);
+		assertTrue(cyclesUntil(test, sut, State.DISABLE_QUEUED, RETRY_CYCLES) > 0);
+		assertEquals(0, sut.dischargeQueuedEnableForTest());
+	}
+
+	@Test
+	public void testUnreadDisarmAndMachineStateUnverifiedFailsAndIsQueuedAgain() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.INVERTER_POWERED);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		// Executed, but the register keeps reading 1: the read-back fails the disarm.
+		sut.dischargeWindowForTest().onEnableExecute(ExecuteState.OK);
+		assertTrue(cyclesUntil(test, sut, State.FAILED, 60) > 0);
+		assertTrue(cyclesUntil(test, sut, State.DISABLE_QUEUED, RETRY_CYCLES) > 0);
+	}
+
+	@Test
+	public void testWindowWriteStuckAndMachineStateUnverifiedFailsThenDisarmsADriftedEnable() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = staleWindowBridge(80);
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(75, 45).build()) //
+				.next(new TestCase(), CYCLES);
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.WINDOW_QUEUED, sut.dischargeWindowStateForTest());
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		bridge.withRegisters(0x0100, 40);
+		// The window write is never executed: bounded to FAILED, then the drift is disarmed.
+		assertTrue(cyclesUntil(test, sut, State.FAILED, 60) > 0);
+		assertUnverifiedDriftIsDisarmed(sut, bridge, test);
+	}
+
+	@Test
+	public void testRulesOffNeverTakesTheUnverifiedDisarmPath() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(40, MachineState.INVERTER_POWERED);
+		start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, -1).build()) //
+				.next(new TestCase(), RETRY_CYCLES);
+		assertEquals(State.IDLE, sut.dischargeWindowStateForTest());
+		assertEquals(State.IDLE, sut.chargeWindowForTest().getState());
+		assertNull(sut.dischargeQueuedEnableForTest());
+	}
+
 	@Test
 	public void testDriftBackToArmedAfterFloorLatchIsCorrectedRepeatedly() throws Exception {
 		var sut = new SrneBatteryInverterImpl();

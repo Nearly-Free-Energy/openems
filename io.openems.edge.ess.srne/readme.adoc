@@ -312,6 +312,32 @@ is not.
   a latch to the queued disarm, asserted in the tests, depends on the read order of the
   dummy bridge and is not a device guarantee.
 
+*Review round 8 (maintainer)*
+
+* Fixed: after a floor disarm in machine state 5 or 7 the window rests in
+  `DISABLE_VERIFIED`; if `0xE033` then read `1` again, nothing disarmed it until state `2`
+  returned. While the discharge rules apply and a suppression is latched, a device reading
+  `enable=1` in a settled step that waits for the verified state (`DISABLE_VERIFIED` or
+  `WINDOW_VERIFIED`) now gets another disarm queued. It is rate-limited with the existing
+  drift cooldown (60 cycles), writes no start or stop register and never arms; arming and
+  window writes still wait for state `2`. The first disarm from `IDLE` is not delayed.
+* Other states reachable while the machine state is unverified:
+** `DONE` and a retryable `FAILED`: already handled by the drift correction and the failure
+   retry (both reopen to `IDLE`, then the disarm-only path acts). Covered by tests.
+** `DISABLE_QUEUED` stuck, `DISABLE_AWAITING_READBACK` without a matching read-back,
+   `WINDOW_QUEUED` and `WINDOW_AWAITING_READBACK`: all bounded by the queued/read-back
+   timeout (the queued bound is on while the rules apply), so they end in `FAILED` and are
+   retried. Covered by tests (stuck disarm, unread disarm, stuck window write).
+** `WINDOW_VERIFIED`: settled and unbounded, so it needed the same fix as
+   `DISABLE_VERIFIED`; covered by a test.
+** `ENABLE_QUEUED` is withdrawn, `ENABLE_AWAITING_READBACK` is bounded and ends in `DONE` or
+   `FAILED` (see above); neither is a settled hole.
+** `FAILED` from a rejected configuration is never reopened. It is pre-existing, identical
+   with the verified state, and needs a configuration fix; this driver never arms from it.
+* The new path is reached only from the unverified-state disarm, which first checks that the
+  discharge rules apply. With both rules off it is unreachable, the charge window is not
+  involved, and the behaviour is unchanged (test added).
+
 *Fail-open trade-offs* (deliberate; the normal schedule is preferred over a silent
 permanent suppress):
 

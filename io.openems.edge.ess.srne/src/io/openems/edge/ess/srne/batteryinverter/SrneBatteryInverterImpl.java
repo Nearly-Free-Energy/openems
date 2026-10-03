@@ -482,8 +482,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		if (this.effectiveDischargeEnable() != 0) {
 			return;
 		}
-		// A settled disarm that drifted back to armed is re-disarmed at the drift rate.
-		var settled = this.dischargeWindow.getState() == ScheduleWindow.State.DISABLE_VERIFIED;
+		// A settled step that drifted back to armed is re-disarmed at the drift rate.
+		var settled = this.dischargeWindow.isWaitingForVerifiedState();
 		if (settled && this.driftCooldown > 0) {
 			return;
 		}
