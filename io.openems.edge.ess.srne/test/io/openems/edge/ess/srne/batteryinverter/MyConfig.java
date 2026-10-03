@@ -28,6 +28,9 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int dischargeScheduleEnable = -1;
 		private int outputPriority = -1;
 		private int bmsCommunication = -1;
+		private int dischargeStartMinSoc = -1;
+		private int dischargeFloorSoc = -1;
+		private String scheduleTimeZone = "Africa/Kampala";
 
 		private Builder() {
 		}
@@ -117,6 +120,21 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setBmsCommunication(int value) {
 			this.bmsCommunication = value;
+			return this;
+		}
+
+		public Builder setDischargeStartMinSoc(int value) {
+			this.dischargeStartMinSoc = value;
+			return this;
+		}
+
+		public Builder setDischargeFloorSoc(int value) {
+			this.dischargeFloorSoc = value;
+			return this;
+		}
+
+		public Builder setScheduleTimeZone(String value) {
+			this.scheduleTimeZone = value;
 			return this;
 		}
 
@@ -237,6 +255,21 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int dischargeScheduleEnable() {
 		return this.builder.dischargeScheduleEnable;
+	}
+
+	@Override
+	public int dischargeStartMinSoc() {
+		return this.builder.dischargeStartMinSoc;
+	}
+
+	@Override
+	public int dischargeFloorSoc() {
+		return this.builder.dischargeFloorSoc;
+	}
+
+	@Override
+	public String scheduleTimeZone() {
+		return this.builder.scheduleTimeZone;
 	}
 
 	@Override

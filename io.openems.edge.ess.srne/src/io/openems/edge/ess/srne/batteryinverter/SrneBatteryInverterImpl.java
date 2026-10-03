@@ -5,6 +5,10 @@ import static org.osgi.service.component.annotations.ReferenceCardinality.MANDAT
 import static org.osgi.service.component.annotations.ReferencePolicy.STATIC;
 import static org.osgi.service.component.annotations.ReferencePolicyOption.GREEDY;
 
+import java.time.Clock;
+import java.time.DateTimeException;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -38,6 +42,8 @@ import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
 import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
 import io.openems.edge.common.channel.IntegerReadChannel;
 import io.openems.edge.common.channel.value.Value;
+import io.openems.edge.common.component.ClockProvider;
+import io.openems.edge.common.component.ComponentManager;
 import io.openems.edge.common.component.OpenemsComponent;
 import io.openems.edge.common.event.EdgeEventConstants;
 import io.openems.edge.common.startstop.StartStop;
@@ -60,8 +66,17 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
 @GenerateTargetsFromReferences("Modbus")
 public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		implements SrneBatteryInverter, Srne, OffGridBatteryInverter, ManagedSymmetricBatteryInverter,
-		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable, EventHandler {
+		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable, EventHandler, ClockProvider {
 	private static final int READBACK_TIMEOUT_CYCLES = 30;
+	private static final String DEFAULT_SCHEDULE_ZONE = "Africa/Kampala";
+	// A failed discharge-window write is retried after a cooldown and never given
+	// up on until the target changes. A failed suppress (enable=0) is retried fast
+	// for MAX_FAST_SUPPRESS_RETRIES attempts, then at the slow cadence; a failed
+	// restore (enable=1) always uses the slow cadence.
+	private static final int FAILED_RETRY_COOLDOWN_CYCLES = 60;
+	private static final int SUPPRESS_RETRY_COOLDOWN_CYCLES = 8;
+	private static final int MAX_FAST_SUPPRESS_RETRIES = 3;
+	private static final int MAX_RULE_SOC = 99;
 	private final Logger log = LoggerFactory.getLogger(SrneBatteryInverterImpl.class);
 
 	private final AtomicReference<TargetGridMode> targetGridMode = new AtomicReference<>(TargetGridMode.GO_ON_GRID);
@@ -95,6 +110,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final ScheduleWindow chargeWindow = new ScheduleWindow(0xE026, 0xE02C, "CHARGE");
 	private final ScheduleWindow dischargeWindow = new ScheduleWindow(0xE02D, 0xE033, "DISCHARGE");
 	private Config config;
+	private DischargeGuard dischargeGuard = new DischargeGuard(-1, -1);
+	private ZoneId scheduleZone = ZoneId.of(DEFAULT_SCHEDULE_ZONE);
+	private Integer appliedDischargeEnable;
+	private int failedCycles;
+	private int suppressRetries;
+	private boolean driftCorrectedUnsuppressed;
+	private int driftCooldown;
+	private boolean mismatchLogged;
 	// One-shot audit flag: log at most once that the output-priority write is held
 	// pending its prerequisites (reconcile runs every cycle).
 	private boolean outputPriorityHeldLogged;
@@ -105,6 +128,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			target = "(&(id=${config.modbus_id})(enabled=true))")
 	protected void setModbus(BridgeModbus modbus) {
 		super.setModbus(modbus);
+	}
+
+	@Reference
+	private ComponentManager componentManager;
+
+	@Override
+	public Clock getClock() {
+		return this.componentManager.getClock();
 	}
 
 	public SrneBatteryInverterImpl() {
@@ -123,6 +154,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Activate
 	private void activate(ComponentContext context, Config config) throws OpenemsException {
 		this.config = config;
+		this.dischargeGuard = this.createDischargeGuard(config);
 		/*
 		 * There is intentionally no @Modified method. A settings configuration update
 		 * causes DS to replace this component instance, giving every setting a fresh
@@ -131,6 +163,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		 * same activation.
 		 */
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
+		if (this.dischargeGuard.isActive()) {
+			this.scheduleZone = this.parseScheduleZone(config.scheduleTimeZone());
+			this.warnIfRulesInert(config);
+		}
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
 
@@ -255,7 +291,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	@Override
 	protected ModbusProtocol defineModbusProtocol() {
-		return new ModbusProtocol(this, //
+		var protocol = new ModbusProtocol(this, //
 				new FC3ReadRegistersTask(0xE00F, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.DISCHARGE_CUTOFF_SOC,
 								new UnsignedWordElement(0xE00F))), //
@@ -353,6 +389,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.dischargeWindow.stopWriteElement()), //
 				new FC16WriteRegistersTask(this.dischargeWindow::onEnableExecute, 0xE033,
 						this.dischargeWindow.enableWriteElement()));
+		// SoC for the discharge rules: the same register 0x0100 that SrneEss maps to
+		// SymmetricEss.SOC. Only read when a rule is configured, so the default bus
+		// traffic is unchanged.
+		if (this.dischargeGuard.isActive()) {
+			protocol.addTask(new FC3ReadRegistersTask(0x0100, Priority.HIGH, //
+					m(SrneBatteryInverter.ChannelId.BATTERY_SOC, new UnsignedWordElement(0x0100))));
+		}
+		return protocol;
 	}
 
 	@Override
@@ -383,13 +427,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			handler.onCycle(READBACK_TIMEOUT_CYCLES);
 		}
 		this.chargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
+		// Only the rules-managed discharge window is retried, so only it may give up on
+		// a write that stays queued; every other window behaves as without the rules.
+		this.dischargeWindow.setQueuedTimeout(this.config != null && this.dischargeRulesApply());
 		this.dischargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
+		this.updateDischargeSuppression();
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
 		}
 		MachineState machineState = this.getMachineStateChannel().value().asEnum();
 		if (machineState == null || !machineState.isVerified()) {
+			this.reconcileDisarmUnverified();
 			return;
 		}
 
@@ -418,8 +467,205 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE, //
 				this.config.dischargeWindow1Start(), this.config.dischargeWindow1Stop(),
-				this.config.dischargeScheduleEnable());
+				this.effectiveDischargeEnable());
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+	}
+
+	// Only the disarm of the discharge schedule bypasses the verified machine-state
+	// gate: E033 is a plain holding-register write and disarming only reduces the
+	// exposure. Arming, restoring and every window write still wait for state 2. A
+	// queued arm is withdrawn here too, so a latch cannot leave it waiting for state 2.
+	private void reconcileDisarmUnverified() {
+		if (!this.dischargeRulesApply()) {
+			return;
+		}
+		if (this.effectiveDischargeEnable() != 0) {
+			return;
+		}
+		// A settled step that drifted back to armed is re-disarmed at the drift rate.
+		var settled = this.dischargeWindow.isWaitingForVerifiedState();
+		if (settled && this.driftCooldown > 0) {
+			return;
+		}
+		var message = this.dischargeWindow
+				.disarmOnly(this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE));
+		if (message != null) {
+			if (settled) {
+				this.driftCooldown = FAILED_RETRY_COOLDOWN_CYCLES;
+			}
+			this.logWarn(this.log, message + "; machine state is not verified, disarm only");
+		}
+	}
+
+	// Fail open: an out-of-range threshold or an incoherent pair turns the affected
+	// rule(s) off, so a typo can never suppress every night unattended.
+	private DischargeGuard createDischargeGuard(Config config) {
+		var startMinSoc = this.validRuleThreshold("dischargeStartMinSoc", config.dischargeStartMinSoc());
+		var floorSoc = this.validRuleThreshold("dischargeFloorSoc", config.dischargeFloorSoc());
+		if (startMinSoc >= 0 && floorSoc >= 0 && floorSoc >= startMinSoc) {
+			this.logError(this.log, "dischargeFloorSoc [" + floorSoc + "] must be below dischargeStartMinSoc ["
+					+ startMinSoc + "]; the start rule is off, the floor rule stays on");
+			return new DischargeGuard(-1, floorSoc);
+		}
+		return new DischargeGuard(startMinSoc, floorSoc);
+	}
+
+	private int validRuleThreshold(String name, int value) {
+		if (value == -1 || value >= 0 && value <= MAX_RULE_SOC) {
+			return value;
+		}
+		this.logError(this.log, "Invalid " + name + " [" + value + "]; must be 0.." + MAX_RULE_SOC
+				+ " or -1 (off). This rule is off");
+		return -1;
+	}
+
+	private void warnIfRulesInert(Config config) {
+		if (!config.controlEnabled() || config.dischargeScheduleEnable() != 1 || config.dischargeWindow1Start() < 0
+				|| config.dischargeWindow1Stop() < 0) {
+			this.logWarn(this.log, "Discharge rules are configured but inert: they need controlEnabled=true, "
+					+ "dischargeScheduleEnable=1 and a discharge window");
+		}
+	}
+
+	private ZoneId parseScheduleZone(String zone) {
+		try {
+			return ZoneId.of(zone);
+		} catch (DateTimeException | NullPointerException e) {
+			this.logError(this.log, "Invalid scheduleTimeZone [" + zone + "]; using " + DEFAULT_SCHEDULE_ZONE);
+			return ZoneId.of(DEFAULT_SCHEDULE_ZONE);
+		}
+	}
+
+	/**
+	 * Evaluates the start-threshold and floor rules. Runs every cycle regardless of
+	 * the machine state so the decision stays current; writes happen only in the
+	 * gated reconcile, i.e. deferred during a grid outage. With control disabled
+	 * nothing is evaluated or published, because nothing would be written.
+	 */
+	private void updateDischargeSuppression() {
+		if (this.config == null || !this.config.controlEnabled() || !this.dischargeRulesApply()) {
+			return;
+		}
+		var now = LocalDateTime.now(this.getClock().withZone(this.scheduleZone));
+		final var reason = this.dischargeGuard.evaluate(now, this.config.dischargeWindow1Start(),
+				this.config.dischargeWindow1Stop(), this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC),
+				this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE));
+		if (this.dischargeGuard.pollClockStepWarning()) {
+			this.logWarn(this.log, "Local time stepped by more than " + DischargeGuard.CLOCK_STEP_MINUTES
+					+ " minutes between cycles; holding the discharge decision for this cycle");
+		}
+		if (this.dischargeGuard.pollUnusableSocWarning()) {
+			this.logWarn(this.log, "Battery SoC is unknown or outside 0..100; no rule can latch, and a disarmed "
+					+ "schedule is not armed until a usable SoC is read (at most " + DischargeGuard.HOLD_CAP_MINUTES
+					+ " minutes, then it fails open)");
+		}
+		if (this.dischargeGuard.pollWindowEndWithoutSocWarning()) {
+			this.logWarn(this.log, "The discharge window ended without a usable battery SoC; the schedule was "
+					+ "not armed by this component during the window");
+		}
+		if (this.dischargeGuard.pollHoldCapWarning()) {
+			this.logWarn(this.log, "No usable battery SoC for " + DischargeGuard.HOLD_CAP_MINUTES
+					+ " minutes in the discharge window; no longer holding the arm back (fail open)");
+		}
+		var deviceEnable = this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
+		this.channel(SrneBatteryInverter.ChannelId.DISCHARGE_SUPPRESSION_REASON).setNextValue(reason);
+		// Report what the device is in, not only what the driver decided: an unknown
+		// enable register reads as unknown, and a failed write shows as a mismatch.
+		this.channel(SrneBatteryInverter.ChannelId.DISCHARGE_SUPPRESSED)
+				.setNextValue(deviceEnable == null ? null : deviceEnable == 0);
+		var mismatch = this.dischargeWindow.getState() == ScheduleWindow.State.FAILED && deviceEnable != null
+				&& (deviceEnable == 0) != (reason != DischargeSuppressionReason.NONE);
+		if (mismatch && !this.mismatchLogged) {
+			this.logWarn(this.log, "Discharge schedule write failed: device enable [" + deviceEnable
+					+ "] does not match the decision [" + reason + "]; retrying");
+		}
+		this.mismatchLogged = mismatch;
+	}
+
+	private boolean dischargeRulesApply() {
+		return this.dischargeGuard.isActive() && this.config.dischargeScheduleEnable() == 1
+				&& this.config.dischargeWindow1Start() >= 0 && this.config.dischargeWindow1Stop() >= 0;
+	}
+
+	/**
+	 * The enable target handed to the verified-write path: the configured value,
+	 * or 0 while the discharge is suppressed. A settled or failed window is
+	 * re-opened when the target changes so the change goes through the same
+	 * verified write; a failed window is also retried after a cooldown without
+	 * limit (a failed suppress quickly at first, then slowly), and a
+	 * drifted enable register is corrected once per window.
+	 *
+	 * @return the enable target for the discharge window
+	 */
+	private int effectiveDischargeEnable() {
+		var configured = this.config.dischargeScheduleEnable();
+		if (!this.dischargeRulesApply()) {
+			return configured;
+		}
+		var suppressed = this.dischargeGuard.evaluateCurrent() != DischargeSuppressionReason.NONE;
+		int effective = suppressed ? 0 : configured;
+		if (!suppressed && this.dischargeGuard.isHoldingArm()
+				&& Integer.valueOf(0).equals(this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE))) {
+			// A candidate is unconfirmed or SoC is not yet known: never newly arm.
+			effective = 0;
+		}
+		if (this.appliedDischargeEnable == null) {
+			this.appliedDischargeEnable = effective;
+		} else if (this.appliedDischargeEnable != effective && (this.dischargeWindow.getState() == ScheduleWindow.State.IDLE
+				|| this.dischargeWindow.isSequenceInProgress() || this.dischargeWindow.reopen())) {
+			// A running sequence follows the live target too, so an arm not yet written is
+			// turned into a disarm; the value reaches the window every cycle.
+			this.logInfo(this.log, "Discharge schedule enable target changed to [" + effective + "]");
+			this.appliedDischargeEnable = effective;
+			this.suppressRetries = 0;
+			this.failedCycles = 0;
+			if (effective == 0) {
+				this.driftCooldown = 0;
+			}
+		}
+		if (!this.dischargeGuard.isInsideWindow() && !suppressed) {
+			this.driftCorrectedUnsuppressed = false;
+		}
+		this.retryOrCorrect(this.appliedDischargeEnable);
+		return this.appliedDischargeEnable;
+	}
+
+	private void retryOrCorrect(int target) {
+		var state = this.dischargeWindow.getState();
+		if (this.driftCooldown > 0) {
+			this.driftCooldown--;
+		}
+		if (state == ScheduleWindow.State.DONE) {
+			this.suppressRetries = 0;
+			this.failedCycles = 0;
+			var actual = this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
+			if (this.dischargeGuard.isInsideWindow() && actual != null && actual != target) {
+				// While suppressed the correction is unlimited but rate-limited; otherwise
+				// it is allowed once per window.
+				var suppressed = target == 0;
+				var due = suppressed ? this.driftCooldown == 0 : !this.driftCorrectedUnsuppressed;
+				if (due && this.dischargeWindow.reopen()) {
+					this.driftCorrectedUnsuppressed |= !suppressed;
+					this.driftCooldown = FAILED_RETRY_COOLDOWN_CYCLES;
+					this.logWarn(this.log, "Discharge schedule enable drifted to [" + actual + "], target [" + target
+							+ "]; correcting" + (suppressed ? "" : " once"));
+				}
+			}
+			return;
+		}
+		if (!this.dischargeWindow.isRetryableFailure()) {
+			this.failedCycles = 0;
+			return;
+		}
+		var fast = target == 0 && this.suppressRetries < MAX_FAST_SUPPRESS_RETRIES;
+		if (++this.failedCycles < (fast ? SUPPRESS_RETRY_COOLDOWN_CYCLES : FAILED_RETRY_COOLDOWN_CYCLES)) {
+			return;
+		}
+		if (this.dischargeWindow.reopen()) {
+			this.failedCycles = 0;
+			this.suppressRetries += target == 0 ? 1 : 0;
+			this.logWarn(this.log, "Retrying failed discharge schedule write, target [" + target + "]");
+		}
 	}
 
 	private void reconcile(int index, SrneBatteryInverter.ChannelId channelId, int configuredTarget, int min, int max,
@@ -525,6 +771,40 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// NOT queue on a rejected arm (state stays IDLE), not just that the aggregate failed.
 	SafeWriteHandler.State writeHandlerStateForTest(int index) {
 		return this.writeHandlers[index].getState();
+	}
+
+	// Package-private for tests: the dummy bridge cannot echo a written register, so
+	// tests pin the enable value that was queued.
+	Integer dischargeQueuedEnableForTest() {
+		return this.dischargeWindow.queuedEnable();
+	}
+
+	io.openems.edge.common.channel.BooleanReadChannel getDischargeSuppressedChannelForTest() {
+		return this.channel(SrneBatteryInverter.ChannelId.DISCHARGE_SUPPRESSED);
+	}
+
+	io.openems.edge.common.channel.Channel<DischargeSuppressionReason> getDischargeSuppressionReasonChannelForTest() {
+		return this.channel(SrneBatteryInverter.ChannelId.DISCHARGE_SUPPRESSION_REASON);
+	}
+
+	Integer getBatterySocForTest() {
+		return this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC);
+	}
+
+	boolean driftCorrectedUnsuppressedForTest() {
+		return this.driftCorrectedUnsuppressed;
+	}
+
+	ScheduleWindow chargeWindowForTest() {
+		return this.chargeWindow;
+	}
+
+	ScheduleWindow dischargeWindowForTest() {
+		return this.dischargeWindow;
+	}
+
+	ScheduleWindow.State dischargeWindowStateForTest() {
+		return this.dischargeWindow.getState();
 	}
 
 	private void rejectOutputPriority(String reason) {

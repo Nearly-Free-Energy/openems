@@ -124,15 +124,71 @@ public class ScheduleWindowTest {
 	}
 
 	@Test
-	void queuedWindowDoesNotTimeOutBeforeExecute() {
+	void queuedWindowTimesOutIfTheBridgeNeverExecutesIt() {
 		var sut = newDischargeWindow();
+		sut.setQueuedTimeout(true);
 		sut.reconcile(0, 0, 0, 4608, 5947, 1);
-		// onCycle only bounds the read-back wait; a queued-but-not-executed write must
-		// not time out.
-		for (var i = 0; i < 60; i++) {
+		for (var i = 1; i < 30; i++) {
 			sut.onCycle(30);
+			assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
 		}
-		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		sut.onCycle(30);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		// The withdrawn write can no longer fire late, and the failure is retryable.
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.stopWriteElement().getNextWriteValueAndReset());
+		assertTrue(sut.isRetryableFailure());
+		assertTrue(sut.reopen());
+	}
+
+	@Test
+	void queuedWritesNeverTimeOutWithoutTheQueuedTimeout() {
+		// Charge window and rules-off discharge window: a write queued while the link is
+		// down must still execute when it returns, however long that takes.
+		var window = newDischargeWindow();
+		window.reconcile(0, 0, 0, 4608, 5947, 1);
+		for (var i = 0; i < 1000; i++) {
+			window.onCycle(30);
+		}
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, window.getState());
+		assertNotNull(window.startWriteElement().getNextWriteValueAndReset());
+		assertNotNull(window.stopWriteElement().getNextWriteValueAndReset());
+
+		var enable = newDischargeWindow();
+		enable.reconcile(5376, 5888, 1, 5376, 5888, 0);
+		for (var i = 0; i < 1000; i++) {
+			enable.onCycle(2);
+		}
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, enable.getState());
+		assertNotNull(enable.enableWriteElement().getNextWriteValueAndReset());
+		enable.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, enable.getState());
+	}
+
+	@Test
+	void queuedEnableTimesOutAndWithdrawsTheWrite() {
+		var sut = newDischargeWindow();
+		sut.setQueuedTimeout(true);
+		sut.reconcile(5376, 5888, 1, 5376, 5888, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		sut.onCycle(2);
+		sut.onCycle(2);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		assertTrue(sut.reopen());
+	}
+
+	@Test
+	void disarmOnlyQueuesTheDisableFromIdleOnlyForAnArmedDevice() {
+		var sut = newDischargeWindow();
+		assertNull(sut.disarmOnly(null));
+		assertNull(sut.disarmOnly(0));
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+		assertNotNull(sut.disarmOnly(1));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.disarmOnly(1));
 	}
 
 	@Test
@@ -476,5 +532,252 @@ public class ScheduleWindowTest {
 		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
 		assertEquals(ScheduleWindow.State.DONE, sut.getState());
 		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void reopenIsRefusedMidSequenceAndAllowedFromDone() {
+		var sut = newDischargeWindow();
+		assertFalse(sut.reopen()); // IDLE
+		sut.reconcile(0, 0, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		assertFalse(sut.reopen());
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+		assertFalse(sut.reopen());
+		sut.verifyStart(5376);
+		sut.verifyStop(5888);
+		assertFalse(sut.reopen()); // WINDOW_VERIFIED
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		assertFalse(sut.reopen());
+		sut.onEnableExecute(ExecuteState.OK);
+		assertFalse(sut.reopen()); // ENABLE_AWAITING_READBACK
+		sut.verifyEnable(1);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertTrue(sut.reopen());
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+	}
+
+	@Test
+	void failedEnableWriteCanBeReopenedAndRecovers() {
+		var sut = newDischargeWindow();
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertTrue(sut.isRetryableFailure());
+		// FAILED is terminal for reconcile itself.
+		assertNull(sut.reconcile(5376, 5888, 0, 5376, 5888, 1));
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+
+		assertTrue(sut.reopen());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(1);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+	}
+
+	@Test
+	void failedReadbackTimeoutCanBeReopened() {
+		var sut = newDischargeWindow();
+		sut.reconcile(5376, 5888, 0, 5376, 5888, 1);
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.onCycle(2);
+		sut.onCycle(2);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertTrue(sut.reopen());
+	}
+
+	@Test
+	void rejectedConfigurationIsNeverReopened() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 5888, 5376, 1); // start >= stop
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertFalse(sut.isRetryableFailure());
+		assertFalse(sut.reopen());
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+	}
+
+	@Test
+	void desiredEnableFollowsTheTargetWhileASequenceIsInProgress() {
+		var sut = newDischargeWindow();
+		// Armed device with a different window; the target is armed when the sequence starts.
+		sut.reconcile(0, 0, 1, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(1), sut.desiredEnable());
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+
+		// The discharge rules latch meanwhile: the target is now 0.
+		sut.reconcile(0, 0, 0, 4608, 5947, 0);
+		assertEquals(Integer.valueOf(0), sut.desiredEnable());
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
+
+		// The window is done and the schedule is never re-armed from the stale capture.
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void unmanagedEnableKeepsTheCapturedEndState() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 1, 4608, 5947, -1);
+		sut.onEnableExecute(ExecuteState.OK);
+		sut.verifyEnable(0);
+		sut.reconcile(0, 0, 0, 4608, 5947, -1);
+		assertEquals(Integer.valueOf(1), sut.desiredEnable());
+	}
+
+	// Drives a disarmed device to ENABLE_QUEUED (enable=1 pending for the bridge).
+	private static ScheduleWindow windowWithQueuedArm() {
+		var sut = newDischargeWindow();
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.ENABLE_QUEUED, sut.getState());
+		return sut;
+	}
+
+	@Test
+	void latchDuringDisableAwaitingReadbackNeverArms() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 1, 4608, 5947, 1);
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset()); // taken by the bridge
+		sut.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+
+		// The latch arrives while the disarm is being read back: nothing changes yet.
+		sut.reconcile(0, 0, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+
+		sut.reconcile(0, 0, 0, 4608, 5947, 0);
+		assertEquals(Integer.valueOf(0), sut.desiredEnable());
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void latchDuringWindowAwaitingReadbackNeverArms() {
+		var sut = newDischargeWindow();
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		sut.onStartExecute(ExecuteState.OK);
+		sut.onStopExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+
+		sut.reconcile(0, 0, 0, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.WINDOW_AWAITING_READBACK, sut.getState());
+		sut.verifyStart(4608);
+		sut.verifyStop(5947);
+		assertEquals(ScheduleWindow.State.WINDOW_VERIFIED, sut.getState());
+
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 0);
+		assertEquals(Integer.valueOf(0), sut.desiredEnable());
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void staleExecuteOfAWithdrawnArmDoesNotAdvanceTheDisarm() {
+		var sut = windowWithQueuedArm();
+		// The bridge already took the 1 and has it in flight.
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset());
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+
+		sut.onEnableExecute(ExecuteState.OK); // belongs to the superseded 1-write
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset());
+
+		sut.onEnableExecute(ExecuteState.OK); // the disarm's own execute
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+		sut.verifyEnable(0);
+		assertEquals(ScheduleWindow.State.DISABLE_VERIFIED, sut.getState());
+	}
+
+	@Test
+	void executeOfAWithdrawnArmIsNotStaleWhenTheBridgeNeverTookIt() {
+		var sut = windowWithQueuedArm();
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		var pending = sut.enableWriteElement().getNextWriteValueAndReset();
+		assertNotNull(pending);
+		assertEquals(0, pending[0].getValue());
+
+		sut.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+	}
+
+	@Test
+	void disarmOnlyWithdrawsAQueuedArm() {
+		var sut = windowWithQueuedArm();
+		assertNotNull(sut.disarmOnly(0));
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+
+		var armed = windowWithQueuedArm();
+		assertNotNull(armed.disarmOnly(1));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, armed.getState());
+		assertEquals(Integer.valueOf(0), armed.queuedEnable());
+	}
+
+	@Test
+	void inFlightArmWithdrawnOnADisarmedReadingStillQueuesADisarm() {
+		var sut = windowWithQueuedArm();
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset()); // the 1 is in flight
+		// The device still reads 0, but the 1 can land after this reading.
+		assertNotNull(sut.reconcile(4608, 5947, 0, 4608, 5947, 0));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		sut.onEnableExecute(ExecuteState.OK); // the stale 1
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(ExecuteState.OK); // the disarm
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+	}
+
+	@Test
+	void withdrawnArmOnADisarmedReadingStaysDoneWhenTheBridgeNeverTookIt() {
+		var sut = windowWithQueuedArm();
+		assertNotNull(sut.reconcile(4608, 5947, 0, 4608, 5947, 0));
+		assertEquals(ScheduleWindow.State.DONE, sut.getState());
+		assertNull(sut.enableWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void disarmExecuteIsHonouredWhenNoStaleCallbackEverArrives() {
+		var sut = newDischargeWindow();
+		sut.setQueuedTimeout(true);
+		sut.reconcile(4608, 5947, 0, 4608, 5947, 1);
+		assertNotNull(sut.enableWriteElement().getNextWriteValueAndReset()); // in flight
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+
+		// Neither the stale callback nor the disarm's arrives: the queued wait times out.
+		for (var i = 0; i < 5; i++) {
+			sut.onCycle(5);
+		}
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+
+		// The retry's disarm is not mistaken for a stale execute.
+		assertTrue(sut.reopen());
+		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		sut.onEnableExecute(ExecuteState.OK);
+		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
 	}
 }
