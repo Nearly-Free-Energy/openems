@@ -42,7 +42,6 @@ import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
 import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
 import io.openems.edge.common.channel.IntegerReadChannel;
 import io.openems.edge.common.channel.value.Value;
-import io.openems.edge.common.component.ClockProvider;
 import io.openems.edge.common.component.ComponentManager;
 import io.openems.edge.common.component.OpenemsComponent;
 import io.openems.edge.common.event.EdgeEventConstants;
@@ -66,7 +65,7 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
 @GenerateTargetsFromReferences("Modbus")
 public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		implements SrneBatteryInverter, Srne, OffGridBatteryInverter, ManagedSymmetricBatteryInverter,
-		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable, EventHandler, ClockProvider {
+		SymmetricBatteryInverter, ModbusComponent, OpenemsComponent, StartStoppable, EventHandler {
 	private static final int READBACK_TIMEOUT_CYCLES = 30;
 	private static final String DEFAULT_SCHEDULE_ZONE = "Africa/Kampala";
 	// A failed discharge-window write is retried after a cooldown and never given
@@ -133,8 +132,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	@Reference
 	private ComponentManager componentManager;
 
-	@Override
-	public Clock getClock() {
+	// Deliberately not a ClockProvider: OSGi would register this component as the
+	// edge's clock source and the component manager would call back into it forever.
+	private Clock clock() {
 		return this.componentManager.getClock();
 	}
 
@@ -546,7 +546,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		if (this.config == null || !this.config.controlEnabled() || !this.dischargeRulesApply()) {
 			return;
 		}
-		var now = LocalDateTime.now(this.getClock().withZone(this.scheduleZone));
+		var now = LocalDateTime.now(this.clock().withZone(this.scheduleZone));
 		final var reason = this.dischargeGuard.evaluate(now, this.config.dischargeWindow1Start(),
 				this.config.dischargeWindow1Stop(), this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC),
 				this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE));
