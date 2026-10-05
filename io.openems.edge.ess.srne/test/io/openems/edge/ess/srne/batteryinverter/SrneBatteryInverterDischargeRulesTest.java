@@ -316,7 +316,8 @@ public class SrneBatteryInverterDischargeRulesTest {
 	public void testDriftBackToArmedIsCorrectedWhileMachineStateStaysUnverified() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(40, MachineState.INVERTER_POWERED);
-		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config(-1, 45).build()) //
+		var clock = clockAt("2026-01-10T18:05:00Z");
+		var test = start(sut, bridge, clock, config(-1, 45).build()) //
 				.next(new TestCase(), CYCLES);
 		deviceWritesEnable(sut, bridge, test, 0);
 		assertEquals(State.DISABLE_VERIFIED, sut.dischargeWindowStateForTest());
@@ -331,6 +332,23 @@ public class SrneBatteryInverterDischargeRulesTest {
 			deviceWritesEnable(sut, bridge, test, 0);
 			assertEquals(State.DISABLE_VERIFIED, sut.dischargeWindowStateForTest(), "round " + round);
 		}
+
+		// Returning to state 2 completes the sequence without undoing the floor latch.
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+		assertNull(pendingEnableOtherThanZero(sut));
+
+		// Once the window ends, the configured arm is restored and verified normally.
+		clock.leap(2, ChronoUnit.HOURS);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.ENABLE_QUEUED, sut.dischargeWindowStateForTest());
+		assertEquals(1, sut.dischargeQueuedEnableForTest());
+		deviceWritesEnable(sut, bridge, test, 1);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, false, DischargeSuppressionReason.NONE);
+
 	}
 
 	// Unverified machine state (5): the window stays disarm-only, so every settled or
@@ -368,6 +386,17 @@ public class SrneBatteryInverterDischargeRulesTest {
 		deviceWritesWindow(sut, bridge, test);
 		assertEquals(State.WINDOW_VERIFIED, sut.dischargeWindowStateForTest());
 		assertUnverifiedDriftIsDisarmed(sut, bridge, test);
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(State.DISABLE_VERIFIED, sut.dischargeWindowStateForTest());
+
+		// Re-disarming a verified window must not prevent normal completion in state 2.
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		test.next(new TestCase(), CYCLES);
+		assertEquals(State.DONE, sut.dischargeWindowStateForTest());
+		assertSuppression(sut, true, DischargeSuppressionReason.FLOOR_REACHED);
+		assertNull(pendingEnableOtherThanZero(sut));
+		assertNull(sut.dischargeWindowForTest().startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.dischargeWindowForTest().stopWriteElement().getNextWriteValueAndReset());
 	}
 
 	@Test
