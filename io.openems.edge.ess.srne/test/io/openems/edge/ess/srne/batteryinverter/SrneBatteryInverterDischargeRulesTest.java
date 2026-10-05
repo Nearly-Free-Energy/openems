@@ -18,6 +18,7 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 import io.openems.edge.bridge.modbus.api.task.WriteTask;
 import io.openems.edge.bridge.modbus.test.DummyModbusBridge;
 import io.openems.edge.common.channel.Channel;
+import io.openems.edge.common.component.ClockProvider;
 import io.openems.edge.common.test.AbstractComponentTest.TestCase;
 import io.openems.edge.common.test.ComponentTest;
 import io.openems.edge.common.test.DummyComponentManager;
@@ -92,6 +93,13 @@ public class SrneBatteryInverterDischargeRulesTest {
 		sut.dischargeWindowForTest().onEnableExecute(ExecuteState.OK);
 		bridge.withRegisters(0xE033, value);
 		test.next(new TestCase(), CYCLES);
+	}
+
+	@Test
+	public void testIsNotAClockProvider() {
+		// As a ClockProvider the component becomes the edge's clock source and
+		// ComponentManager.getClock() recurses into it (StackOverflowError on gw-pi2).
+		assertFalse(ClockProvider.class.isAssignableFrom(SrneBatteryInverterImpl.class));
 	}
 
 	@Test
