@@ -1,5 +1,6 @@
 import { effect, Injectable, signal, WritableSignal } from "@angular/core";
 import { ModalController } from "@ionic/angular";
+import { TranslateService } from "@ngx-translate/core";
 import { Theme, Theme as UserTheme } from "src/app/edge/history/shared";
 import { ThemePopoverComponent } from "src/app/user/theme-selection-popup/theme-selection-popover";
 import { environment } from "src/environments";
@@ -18,10 +19,12 @@ export class UserService {
 
     /** @deprecated Determines if applying new ui or old */
     public isNewNavigation: WritableSignal<boolean> = signal(false);
+    private isThemeModalOpen: boolean = false;
 
     constructor(
         private modalCtrl: ModalController,
         private service: Service,
+        private translate: TranslateService,
     ) {
         // Prohibits switching colors on init
         this.updateTheme(localStorage.getItem("THEME") as UserTheme);
@@ -38,7 +41,7 @@ export class UserService {
     }
 
     public static get DEFAULT_THEME(): UserTheme {
-        return UserTheme.LIGHT;
+        return UserTheme.SYSTEM;
     }
 
     /**
@@ -52,8 +55,7 @@ export class UserService {
             return;
         }
 
-        currentUser.settings = { ...currentUser.settings, theme: theme };
-        this.finalizeThemeSelection(theme);
+        await this.finalizeThemeSelection(theme);
     }
 
     public getValidBrowserTheme(userTheme: UserTheme | null): UserTheme {
@@ -100,7 +102,9 @@ export class UserService {
             return;
         }
 
-        this.showModal();
+        if (!this.isThemeModalOpen) {
+            void this.showModal();
+        }
     }
 
     /**
@@ -114,7 +118,9 @@ export class UserService {
             return (localStorage.getItem("THEME") as UserTheme) ?? null;
         }
 
-        return user?.getThemeFromSettings() ?? null;
+        return user?.getThemeFromSettings()
+            ?? (localStorage.getItem("THEME") as UserTheme)
+            ?? null;
     }
 
     /**
@@ -133,7 +139,9 @@ export class UserService {
         // Provide color to set before angular app inits
         const backgroundColor = getComputedStyle(document.documentElement).getPropertyValue("--ion-background-color");
         localStorage.setItem("THEME_COLOR", backgroundColor);
-        localStorage.setItem("THEME", validTheme);
+        if (userTheme != null) {
+            localStorage.setItem("THEME", userTheme);
+        }
 
         document.documentElement.setAttribute("data-theme", attr);
     }
@@ -144,16 +152,22 @@ export class UserService {
      * @param currentTheme Current theme
      */
     private async showModal(): Promise<void> {
-        const modal = await this.modalCtrl.create({
-            component: ThemePopoverComponent,
-        });
+        this.isThemeModalOpen = true;
 
-        await modal.present();
+        try {
+            const modal = await this.modalCtrl.create({
+                component: ThemePopoverComponent,
+            });
 
-        const { data } = await modal.onDidDismiss();
+            await modal.present();
 
-        const selectedTheme = data?.selectedTheme ?? UserService.DEFAULT_THEME;
-        this.finalizeThemeSelection(selectedTheme);
+            const { data } = await modal.onDidDismiss();
+
+            const selectedTheme = data?.selectedTheme ?? UserService.DEFAULT_THEME;
+            await this.finalizeThemeSelection(selectedTheme);
+        } finally {
+            this.isThemeModalOpen = false;
+        }
     }
 
     /**
@@ -172,34 +186,35 @@ export class UserService {
 
     /**
      * Updates the theme for the current user
-     *
-     * @param theme The new theme
-     */
-    private updateCurrentUser(theme: Theme): void {
-        this.currentUser.update((user: User | null) => {
-            if (user == null) {
-                return user;
-            }
+    *
+    * @param theme the new theme
+    */
+    private async finalizeThemeSelection(theme: Theme): Promise<void> {
+        const user = this.currentUser();
+        if (user == null) {
+            return;
+        }
 
-            user.settings = {
-                ...user.settings,
-                theme: theme,
-            };
-            return user;
-        });
-    }
+        const updatedSettings = { ...user.settings, theme: theme };
 
-    /**
-     * Finalizes the theme selection
-     *
-     * @param theme The new theme
-     * @returns
-     */
-    private finalizeThemeSelection(theme: Theme): Promise<void> {
-        return this.updateUserSettings({ theme: theme }).then(() => {
-            this.updateCurrentUser(theme as Theme);
-            localStorage.setItem("THEME", theme);
-            this.updateTheme(theme);
-        });
+        // Apply and remember the preference locally first. This keeps the chooser
+        // from repeatedly blocking users if the Backend cannot persist settings.
+        this.updateTheme(theme);
+        this.currentUser.set(new User(
+            user.id,
+            user.name,
+            user.globalRole,
+            user.language,
+            user.hasMultipleEdges,
+            updatedSettings,
+        ));
+
+        const [err] = await this.updateUserSettings(updatedSettings);
+        if (err !== null && environment.backend !== "OpenEMS Edge") {
+            await this.service.toast(
+                this.translate.instant("GENERAL.CHANGE_FAILED"),
+                "warning",
+            );
+        }
     }
 }

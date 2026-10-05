@@ -1,0 +1,439 @@
+= SRNE ESS
+
+Provides read-only integration of an SRNE hybrid inverter with OpenEMS Edge.
+
+== Overview
+
+The bundle reads ESS telemetry from an SRNE inverter over Modbus RTU. It maps
+the validated battery, grid-input and backup-output registers to the standard
+OpenEMS `SymmetricEss`, `HybridEss` and `ElectricityMeter` channels.
+The battery-inverter component also derives the OpenEMS grid/off-grid
+lifecycle from machine-state register `0x0210`.
+
+== Supported Devices
+
+* SRNE ASP48120SH3
+* Modbus RTU, holding-register reads (FC03), default Unit-ID `1`
+* Validated at `9600 8N1`
+
+== Components
+
+[[_srne_ess]]
+
+=== SRNE ESS
+
+*Name*: SRNE ESS
+
+*Factory-PID*: `Srne.Ess`
+
+.Implemented Natures/Interfaces
+* SymmetricEss
+* HybridEss
+* ModbusComponent
+
+*Description*: Reads state of charge, battery voltage and current. Active power
+and DC battery power are calculated from signed battery voltage and current.
+Control-register writes are not part of this component.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `ess0`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+* `capacity` (int): Usable battery capacity in Wh (default: `0`)
+* `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_battery_inverter]]
+
+=== SRNE Battery-Inverter
+
+*Name*: SRNE Battery-Inverter
+
+*Factory-PID*: `Srne.BatteryInverter`
+
+.Implemented Natures/Interfaces
+* OffGridBatteryInverter
+* ManagedSymmetricBatteryInverter
+* ModbusComponent
+
+*Description*: Reads machine state, battery voltage and signed battery current.
+Active power is calculated from battery voltage and current. Stable mains and
+inverter-powered states map to OpenEMS on-grid and off-grid modes. Startup,
+transition, stopped, fault and unknown states intentionally report an undefined
+grid mode. State `2` (`running (mains/bypass)`) is validated on the live unit;
+the remaining state labels still require live transition testing.
+
+*Guarded settings + schedule writes*: an opt-in path (`controlEnabled`, default
+off) writes a fixed allow-list of SRNE settings registers - SoC thresholds and
+charge-current limits, plus the time-of-use charge/discharge SCHEDULE windows for
+TOU arbitrage. Each write is one-shot and readback-verified, and only fires while
+the machine state is a live-validated running state; every target defaults to
+`-1` (leave unchanged). Scalar settings use `SafeWriteHandler`.
+
+A schedule window is a coherent unit handled by `ScheduleWindow`, governed by one
+invariant: the enable register must read `0` on the device whenever the window
+registers are written. The start/stop time pair (`0xE026/E027` charge,
+`0xE02D/E02E` discharge, encoded `hour*256+min`) is written as two separate
+single-register FC16 requests, start then stop, and read-back verified. It is
+NOT one multi-register block: observed once on gw-pi2 (2026-09-24), the frame
+`0xE02D <- [4608, 5947]` read back as `0xE02D=5947`, `0xE02E=0`, although
+protocol V1.7 documents function 10H as supported. Single-register writes are
+known-good on this unit. Writing start first briefly leaves an invalid pair
+(e.g. `18:00..00:00`) on the device; that is harmless while the enable reads
+`0`, but if the inverter validates the pair on write it would answer exception
+code 3 (illegal data value) and the window goes `FAILED` (safe). Check for this
+on the first live window write. A currently-armed window is never mutated in
+place: any window change is sequenced disarm -> verify-disabled -> window
+write -> verify-window -> re-arm. The enable flag (`0xE02C` charge, `0xE033`
+discharge) is the last step; the desired end-enable is captured once, so leaving
+enable unmanaged (`-1`) on an armed device disarms, rewrites and restores the
+armed state rather than mutating or silently disabling it. Any validation
+failure, execute error or read-back mismatch leaves the enable flag untouched, so
+a mis-set window can never leave a schedule armed (disabled is the safe resting
+state).
+
+Two operational notes: (1) if the control gate closes (machine state leaves the
+verified running state, or `controlEnabled` is turned off) after a window change
+has disarmed but before it re-arms, the discharge schedule stays disabled until
+control resumes and the sequence self-heals - a transient loss of peak-shaving,
+not a backup-safety loss (backup is governed by the SoC thresholds, not the
+schedule). (2) As with the scalar settings writes, a stale pre-write read-back can
+latch `SAFE_WRITE_STATE=FAILED` on a schedule that is in fact correctly armed;
+FAILED here can mean "armed-but-unconfirmed" - re-read the registers to confirm. Start and
+stop must be configured together; the window is validated as a within-day window
+(both valid times, `start < stop`). Cross-midnight windows are rejected because
+the SRNE has no defined midnight wrap and cannot encode 24:00 - a window that runs
+to midnight must stop at `23:59` (5947). The inverter real-time clock (`0xE034-036`)
+is exposed read-only so commissioning can verify the clock before any schedule is
+enabled; a wrong clock fires every window at the wrong wall-clock time.
+
+The battery-voltage protection thresholds are exposed read-only, scaled to mV:
+over-discharge return (`0xE00B`), under-voltage warning (`0xE00C`), over-discharge
+load cut-off (`0xE00D`), limited-discharge immediate cut-off (`0xE00E`) and the
+over-discharge delay in seconds (`0xE010`). Protocol V1.7 lists 9-15.5 V ranges
+(12 V-block scale), so the magnitude read back shows whether this unit reports
+per-block or pack voltage. They can explain a shutdown that happens above the SoC
+cut-off. A read the device rejects marks the whole component defective for a few
+cycles, so confirm the registers answer on a unit before deploying this read.
+
+Schedule sections 2 and 3 (charge `0xE028-E02B`, discharge `0xE02F-E032`) are
+exposed read-only too, so their contents are visible. Reading `00:00-00:00` there
+is necessary but NOT sufficient to arm a schedule enable: it shows what the
+registers hold, not what the firmware does with an empty section, and an "all
+day" interpretation would discharge around the clock. Arming stays blocked until
+there is evidence that equal zero endpoints disable a section on the target
+firmware: vendor confirmation, or a supervised two-step test in daylight with
+the grid present, the disarm profile ready, and the output priority (`0xE204`)
+unchanged between the steps. First a positive control: arm with window 1
+covering the current time and confirm the unit does discharge; this proves
+scheduled discharge works in that mode. Then set window 1 outside the current
+time with sections 2/3 at `00:00-00:00` and confirm it does not. A "no
+discharge" result without the positive control proves nothing, because the
+mode itself might suppress scheduled discharge. Nothing in this driver enforces
+that gate; it is a commissioning rule.
+
+*Automatic discharge start threshold and SoC floor*: two optional rules keep the
+discharge schedule (`0xE033`) in step with the battery without a manual
+disarm/re-arm deploy. They apply only when `dischargeScheduleEnable` is `1` and a
+discharge window is configured; with both properties at `-1` behaviour, register
+reads and write traffic are exactly as before (the SoC register is not even read).
+The window is evaluated against the edge clock in `scheduleTimeZone`, because the
+inverter RTC is not readable. Windows must not cross midnight. `scheduleTimeZone`
+is parsed only when a rule is active; an invalid value is logged as an error and
+`Africa/Kampala` is used, activation never fails because of it.
+
+. Start threshold: only during the first 10 minutes of the window (constant
+  `START_RULE_MINUTES`), if SoC is below `dischargeStartMinSoc` the window is
+  suppressed, i.e. a verified `0xE033=0` is held for the rest of it. After those
+  minutes the start check counts as passed and only the floor applies, so a restart
+  or an unrelated configuration change mid-window never suppresses the rest of the
+  night because SoC has dropped through normal discharge.
+. Floor: during the window, if SoC is at or below `dischargeFloorSoc` the window is
+  suppressed for the rest of it.
+. Once the window has ended the suppression clears and the configured enable is
+  restored through a verified `0xE033=1`, so the next night runs unattended.
+
+The bias is fail-open: a wrong "allow" is recoverable, a silent permanent "suppress"
+is not.
+
+* SoC validation: a SoC that is unknown or outside 0..100 (e.g. `0xFFFF`) never changes
+  a decision; a warning is logged once per window. A suppression is latched only
+  after the same low reading was seen on two consecutive cycles, so a single failed
+  BMS read (shown as 0) does not suppress the night.
+* Clock: if the local time steps by more than 5 minutes between two cycles, that
+  cycle holds the last decision. Per local date the start rule suppresses at most
+  once and never again after the window was restored; the floor rule is always
+  allowed.
+* Failed writes: a failed (or timed-out) discharge-window write is not terminal, and
+  retrying never stops until the target changes (for example the window ending). A
+  failed suppress (`0xE033=0`) is retried after 8 cycles for the first 3 retries and
+  then every 60 cycles, so the schedule is not left armed below the floor; a failed
+  restore (`0xE033=1`) is retried every 60 cycles. A configuration rejection is never
+  retried. While the write is failed, `SafeWriteState` is `FAILED` and a warning is
+  logged when the device enable disagrees with the decision.
+* Drift: if `0xE033` reads a value other than the target after the write settled,
+  inside the window, it is corrected once per window (the allowance is renewed for
+  the next window). This also reverts a manual disarm made in the window, once.
+  While a suppression is latched the correction is unlimited instead, rate-limited
+  to one per 60 cycles, so a later drift back to 1 below the floor is always undone.
+* No new arm before the decision is safe: inside the window, while a floor/start
+  candidate is still awaiting its second confirming cycle, or before the first usable
+  SoC reading of the window, a device that reads `0xE033=0` is held at 0 (no
+  `0xE033=1` is queued). A device already armed is left as it is. The wait for the
+  first usable SoC is capped at 10 minutes of window time (wall clock, a clock step
+  of more than 5 minutes is not counted); after that the hold is released and the
+  configured enable applies (fail open, a warning is logged once).
+* Verified machine state: all settings and window writes still require
+  `MachineState` 2 (the only live-validated value). The single exception is the
+  disarm (`0xE033=0`) of a latched suppression, which is sent in any other
+  state (for example 5 `INVERTER_POWERED` or 7 `MAINS_TO_INVERTER`), because it is a
+  plain holding-register write, is the exposure-reducing direction and would otherwise
+  leave the unit discharging below the floor. Restore, arm and window writes wait
+  for state 2. Residual risk: how the unit behaves when the schedule is disarmed
+  while off-grid is unconfirmed. Before enabling the floor, confirm on the live unit
+  which `MachineState` is reported during the 21:00-23:00 discharge.
+* Queued writes: for the rules-managed discharge window only, a schedule write that
+  the bridge never executes fails after 30 cycles (the pending value is withdrawn)
+  and the normal retry takes over. The charge window and a discharge window with both
+  rules off keep the original behaviour: a write queued while the link is down
+  executes when it returns.
+* Threshold validation: `dischargeStartMinSoc` and `dischargeFloorSoc` must be in
+  `0..99` (or `-1` = off). A value outside that range is logged as an error and only
+  that rule is off. When both are set, `dischargeFloorSoc` must be below
+  `dischargeStartMinSoc`; otherwise an error is logged, the start rule is turned off
+  and the floor (the safety rule) stays on.
+* Inert rules: on activation a warning is logged if a rule is configured but cannot act
+  (`controlEnabled=false`, `dischargeScheduleEnable` not `1`, or the discharge window
+  unset).
+* Channels: `DischargeSuppressed` reports the device (`0xE033` reads 0), or is unknown
+  if the register is unread; `DischargeSuppressionReason` is the driver's decision.
+  With `controlEnabled=false` the channels are declared but not populated, since nothing
+  is written. The SoC read task (`0x0100`) is added whenever a valid rule is set,
+  independent of `controlEnabled`.
+
+*Review round 4*
+
+* Queued-write timeout only for the rules-managed discharge window; the charge window
+  and the rules-off discharge window are exactly as before the rules existed.
+* Arm hold without a usable SoC is capped at 10 minutes, then fails open; the warning
+  text says what actually happens.
+* While a window sequence is in progress the desired end enable state follows the
+  current target, so a guard latch during the sequence is not undone by a stale
+  value. An unmanaged enable (`-1`) still restores the state captured at the start.
+* Drift correction while suppressed no longer consumes the single correction allowed
+  in a non-suppressed state.
+
+*Review round 5*
+
+* The live effective target (0 when suppressed, or when holding and the device is
+  not armed; otherwise the configured value) now reaches the discharge window every
+  cycle, also while a write sequence is in progress. So a suppression that latches
+  while the sequence is running takes effect before the arm is written: the end state
+  follows the target, and an `enable=1` that is queued but not yet executed is
+  withdrawn and replaced by a disarm (or by nothing, if the device already reads 0).
+  If the arm was already picked up by the bridge, the driver disarms again as soon as
+  the sequence has settled (the drift cooldown is reset when the target becomes 0).
+  Only the rules-managed discharge window is affected; with both rules off, and for
+  the charge window, nothing changed.
+* The start rule is evaluated once on the first usable SoC even when it is first read
+  after the 10 minute hold cap fired, so a low SoC first seen at minute 12 still
+  latches `LOW_START`. A restart later in the window is handled separately (see
+  round 6).
+* An armed device that reads below the floor after a fail-open arm: the first
+  confirming cycle forces nothing new (an armed device stays as it is); after the second
+  confirmation the floor latches and the disarm is queued in the next cycle (tested).
+* The hold cap is `min(10 minutes, time left in the window)`, counted from the later of
+  the window start and the first evaluation (a restart mid-window restarts the count
+  there, not at the window start). A window that ends without any usable SoC and
+  without the cap having fired logs a WARN. For a window shorter than the cap the
+  hold therefore lasts the whole window (the device stays disarmed) and that WARN is
+  the only signal.
+* Residual: withdrawing a queued write (`setNextWriteValue(null)`) can race a write the
+  bridge worker thread has already picked up. A late execute callback is ignored in
+  `FAILED`, so the device can be armed while the state is `FAILED` until the retry
+  re-reads it (every 8 cycles while suppressing, then every 60). No code change.
+
+*Review round 6*
+
+* A restart after the 10 minute start rule period (for example at 21:30) no longer
+  re-arms a night that the start rule had suppressed. On the first usable SoC after
+  such a restart the start rule is applied once, but only when the device currently
+  reads `0xE033=0` (we would be arming it now): a low SoC then latches `LOW_START` and
+  the device stays disarmed, also with `dischargeFloorSoc=-1`. If the device already
+  reads `0xE033=1` (a discharge legitimately running whose SoC fell below the start
+  threshold), the start rule is closed for the window and only the floor rule governs
+  it. If the enable register is unknown the decision waits until it is read. A
+  readable and an unreadable SoC after the restart now end in the same state.
+* A queued `enable=1` is also withdrawn while the machine state is not verified (grid
+  outage): the unverified path calls the same withdraw as the gated path, only when the
+  discharge rules apply. With both rules off nothing changed.
+* When a withdrawal finds that the bridge has already taken the `enable=1` (its value
+  is gone from the write element), the window remembers that one execute callback is
+  still to come and ignores it, so it is not taken for the execute of the disarm that
+  follows. Without this a read-back of 1 ended in `FAILED` and a retry only after 8
+  cycles. Residual: the check of the write element is not atomic with the bridge
+  thread; in that rare race the stale callback is taken for the disarm's and the old
+  behaviour applies (the armed period lasts at least 8 cycles until the retry).
+* Test coverage: a latch during `DISABLE_AWAITING_READBACK` and
+  `WINDOW_AWAITING_READBACK` never arms (unit level); a latch after a verified arm
+  queues the disarm within 12 cycles (measured with the dummy bridge); a latch during `ENABLE_QUEUED` with
+  an unverified machine state never lets `enable=1` through.
+* Residual (no code change): hold plus stale read. If a pending start or floor
+  candidate appears right after an arm whose enable channel has not refreshed yet, the
+  live target drops to 0 and forces a disarm that is re-armed later once the candidate
+  is rejected. The effect is bounded by the confirmation cycles plus one disarm and
+  re-arm sequence.
+
+*Review round 7*
+
+* A withdrawn `enable=1` that the bridge had already taken (in flight) now always
+  queues a disarm, also when the device still reads `0xE033=0`: the 1 can land after
+  that reading and, while the machine state is unverified, nothing else would correct
+  it. If the bridge had not taken the write, the withdrawal is unchanged (nothing to
+  disarm, the window goes to `DONE`).
+* The stale-execute flag is also cleared when the queued-write timeout fires, so an
+  abandoned disarm leaves no flag behind. Residual: if the stale callback never arrives
+  (no-op or none), the disarm's own execute is taken for it and the disarm ends in the
+  queued timeout and is retried like any failed write; the retry's execute is honoured.
+* Restart late in the window with the SoC unreadable beyond the hold cap: the guard
+  lets a disarmed device arm (fail open). If the first usable SoC then arrives while
+  the device reads `0xE033=1` only because of that arm, the start rule is still applied
+  once (a low SoC latches `LOW_START` and the night is disarmed), the same result as
+  without the restart. A device that already read 1 at the restart without this arm
+  keeps the floor-only behaviour.
+* Limitation (no code change): a device reading `0xE033=1` at a late restart is treated
+  as a legitimately running discharge, even if the disarm of an earlier suppression
+  failed to land. Only the floor rule stops it.
+* After a late restart no arm is queued or held while the enable register is unknown
+  (the window waits for a known enable); covered by a test. The bound of 12 cycles from
+  a latch to the queued disarm, asserted in the tests, depends on the read order of the
+  dummy bridge and is not a device guarantee.
+
+*Review round 8 (maintainer)*
+
+* Fixed: after a floor disarm in machine state 5 or 7 the window rests in
+  `DISABLE_VERIFIED`; if `0xE033` then read `1` again, nothing disarmed it until state `2`
+  returned. While the discharge rules apply and a suppression is latched, a device reading
+  `enable=1` in a settled step that waits for the verified state (`DISABLE_VERIFIED` or
+  `WINDOW_VERIFIED`) now gets another disarm queued. It is rate-limited with the existing
+  drift cooldown (60 cycles), writes no start or stop register and never arms; arming and
+  window writes still wait for state `2`. The first disarm from `IDLE` is not delayed.
+* Other states reachable while the machine state is unverified:
+** `DONE` and a retryable `FAILED`: already handled by the drift correction and the failure
+   retry (both reopen to `IDLE`, then the disarm-only path acts). Covered by tests.
+** `DISABLE_QUEUED` stuck, `DISABLE_AWAITING_READBACK` without a matching read-back,
+   `WINDOW_QUEUED` and `WINDOW_AWAITING_READBACK`: all bounded by the queued/read-back
+   timeout (the queued bound is on while the rules apply), so they end in `FAILED` and are
+   retried. Covered by tests (stuck disarm, unread disarm, stuck window write).
+** `WINDOW_VERIFIED`: settled and unbounded, so it needed the same fix as
+   `DISABLE_VERIFIED`; covered by a test.
+** `ENABLE_QUEUED` is withdrawn, `ENABLE_AWAITING_READBACK` is bounded and ends in `DONE` or
+   `FAILED` (see above); neither is a settled hole.
+** `FAILED` from a rejected configuration is never reopened. It is pre-existing, identical
+   with the verified state, and needs a configuration fix; this driver never arms from it.
+* The new path is reached only from the unverified-state disarm, which first checks that the
+  discharge rules apply. With both rules off it is unreachable, the charge window is not
+  involved, and the behaviour is unchanged (test added).
+
+*Fail-open trade-offs* (deliberate; the normal schedule is preferred over a silent
+permanent suppress):
+
+* A restart or configuration change mid-window creates a fresh guard, so a `LOW_START`
+  skip decided at the window start is not persistent. After the first 10 minutes only
+  the floor applies, so the device may be re-armed (`0xE033=1`) and discharge down to
+  the floor.
+* A restart within the first 10 minutes can latch `LOW_START` from a partly discharged
+  SoC that would have passed at the window start.
+* After a restart while `0xE033` is still 0, the decision needs two confirming cycles
+  before it latches; during that time the disarmed device is held at 0 and never armed
+  first (see "No new arm" above).
+* If the SoC is unknown for the whole window there is no floor protection, and after
+  10 minutes without a usable SoC a disarmed device is armed as configured (warnings
+  are logged).
+* The in-window drift correction reverts a manual disarm once per window.
+* If a configuration change leaves `0xE033=0` from a suppression and the driver no
+  longer manages the enable (`dischargeScheduleEnable=-1` or the rules removed while
+  the enable is not configured), the register is not restored on deactivation; set
+  `dischargeScheduleEnable` explicitly, or re-arm it manually.
+
+The decision is latched per window and rebuilt from current state, so an edge restart
+mid-window reaches the same result: a restart after the start rule expired applies the
+start rule once on the first usable SoC if the device reads `0xE033=0` (round 6), so a
+night skipped at the window start stays skipped. During a grid outage (machine state not `2`) no write
+happens; the decision is applied when state `2` returns. The change of the enable
+target reuses the existing verified `ScheduleWindow` write path (disarm/arm, read
+back), there is no second write path. SoC source: register `0x0100`, the same one
+`Srne.Ess` maps to `SymmetricEss.SOC`, read by this component only when a valid rule is
+configured. Channels: `DischargeSuppressed` (boolean), `DischargeSuppressionReason`
+(`NONE` / `LOW_START` / `FLOOR_REACHED`) and `BatterySoc`.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `batteryInverter0`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `startStop` (enum): Start/stop behaviour (default: `AUTO`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+* `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
+* `controlEnabled` (boolean): Safety gate for FC16 settings/schedule writes (default: `false`)
+* settings targets (int, `-1` = leave unchanged): `dischargeCutoffSoc`, `stopChargeCurrent`, `stopChargeSoc`, `lowSocAlarm`, `switchToLineSoc`, `switchToBatterySoc`, `acChargeCurrentLimit`, `maxChargeCurrentLimit`
+* source-transfer targets (int, `-1` = leave unchanged): `outputPriority` (E204, source-priority mode e.g. SBU; range `0..3`) and `bmsCommunication` (E215, BMS-comms enable; range `0..2`). These enable "switch to battery at a SoC" (SBU + BMS-SoC) fully from OpenEMS. `outputPriority` is the output/source priority, distinct from charge priority. Two safety points: (1) `outputPriority` = SBU transfers the load onto the battery, so it is reconciled together with its reserve band (`switchToLineSoc`/`switchToBatterySoc`) and BMS mode (`bmsCommunication`) as ONE coherent, validated operation. When an arm is requested the whole set is validated - all three present, individually in range, and the band coherent (`switchToLineSoc` below `switchToBatterySoc`) - BEFORE any of them is written; on failure NOTHING is written (not the band, not BMS, not `E204`) and the operation reports terminal FAILED, so a rejected arm can never leave a bad reserve band on a unit already in SBU mode. Once the set is valid, `E204` arms only after each prerequisite is settled: its handler at rest (IDLE = already correct, or VERIFIED) AND the device currently reads the configured value - a queued, awaiting or failed write, or a post-verify drift, never counts as settled. When no arm is requested, BMS remains an independent setting; the reserve band is still refused if both thresholds are configured but inverted (`switchToLineSoc` at or above `switchToBatterySoc`), because a bad band is dangerous whenever the unit is in SBU (its normal backup posture, settable from the panel) - so an incoherent band is never written regardless of whether OpenEMS armed it. (2) The exact value-to-mode mapping (which number is SBU, etc.) is NOT verified in the SRNE manuals and MUST be captured on the unit at commissioning; the ranges here are bounded only, read-back verify guards a mis-accepted value, and a wrong-but-in-range value is prevented only by keeping targets `-1` until the enum is confirmed.
+* TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
+* Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
+* TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_grid_meter]]
+
+=== SRNE Grid-Meter
+
+*Name*: SRNE Grid-Meter
+
+*Factory-PID*: `Srne.Grid-Meter`
+
+.Implemented Natures/Interfaces
+* ElectricityMeter
+* ModbusComponent
+
+*Description*: Reads grid-input voltage for L1, L2 and L3, current for L1 and
+grid frequency. The device does not expose grid current for L2 or L3 in the
+validated register range.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `meter0`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_backup_meter]]
+
+=== SRNE Backup-Meter
+
+*Name*: SRNE Backup-Meter
+
+*Factory-PID*: `Srne.Backup-Meter`
+
+.Implemented Natures/Interfaces
+* ElectricityMeter
+* ModbusComponent
+
+*Description*: Reads backup-output voltage, current and active power for L1, L2
+and L3, plus backup-output frequency and reactive power. Reactive power for L1
+is calculated from its apparent and active power registers. It is exposed as a
+metered-consumption meter.
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `meter2`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]

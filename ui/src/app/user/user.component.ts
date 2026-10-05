@@ -45,10 +45,10 @@ export class UserComponent implements OnInit {
     protected userTheme: UserTheme;
     protected systemTheme: SystemTheme; // SystemTheme as of "FENECON","Heckert" or "OpenEMS" Themes.
 
-    protected readonly themes: KeyValue<string, string>[] = [
-        { key: "Light", value: "light" },
-        { key: "Dark", value: "dark" },
-        { key: "System", value: "system" },
+    protected readonly themes: KeyValue<UserTheme, string>[] = [
+        { key: UserTheme.LIGHT, value: "GENERAL.LIGHT" },
+        { key: UserTheme.DARK, value: "GENERAL.DARK" },
+        { key: UserTheme.SYSTEM, value: "GENERAL.SYSTEM_THEME" },
     ];
     protected readonly environment = environment;
     protected readonly uiVersion = Changelog.UI_VERSION;
@@ -107,7 +107,9 @@ export class UserComponent implements OnInit {
 
                 this.isAllowedToSeeUserDetails = this.isUserAllowedToSeeContactDetails(user.id);
                 this.showInformation = this.form != null;
-                this.userTheme = user.getThemeFromSettings() ?? UserComponent.DEFAULT_THEME;
+                this.userTheme = user.getThemeFromSettings()
+                    ?? (localStorage.getItem("THEME") as UserTheme)
+                    ?? UserComponent.DEFAULT_THEME;
                 this.useNewUi = user.getUseNewUIFromSettings();
 
                 if (this.service.currentEdge() != null) {
@@ -121,7 +123,7 @@ export class UserComponent implements OnInit {
     }
 
     public static get DEFAULT_THEME(): UserTheme {
-        return UserTheme.LIGHT;
+        return UserTheme.SYSTEM;
     } // Theme as of "Light","Dark" or "System" Themes.
 
     public static getNavigationTree(user: User): NavigationTree {
@@ -142,8 +144,9 @@ export class UserComponent implements OnInit {
         this.systemTheme = environment.theme as SystemTheme;
     }
 
-    public setTheme(theme: UserTheme): void {
-        this.userService.selectTheme(theme);
+    public async setTheme(theme: UserTheme): Promise<void> {
+        this.userTheme = theme;
+        await this.userService.selectTheme(theme);
     }
 
     public applyChanges() {

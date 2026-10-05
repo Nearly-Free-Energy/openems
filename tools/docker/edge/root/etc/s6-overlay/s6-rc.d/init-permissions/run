@@ -5,3 +5,23 @@
 lsiown -R abc:abc \
     /opt/openems \
     /var/opt/openems
+
+# Grant the runtime user (abc) access to attached serial devices.
+# The edge JVM is launched with `s6-setuidgid abc`, which resets the process to
+# abc's own group membership and drops any container-level `group_add`. So abc
+# must be a real member of each serial device's group to open it; serial devices
+# are typically mode 0660 owned root:dialout, and a non-member hits EACCES. Detect
+# the group of every present serial device and add abc to it by GID. This lets a
+# Modbus meter work out of the box, without a per-gateway PGID override in compose.
+for dev in /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA*; do
+    [ -e "$dev" ] || continue
+    gid="$(stat -c '%g' "$dev" 2>/dev/null)"
+    [ -n "$gid" ] || continue
+    grp="$(awk -F: -v g="$gid" '$3==g {print $1; exit}' /etc/group)"
+    if [ -z "$grp" ]; then
+        grp="serial${gid}"
+        groupadd -o -g "$gid" "$grp" 2>/dev/null || true
+    fi
+    usermod -aG "$grp" abc 2>/dev/null || true
+    echo "[init-permissions] granted abc access to ${dev} (group ${grp}/${gid})"
+done
