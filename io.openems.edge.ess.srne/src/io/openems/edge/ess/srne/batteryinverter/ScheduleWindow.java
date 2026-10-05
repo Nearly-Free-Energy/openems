@@ -23,11 +23,13 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * disarm &rarr; verify-disabled &rarr; window write &rarr; verify-window
  * &rarr; re-arm. A live enabled window is never mutated in place; a failed or
  * mismatched write leaves the schedule disabled (the safe resting state) and is
- * never retried automatically.
+ * never retried by this class itself; only an explicit {@link #reopen()} by the
+ * caller (the discharge rules, see the component) starts a new attempt.
  *
- * <p>The desired end enable state is captured once: {@code enable=0}/{@code 1}
- * are taken from config, while {@code enable=-1} (unmanaged) captures whatever
- * the device currently reads, so a window change on an armed device is disarmed,
+ * <p>The desired end enable state is captured when a sequence starts and, for an
+ * explicit {@code enable=0}/{@code 1}, refreshed from config at each later step of
+ * that sequence; {@code enable=-1} (unmanaged) keeps whatever
+ * the device read at the start, so a window change on an armed device is disarmed,
  * rewritten and then restored to its original armed state. {@code enable=1}
  * requires a complete configured window; {@code enable} outside 0/1 is rejected.
  *
@@ -96,12 +98,27 @@ final class ScheduleWindow {
 	private boolean startVerified;
 	private boolean stopVerified;
 	private int awaitingReadbackCycles;
+	private boolean rejected;
+	private boolean queuedTimeout;
+	private boolean staleEnableExecutePending;
 
 	ScheduleWindow(int startAddress, int enableAddress, String label) {
 		this.label = label;
 		this.startWrite = new UnsignedWordElement(startAddress);
 		this.stopWrite = new UnsignedWordElement(startAddress + 1);
 		this.enableWrite = new UnsignedWordElement(enableAddress);
+	}
+
+	/**
+	 * Enables or disables the bound on how long a write may stay queued. Off by
+	 * default: a write queued while the link is down then executes when it returns,
+	 * exactly as before the discharge rules existed. Only the rules-managed
+	 * discharge window turns it on, because only it is retried after a failure.
+	 *
+	 * @param enabled true to fail and withdraw a write that stays queued too long
+	 */
+	synchronized void setQueuedTimeout(boolean enabled) {
+		this.queuedTimeout = enabled;
 	}
 
 	UnsignedWordElement startWriteElement() {
@@ -155,9 +172,39 @@ final class ScheduleWindow {
 			int cfgStop, int cfgEnable) {
 		return switch (this.state) {
 		case IDLE -> this.start(actualStart, actualStop, actualEnable, cfgStart, cfgStop, cfgEnable);
-		case DISABLE_VERIFIED, WINDOW_VERIFIED -> this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
+		case DISABLE_VERIFIED, WINDOW_VERIFIED -> {
+			// A sequence in progress follows the current target: a guard latch after the
+			// sequence began must not be undone by a stale captured end state.
+			if (cfgEnable >= 0) {
+				this.desiredEnable = cfgEnable;
+			}
+			yield this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
+		}
+		case ENABLE_QUEUED -> this.withdrawQueuedArm(actualEnable, cfgEnable);
 		default -> null;
 		};
+	}
+
+	// A suppression that latches while the arm is queued but not yet executed turns it
+	// into a disarm (or nothing, if the device already reads 0). An arm the bridge has
+	// already picked up cannot be recalled; the caller's drift correction disarms it.
+	private String withdrawQueuedArm(Integer actualEnable, int cfgEnable) {
+		if (cfgEnable != 0 || !Integer.valueOf(1).equals(this.targetEnable)) {
+			return null;
+		}
+		this.desiredEnable = 0;
+		// An already taken value means the bridge has the 1 in flight: its execute
+		// callback will still arrive and must not be taken for the disarm's.
+		var inFlight = this.enableWrite.getNextWriteValueAndReset() == null;
+		// Only a 1 the bridge never took is certainly gone; one in flight may still land
+		// on a device that reads 0 now, so the disarm is queued anyway.
+		if (Integer.valueOf(0).equals(actualEnable) && !inFlight) {
+			this.state = State.DONE;
+			return "Withdrew queued [" + this.label + "] schedule enable=1; the target is now 0";
+		}
+		var message = this.queueEnable(0);
+		this.staleEnableExecutePending = inFlight;
+		return message;
 	}
 
 	// Validates the request, captures the desired end enable state once, then takes
@@ -172,23 +219,27 @@ final class ScheduleWindow {
 		// never write a garbage value to the schedule-enable register.
 		if (cfgEnable < -1 || cfgEnable > 1) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule enable [" + cfgEnable + "]; must be 0 or 1";
 		}
 		// A window is the start+stop pair; both must be configured together so a
 		// half-specified window is never written.
 		if ((cfgStart < 0) != (cfgStop < 0)) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule: window needs both start and stop set together";
 		}
 		var windowManaged = cfgStart >= 0;
 		if (windowManaged && !isValidWindow(cfgStart, cfgStop)) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule window [" + cfgStart + "," + cfgStop
 					+ "]; must be valid times with start < stop (encode end-of-day as 23:59)";
 		}
 		// Arming requires a complete window this component can set and verify.
 		if (cfgEnable == 1 && !windowManaged) {
 			this.state = State.FAILED;
+			this.rejected = true;
 			return "Rejected [" + this.label + "] schedule enable=1 without a complete window";
 		}
 		// Need the current enable (to respect the invariant and capture the end state)
@@ -230,6 +281,7 @@ final class ScheduleWindow {
 			this.stopVerified = false;
 			this.startWrite.setNextWriteValue(cfgStart);
 			this.stopWrite.setNextWriteValue(cfgStop);
+			this.awaitingReadbackCycles = 0;
 			this.state = State.WINDOW_QUEUED;
 			return "Queued one-shot [" + this.label + "] window write to [" + formatEncodedTime(cfgStart) + ".."
 					+ formatEncodedTime(cfgStop) + "]";
@@ -243,8 +295,10 @@ final class ScheduleWindow {
 	}
 
 	private String queueEnable(int value) {
+		this.staleEnableExecutePending = false;
 		this.targetEnable = value;
 		this.enableWrite.setNextWriteValue(value);
+		this.awaitingReadbackCycles = 0;
 		this.state = value == 0 ? State.DISABLE_QUEUED : State.ENABLE_QUEUED;
 		return "Queued one-shot [" + this.label + "] schedule enable=" + value
 				+ (value == 0 ? " (disarm before window change)" : " (after window verified)");
@@ -289,6 +343,11 @@ final class ScheduleWindow {
 		}
 		switch (this.state) {
 		case DISABLE_QUEUED -> {
+			if (this.staleEnableExecutePending) {
+				// Belongs to the withdrawn enable=1 write, not to the disarm.
+				this.staleEnableExecutePending = false;
+				return;
+			}
 			this.awaitingReadbackCycles = 0;
 			this.state = executeState == ExecuteState.OK ? State.DISABLE_AWAITING_READBACK : State.FAILED;
 		}
@@ -346,9 +405,13 @@ final class ScheduleWindow {
 	}
 
 	/**
-	 * Advances the bounded read-back wait without ever retrying a write.
+	 * Advances the bounded waits without ever retrying a write. A read-back that
+	 * never arrives ends in {@code FAILED}; so does a queued write the bridge never
+	 * executes, but only if {@link #setQueuedTimeout(boolean)} is on, and it is then
+	 * withdrawn so it cannot fire late.
 	 *
-	 * @param timeoutCycles number of Edge cycles allowed for a fresh read-back
+	 * @param timeoutCycles number of Edge cycles allowed for an execute or a fresh
+	 *                      read-back
 	 */
 	public synchronized void onCycle(int timeoutCycles) {
 		switch (this.state) {
@@ -357,10 +420,101 @@ final class ScheduleWindow {
 				this.state = State.FAILED;
 			}
 		}
+		case DISABLE_QUEUED, WINDOW_QUEUED, ENABLE_QUEUED -> {
+			if (this.queuedTimeout && ++this.awaitingReadbackCycles >= timeoutCycles) {
+				this.state = State.FAILED;
+				// The abandoned disarm must not leave a stale-execute flag behind.
+				this.staleEnableExecutePending = false;
+				this.startWrite.setNextWriteValue(null);
+				this.stopWrite.setNextWriteValue(null);
+				this.enableWrite.setNextWriteValue(null);
+			}
+		}
 		default -> {
-			// only the read-back waits are bounded
+			// settled states are not bounded
 		}
 		}
+	}
+
+	/**
+	 * Disarms the schedule without touching the window: the only write the caller
+	 * may make while the unit's machine state is not verified. Acts only from
+	 * {@code IDLE} or a settled {@code DISABLE_VERIFIED}/{@code WINDOW_VERIFIED}
+	 * and only if the device is known to be armed, or withdraws an arm that is
+	 * queued but not yet written; the window itself is left to the normal path.
+	 *
+	 * @param actualEnable the read-back enable register, or null if unknown
+	 * @return a one-shot audit message, or null if nothing was queued
+	 */
+	public synchronized String disarmOnly(Integer actualEnable) {
+		if (this.state == State.ENABLE_QUEUED) {
+			return this.withdrawQueuedArm(actualEnable, 0);
+		}
+		// DISABLE_VERIFIED and WINDOW_VERIFIED are settled steps waiting for the verified
+		// machine state to continue the sequence; if the register drifted back to armed it
+		// is disarmed again, still without advancing any window write.
+		if ((this.state != State.IDLE && !this.isSettledStep()) || actualEnable == null || actualEnable.equals(0)) {
+			return null;
+		}
+		this.desiredEnable = 0;
+		return this.queueEnable(0);
+	}
+
+	private boolean isSettledStep() {
+		return this.state == State.DISABLE_VERIFIED || this.state == State.WINDOW_VERIFIED;
+	}
+
+	/**
+	 * Whether the window rests in a verified step that only the verified machine
+	 * state advances.
+	 *
+	 * @return true if in {@code DISABLE_VERIFIED} or {@code WINDOW_VERIFIED}
+	 */
+	public synchronized boolean isWaitingForVerifiedState() {
+		return this.isSettledStep();
+	}
+
+	/**
+	 * Re-opens a settled window so a changed effective enable target is driven
+	 * through the normal verified path. A {@code DONE} window is re-opened, and so
+	 * is a {@code FAILED} one whose failure was a runtime write/read-back error, so
+	 * the caller can retry (a failed restore must never leave the schedule disabled
+	 * for good). A configuration rejection is never re-opened, and a running
+	 * sequence is left alone.
+	 *
+	 * @return true if the window was re-opened
+	 */
+	public synchronized boolean reopen() {
+		this.staleEnableExecutePending = false;
+		if (this.state == State.FAILED && !this.rejected) {
+			this.startWrite.setNextWriteValue(null);
+			this.stopWrite.setNextWriteValue(null);
+			this.enableWrite.setNextWriteValue(null);
+		} else if (this.state != State.DONE) {
+			return false;
+		}
+		this.state = State.IDLE;
+		return true;
+	}
+
+	/**
+	 * Whether the window is in a runtime failure that {@link #reopen()} can retry.
+	 *
+	 * @return true if failed but not because of a rejected configuration
+	 */
+	public synchronized boolean isRetryableFailure() {
+		return this.state == State.FAILED && !this.rejected;
+	}
+
+	/**
+	 * Whether a write sequence is running, i.e. the window is neither settled
+	 * ({@code IDLE}, {@code DONE}) nor failed.
+	 *
+	 * @return true if a sequence is in progress
+	 */
+	public synchronized boolean isSequenceInProgress() {
+		return this.state != State.IDLE && this.state != State.DONE && this.state != State.FAILED
+				&& this.state != State.UNDEFINED;
 	}
 
 	public synchronized State getState() {
