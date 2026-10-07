@@ -5,7 +5,7 @@ import { Theme, Theme as UserTheme } from "src/app/edge/history/shared";
 import { ThemePopoverComponent } from "src/app/user/theme-selection-popup/theme-selection-popover";
 import { environment } from "src/environments";
 import { NavigationService } from "../components/navigation/service/navigation.service";
-import { UnimplementedInEdgeError } from "../errors.ts/errors";
+import { UnimplementedInEdgeError } from "../errors/errors";
 import { JsonrpcResponseSuccess } from "../jsonrpc/base";
 import { JsonRpcUtils } from "../jsonrpc/jsonrpcutils";
 import { UpdateUserSettingsRequest } from "../jsonrpc/request/updateUserSettingsRequest";
@@ -15,10 +15,9 @@ import { Service } from "./service";
 
 @Injectable({ providedIn: "root" })
 export class UserService {
-
     public currentUser: WritableSignal<User | null> = signal(null);
 
-    /** @deprecated determines if applying new ui or old*/
+    /** @deprecated Determines if applying new ui or old */
     public isNewNavigation: WritableSignal<boolean> = signal(false);
     private isThemeModalOpen: boolean = false;
 
@@ -27,7 +26,6 @@ export class UserService {
         private service: Service,
         private translate: TranslateService,
     ) {
-
         // Prohibits switching colors on init
         this.updateTheme(localStorage.getItem("THEME") as UserTheme);
         effect(() => {
@@ -35,7 +33,9 @@ export class UserService {
 
             if (user != null) {
                 this.showThemeSelection(user);
-                this.isNewNavigation.set(NavigationService.isNewNavigation(user, this.service.currentEdge()?.getConfigSignal()()));
+                this.isNewNavigation.set(
+                    NavigationService.isNewNavigation(user, this.service.currentEdge()?.getConfigSignal()()),
+                );
             }
         });
     }
@@ -47,10 +47,9 @@ export class UserService {
     /**
      * Selects the new theme
      *
-     * @param theme the new theme
+     * @param theme The new theme
      */
     public async selectTheme(theme: UserTheme): Promise<void> {
-
         const currentUser: User | null = this.currentUser();
         if (currentUser == null || !theme) {
             return;
@@ -60,12 +59,12 @@ export class UserService {
     }
 
     public getValidBrowserTheme(userTheme: UserTheme | null): UserTheme {
-
-        const theme = userTheme === UserTheme.SYSTEM
-            ? window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? UserTheme.DARK
-                : UserTheme.LIGHT
-            : userTheme;
+        const theme =
+            userTheme === UserTheme.SYSTEM
+                ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                    ? UserTheme.DARK
+                    : UserTheme.LIGHT
+                : userTheme;
 
         return theme ?? UserService.DEFAULT_THEME;
     }
@@ -73,8 +72,8 @@ export class UserService {
     /**
      * Updates the settings from User
      *
-     * @param key the key to update
-     * @param value the value for given key
+     * @param key The key to update
+     * @param value The value for given key
      */
     public async updateUserSettingsWithProperty(key: string, value: User["settings"][keyof User["settings"]]) {
         const user = this.currentUser();
@@ -85,7 +84,9 @@ export class UserService {
             throw err;
         }
 
-        this.currentUser.set(new User(user.id, user.name, user.globalRole, user.language, user.hasMultipleEdges, updatedSettings));
+        this.currentUser.set(
+            new User(user.id, user.name, user.globalRole, user.language, user.hasMultipleEdges, updatedSettings),
+        );
     }
 
     /**
@@ -109,12 +110,12 @@ export class UserService {
     /**
      * Gets the theme
      *
-     * @param user the current user
-     * @returns the userTheme if existing, else null
+     * @param user The current user
+     * @returns The userTheme if existing, else null
      */
     private getTheme(user: User | null): UserTheme | null {
         if (environment.backend === "OpenEMS Edge") {
-            return localStorage.getItem("THEME") as UserTheme ?? null;
+            return (localStorage.getItem("THEME") as UserTheme) ?? null;
         }
 
         return user?.getThemeFromSettings()
@@ -125,7 +126,7 @@ export class UserService {
     /**
      * Updates the theme and initializes it
      *
-     * @param userTheme the new user theme
+     * @param userTheme The new user theme
      */
     private updateTheme(userTheme: UserTheme | null): void {
         const validTheme = this.getValidBrowserTheme(userTheme);
@@ -147,9 +148,9 @@ export class UserService {
 
     /**
      * Shows the theme selection popover
-    *
-    * @param currentTheme current theme
-    */
+     *
+     * @param currentTheme Current theme
+     */
     private async showModal(): Promise<void> {
         this.isThemeModalOpen = true;
 
@@ -171,10 +172,10 @@ export class UserService {
 
     /**
      * Updates the user settings
-    *
-    * @param settings the new settings to use
-    * @returns
-    */
+     *
+     * @param settings The new settings to use
+     * @returns
+     */
     private updateUserSettings(settings: object): Promise<[Error | null, JsonrpcResponseSuccess | null]> {
         const request = new UpdateUserSettingsRequest({ settings: settings });
         if (environment.backend === "OpenEMS Edge") {
