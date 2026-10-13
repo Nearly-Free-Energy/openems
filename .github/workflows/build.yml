@@ -131,4 +131,4 @@ jobs:
           platforms: ${{ matrix.platforms }}
           push: false
           cache-from: type=gha,scope=validate-${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=validate-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=validate-${{ matrix.image }},ignore-error=true

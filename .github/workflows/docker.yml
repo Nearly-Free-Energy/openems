@@ -222,7 +222,7 @@ jobs:
             io.nearly-free-energy.openems.upstream.revision=${{ needs.prepare.outputs.upstream_sha }}
             io.nearly-free-energy.openems.merge.revision=${{ needs.prepare.outputs.source_sha }}
           cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }},ignore-error=true
           provenance: mode=max
           sbom: true
       - name: Record immutable image
