@@ -29,6 +29,25 @@ public class SafeWriteHandlerTest {
 	}
 
 	@Test
+	void unsetMarkerQueuesWriteAndVerifiesOnlyTheTarget() {
+		// E03B reads 4096 until set: it differs from the target, and is never verified.
+		var sut = new SafeWriteHandler();
+		assertTrue(sut.queueIfChanged(4096, 50));
+		sut.onExecute(ExecuteState.OK);
+		sut.verify(50);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.getState());
+	}
+
+	@Test
+	void unsetMarkerReadbackAfterWriteFails() {
+		var sut = new SafeWriteHandler();
+		assertTrue(sut.queueIfChanged(4096, 50));
+		sut.onExecute(ExecuteState.OK);
+		sut.verify(4096);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.getState());
+	}
+
+	@Test
 	void remainsPendingUntilFreshReadbackArrives() {
 		var sut = new SafeWriteHandler();
 		assertTrue(sut.queueIfChanged(10, 20));
