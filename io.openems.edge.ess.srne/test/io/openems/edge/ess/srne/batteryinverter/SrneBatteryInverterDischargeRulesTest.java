@@ -530,11 +530,11 @@ public class SrneBatteryInverterDischargeRulesTest {
 			"FC3ReadRegistersTask@57372", "FC3ReadRegistersTask@57860", "FC3ReadRegistersTask@57866",
 			"FC3ReadRegistersTask@57877", "FC3ReadRegistersTask@57382", "FC3ReadRegistersTask@57384",
 			"FC3ReadRegistersTask@57391", "FC3ReadRegistersTask@57388", "FC3ReadRegistersTask@57395",
-			"FC3ReadRegistersTask@257", "FC3ReadRegistersTask@528", "FC16WriteRegistersTask@57359",
-			"FC16WriteRegistersTask@57372", "FC16WriteRegistersTask@57373", "FC16WriteRegistersTask@57374",
-			"FC16WriteRegistersTask@57375", "FC16WriteRegistersTask@57376", "FC16WriteRegistersTask@57861",
-			"FC16WriteRegistersTask@57866", "FC16WriteRegistersTask@57860", "FC16WriteRegistersTask@57877",
-			"FC16WriteRegistersTask@57382", "FC16WriteRegistersTask@57383", "FC16WriteRegistersTask@57388",
+			"FC3ReadRegistersTask@57403", "FC3ReadRegistersTask@257", "FC3ReadRegistersTask@528",
+			"FC16WriteRegistersTask@57359", "FC16WriteRegistersTask@57372", "FC16WriteRegistersTask@57373",
+			"FC16WriteRegistersTask@57374", "FC16WriteRegistersTask@57375", "FC16WriteRegistersTask@57376",
+			"FC16WriteRegistersTask@57861", "FC16WriteRegistersTask@57866", "FC16WriteRegistersTask@57860",
+			"FC16WriteRegistersTask@57877", "FC16WriteRegistersTask@57403", "FC16WriteRegistersTask@57382", "FC16WriteRegistersTask@57383", "FC16WriteRegistersTask@57388",
 			"FC16WriteRegistersTask@57389", "FC16WriteRegistersTask@57390", "FC16WriteRegistersTask@57395");
 
 	private static List<String> taskList(SrneBatteryInverterImpl sut) throws Exception {
