@@ -22,6 +22,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int maxChargeCurrentLimit = -1;
 		private int chargeWindow1Start = -1;
 		private int chargeWindow1Stop = -1;
+		private int chargeWindow1StopSoc = -1;
 		private int dischargeWindow1Start = -1;
 		private int dischargeWindow1Stop = -1;
 		private int chargeScheduleEnable = -1;
@@ -67,6 +68,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setLowSocAlarm(int value) {
 			this.lowSocAlarm = value;
+			return this;
+		}
+
+		public Builder setChargeWindow1StopSoc(int value) {
+			this.chargeWindow1StopSoc = value;
 			return this;
 		}
 
@@ -197,6 +203,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int stopChargeSoc() {
 		return this.builder.stopChargeSoc;
+	}
+
+	@Override
+	public int chargeWindow1StopSoc() {
+		return this.builder.chargeWindow1StopSoc;
 	}
 
 	@Override

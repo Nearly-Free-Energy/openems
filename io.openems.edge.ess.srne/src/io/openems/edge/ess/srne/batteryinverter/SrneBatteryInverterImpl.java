@@ -95,9 +95,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// unit at commissioning, so the ranges here are bounded only.
 	private final UnsignedWordElement outputPriorityWrite = new UnsignedWordElement(0xE204);
 	private final UnsignedWordElement bmsCommunicationWrite = new UnsignedWordElement(0xE215);
+	private final UnsignedWordElement chargeWindow1StopSocWrite = new UnsignedWordElement(0xE03B);
 	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
-			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler() };
+			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
+			new SafeWriteHandler() };
 	/*
 	 * TOU schedule windows for arbitrage. Each window is a coherent (start, stop,
 	 * enable) unit: the contiguous start/stop pair (charge 0xE026/0xE027, discharge
@@ -197,6 +199,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.registerReadback(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT);
 		this.registerReadback(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY);
 		this.registerReadback(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION);
+		this.registerReadback(10, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC);
 		this.registerWindowReadback(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
@@ -355,6 +358,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						m(SrneBatteryInverter.ChannelId.RTC_YEAR_MONTH, new UnsignedWordElement(0xE034)), //
 						m(SrneBatteryInverter.ChannelId.RTC_DAY_HOUR, new UnsignedWordElement(0xE035)), //
 						m(SrneBatteryInverter.ChannelId.RTC_MINUTE_SECOND, new UnsignedWordElement(0xE036))), //
+				new FC3ReadRegistersTask(0xE03B, Priority.LOW, //
+						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC, new UnsignedWordElement(0xE03B))), //
 				new FC3ReadRegistersTask(0x0101, Priority.HIGH, //
 						m(SrneBatteryInverter.ChannelId.BATTERY_VOLTAGE, new UnsignedWordElement(0x0101),
 								SCALE_FACTOR_2), //
@@ -374,6 +379,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.maxChargeCurrentLimitWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[8]::onExecute, 0xE204, this.outputPriorityWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[9]::onExecute, 0xE215, this.bmsCommunicationWrite), //
+				new FC16WriteRegistersTask(this.writeHandlers[10]::onExecute, 0xE03B,
+						this.chargeWindow1StopSocWrite), //
 				// Start and stop each get their OWN single-register task: the SRNE mis-stored
 				// a two-register FC16 here (see ScheduleWindow), and one task would merge the
 				// contiguous elements into one frame. The enable is a separate write, last.
@@ -450,6 +457,20 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.stopChargeSoc(), 0, 100, 1, this.stopChargeSocWrite);
 		this.reconcile(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM,
 				this.config.lowSocAlarm(), 0, 100, 1, this.lowSocAlarmWrite);
+		// An unset device reads 4096, which differs from every valid target, so a
+		// configured target queues exactly one write and 4096 never verifies.
+		// Only -1 means "unchanged"; any other negative value is a misconfiguration.
+		var chargeWindow1StopSoc = this.config.chargeWindow1StopSoc();
+		if (chargeWindow1StopSoc < -1) {
+			if (this.writeHandlers[10].reject()) {
+				this.logWarn(this.log, "Rejected out-of-range setting ["
+						+ SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC.name() + "] value ["
+						+ chargeWindow1StopSoc + "]; validated range is [0..100]");
+			}
+		} else {
+			this.reconcile(10, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC, chargeWindow1StopSoc, 0, 100, 1,
+					this.chargeWindow1StopSocWrite);
+		}
 		this.reconcile(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
 				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,

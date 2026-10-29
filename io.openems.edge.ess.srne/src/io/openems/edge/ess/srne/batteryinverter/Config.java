@@ -60,6 +60,9 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Maximum charge-current limit", description = "Target for E20A in amperes; -1 leaves unchanged.")
 	int maxChargeCurrentLimit() default -1;
 
+	@AttributeDefinition(name = "Charge window 1 stop SoC", description = "Target for E03B (charge window 1 stop SoC) in percent; -1 leaves unchanged.")
+	int chargeWindow1StopSoc() default -1;
+
 	// Output priority (source transfer) and BMS-comms enable. Raw mode numbers; the
 	// value->mode mapping (which value is SBU, etc.) is unverified in the manuals and
 	// must be confirmed on the unit before use. -1 leaves unchanged. See #71.

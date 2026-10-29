@@ -99,6 +99,61 @@ public class SrneBatteryInverterImplTest {
 				.deactivate();
 	}
 
+	private static final int CHARGE_WINDOW_1_STOP_SOC_UNSET = 4096;
+
+	private void runChargeWindow1StopSoc(int target, MachineState machineState,
+			SafeWriteHandler.State expectedState) throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", new DummyModbusBridge("modbus0") //
+						.withRegister(0xE00F, 10) //
+						.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+						.withRegister(0xE205, 20) //
+						.withRegister(0xE20A, 40) //
+						.withRegister(0xE03B, CHARGE_WINDOW_1_STOP_SOC_UNSET) //
+						.withRegisters(0x0101, 524, 0) //
+						.withRegister(0x0210, machineState.getValue())) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setChargeWindow1StopSoc(target) //
+						.build()) //
+				.next(new TestCase(), 16) // >= number of LOW read tasks (13; E03B is last)
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC,
+								CHARGE_WINDOW_1_STOP_SOC_UNSET) //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, expectedState)) //
+				.next(new TestCase(), 5) //
+				.next(new TestCase() //
+						.output(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE, expectedState)) //
+				.deactivate();
+	}
+
+	@Test
+	public void testChargeWindow1StopSocUnchangedWritesNothing() throws Exception {
+		this.runChargeWindow1StopSoc(-1, MachineState.RUNNING_MAINS_BYPASS, SafeWriteHandler.State.IDLE);
+	}
+
+	@Test
+	public void testChargeWindow1StopSocWriteQueues() throws Exception {
+		// 4096 (never set) differs from every valid target, so one write is queued.
+		this.runChargeWindow1StopSoc(50, MachineState.RUNNING_MAINS_BYPASS, SafeWriteHandler.State.QUEUED);
+	}
+
+	@Test
+	public void testChargeWindow1StopSocOutOfRangeRejected() throws Exception {
+		this.runChargeWindow1StopSoc(101, MachineState.RUNNING_MAINS_BYPASS, SafeWriteHandler.State.FAILED);
+		this.runChargeWindow1StopSoc(-2, MachineState.RUNNING_MAINS_BYPASS, SafeWriteHandler.State.FAILED);
+	}
+
+	@Test
+	public void testChargeWindow1StopSocDeferredWhileUnverified() throws Exception {
+		this.runChargeWindow1StopSoc(50, MachineState.INVERTER_POWERED, SafeWriteHandler.State.IDLE);
+	}
+
 	// JUSTIFICATION-A3: new negative tests for the two safety gates (default-off and
 	// machine-state-verified), added because the reconcile trigger now fires every
 	// cycle in all topologies. Not a wrapper around existing coverage.
