@@ -129,6 +129,7 @@ public class BackendEdgeServerApp {
 				this.client::sendRequestToEdgeManager, //
 				this.client::sendNotificationToEdgeManager, //
 				this.cache::authenticateApikey, //
+				this.cyclicTask::edgeHandshakeAccepted, //
 				this.cyclicTask::connectedEdgesChanged);
 	}
 
