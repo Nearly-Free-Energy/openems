@@ -8,6 +8,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import io.openems.common.websocket.CommonHttpHeader;
@@ -27,12 +28,19 @@ import io.openems.common.websocket.AbstractWebsocketServer;
 
 public final class WebsocketServer extends AbstractWebsocketServer<WsData> {
 
+	/**
+	 * Handshake header with the Edge-ID, sent by Controller.Api.Backend when its
+	 * Edge-ID is configured.
+	 */
+	private static final String ID_HEADER = "id";
+
 	private final OnOpen onOpen;
 	private final OnRequest onRequest;
 	private final OnNotification onNotification;
 	private final OnError onError;
 	private final OnClose onClose;
 	private final Function<String, String> authenticateApikey;
+	private final Consumer<String> handshakeAccepted;
 
 	private final Logger log;
 
@@ -40,10 +48,12 @@ public final class WebsocketServer extends AbstractWebsocketServer<WsData> {
 			BiFunction<String, JsonrpcRequest, CompletableFuture<? extends JsonrpcResponseSuccess>> sendRequestToEdgeManager, //
 			BiConsumer<String, JsonrpcNotification> sendNotificationToEdgeManager, //
 			Function<String, String> authenticateApikey, //
+			Consumer<String> handshakeAccepted, //
 			Runnable connectedEdgesChanged) {
 		super(name, port, poolSize);
 		this.log = new ContextLogger(WebsocketServer.class, name);
 		this.authenticateApikey = authenticateApikey;
+		this.handshakeAccepted = handshakeAccepted;
 		this.onOpen = new OnOpen(//
 				connectedEdgesChanged);
 		this.onRequest = new OnRequest(//
@@ -67,9 +77,19 @@ public final class WebsocketServer extends AbstractWebsocketServer<WsData> {
 			this.log.error("Handshake rejected. Invalid Apikey [InstanceID={}]", instanceId);
 			throw new InvalidDataException(CloseFrame.POLICY_VALIDATION, "Handshake rejected. Invalid Apikey");
 		}
+		// Edges configured for a direct Edge.Manager connection also send their
+		// Edge-ID; like Edge.Manager, require it to match the Apikey.
+		final var claimedEdgeId = getAsOptionalString(request, ID_HEADER).orElse(null);
+		if (claimedEdgeId != null && !claimedEdgeId.equals(edgeId)) {
+			this.log.error("Handshake rejected. Edge-ID [{}] does not match Apikey of [{}] [InstanceID={}]",
+					claimedEdgeId, edgeId, instanceId);
+			throw new InvalidDataException(CloseFrame.POLICY_VALIDATION,
+					"Handshake rejected. Edge-ID does not match Apikey");
+		}
 		this.log.debug("Handshake accepted [InstanceID={}, EdgeID={}]", instanceId, edgeId);
 		final var wsData = this.createWsData(ws);
 		wsData.setEdgeId(edgeId);
+		this.handshakeAccepted.accept(edgeId);
 		return wsData;
 	}
 
