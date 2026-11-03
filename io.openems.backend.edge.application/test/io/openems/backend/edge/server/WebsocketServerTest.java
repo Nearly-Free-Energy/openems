@@ -3,11 +3,15 @@ package io.openems.backend.edge.server;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 import org.java_websocket.WebSocket;
 import org.java_websocket.exceptions.InvalidDataException;
@@ -15,17 +19,24 @@ import org.java_websocket.framing.CloseFrame;
 import org.java_websocket.handshake.HandshakeImpl1Client;
 import org.junit.jupiter.api.Test;
 
+import io.openems.backend.edge.application.CyclicTask;
+import io.openems.backend.edge.client.WebsocketClient;
+
 public class WebsocketServerTest {
 
 	private final List<String> acceptedHandshakes = new ArrayList<>();
 
 	private WebsocketServer createServer() {
+		return createServer(this.acceptedHandshakes::add);
+	}
+
+	private static WebsocketServer createServer(Consumer<String> handshakeAccepted) {
 		return new WebsocketServer("test", 0, 1, //
 				(edgeId, request) -> CompletableFuture.failedFuture(new UnsupportedOperationException()), //
 				(edgeId, notification) -> {
 				}, //
 				apikey -> "valid-key".equals(apikey) ? "edge0" : null, //
-				this.acceptedHandshakes::add, //
+				handshakeAccepted, //
 				() -> {
 				});
 	}
@@ -71,6 +82,20 @@ public class WebsocketServerTest {
 		assertThrows(InvalidDataException.class,
 				() -> this.createServer().onHandshake(mock(WebSocket.class), null, handshake(null, "edge0")));
 		assertTrue(this.acceptedHandshakes.isEmpty());
+	}
+
+	@Test
+	public void testHandshakeIsAcceptedWhenTheAnnouncementFails() throws InvalidDataException {
+		final var client = mock(WebsocketClient.class);
+		when(client.sendMessage(any())).thenThrow(new IllegalStateException("Edge.Manager is unavailable"));
+		final var otherServer = mock(WebsocketServer.class);
+		final var cyclicTask = new CyclicTask(client, () -> otherServer);
+
+		final var wsData = createServer(cyclicTask::edgeHandshakeAccepted).onHandshake(mock(WebSocket.class), null,
+				handshake("valid-key", "edge0"));
+
+		assertEquals("edge0", wsData.getEdgeId());
+		verify(client).sendMessage(any());
 	}
 
 }

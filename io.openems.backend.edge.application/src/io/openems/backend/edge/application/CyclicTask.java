@@ -88,11 +88,22 @@ public class CyclicTask implements Runnable {
 	 * values of all its Channels only right after connecting and then every few
 	 * minutes. Waiting for the next run would lose that first complete set.
 	 *
+	 * <p>
+	 * Runs on the handshake thread, but never holds up or rejects the Edge:
+	 * sending only queues the message, and if the announcement fails the next run
+	 * sends it.
+	 *
 	 * @param edgeId the Edge-ID
 	 */
 	public synchronized void edgeHandshakeAccepted(String edgeId) {
 		this.acceptedHandshakes.put(edgeId, System.nanoTime());
-		this.sendConnectedEdgesNotification(Map.of());
+		try {
+			this.sendConnectedEdgesNotification(Map.of());
+		} catch (RuntimeException e) {
+			this.connectedEdgesChangedSinceLastRun.set(true);
+			this.log.error("Unable to announce Edge [" + edgeId + "]: " + e.getMessage());
+			this.log.debug("Stacktrace:", e);
+		}
 	}
 
 	private void printDebugLog() {
@@ -140,7 +151,10 @@ public class CyclicTask implements Runnable {
 			this.connectedEdgesChangedSinceLastRun.set(true);
 		}
 
-		this.client.sendMessage(new ConnectedEdges.Notification(edgeIds, metrics));
+		if (!this.client.sendMessage(new ConnectedEdges.Notification(edgeIds, metrics))) {
+			// Not connected to Edge.Manager; send again in the next run
+			this.connectedEdgesChangedSinceLastRun.set(true);
+		}
 	}
 
 }

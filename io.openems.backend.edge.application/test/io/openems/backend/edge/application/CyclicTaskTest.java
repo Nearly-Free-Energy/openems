@@ -1,8 +1,11 @@
 package io.openems.backend.edge.application;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -11,6 +14,7 @@ import java.util.List;
 import java.util.Set;
 
 import org.java_websocket.WebSocket;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -25,6 +29,11 @@ public class CyclicTaskTest {
 	private final WebsocketClient client = mock(WebsocketClient.class);
 	private final WebsocketServer server = mock(WebsocketServer.class);
 	private final CyclicTask sut = new CyclicTask(this.client, () -> this.server);
+
+	@BeforeEach
+	public void connectedToEdgeManager() {
+		when(this.client.sendMessage(any())).thenReturn(true);
+	}
 
 	private void connected(String... edgeIds) {
 		final var connections = Arrays.stream(edgeIds).map(edgeId -> {
@@ -90,6 +99,34 @@ public class CyclicTaskTest {
 		assertEquals(List.of(Set.of("edge0")), captor.getAllValues().stream() //
 				.map(m -> ((ConnectedEdges.Notification) m).getEdgeIds()) //
 				.toList());
+	}
+
+	@Test
+	public void testUnsentAnnouncementIsSentInNextRun() {
+		when(this.client.sendMessage(any())).thenReturn(false, true);
+		this.connected("edge0");
+		this.sut.connectedEdgesChanged();
+
+		this.sut.run();
+		this.sut.run();
+		this.sut.run();
+
+		verify(this.client, times(2)).sendMessage(any());
+		assertEquals(Set.of("edge0"), this.lastAnnouncedEdgeIds());
+	}
+
+	@Test
+	public void testFailedHandshakeAnnouncementIsSentInNextRun() {
+		when(this.client.sendMessage(any())) //
+				.thenThrow(new IllegalStateException("Edge.Manager is unavailable")) //
+				.thenReturn(true);
+		this.connected("edge0");
+
+		assertDoesNotThrow(() -> this.sut.edgeHandshakeAccepted("edge0"));
+		this.sut.run();
+
+		verify(this.client, times(2)).sendMessage(any());
+		assertEquals(Set.of("edge0"), this.lastAnnouncedEdgeIds());
 	}
 
 }
