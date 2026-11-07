@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 
 import io.openems.backend.common.edge.jsonrpc.UpdateMetadataCache;
 import io.openems.common.exceptions.OpenemsError;
+import io.openems.common.jsonrpc.notification.AllSyncableEntriesNotification;
 import io.openems.common.websocket.CommonHttpHeader;
 
 public class OnOpen implements io.openems.common.websocket.OnOpen {
@@ -25,16 +26,19 @@ public class OnOpen implements io.openems.common.websocket.OnOpen {
 	private final Function<String, Optional<String>> getEdgeIdForApikey;
 	private final Predicate<String> isKnownEdgeId;
 	private final Supplier<UpdateMetadataCache.Notification> generateUpdateMetadataCacheNotification;
+	private final Supplier<AllSyncableEntriesNotification> generateAllSyncableEntriesNotification;
 	private final BiConsumer<Logger, String> logInfo;
 
 	public OnOpen(//
 			Function<String, Optional<String>> getEdgeIdForApikey, //
 			Predicate<String> isKnownEdgeId, //
 			Supplier<UpdateMetadataCache.Notification> generateUpdateMetadataCacheNotification, //
+			Supplier<AllSyncableEntriesNotification> generateAllSyncableEntriesNotification, //
 			BiConsumer<Logger, String> logInfo) {
 		this.getEdgeIdForApikey = getEdgeIdForApikey;
 		this.isKnownEdgeId = isKnownEdgeId;
 		this.generateUpdateMetadataCacheNotification = generateUpdateMetadataCacheNotification;
+		this.generateAllSyncableEntriesNotification = generateAllSyncableEntriesNotification;
 		this.logInfo = logInfo;
 	}
 
@@ -78,6 +82,7 @@ public class OnOpen implements io.openems.common.websocket.OnOpen {
 
 		// Send a UpdateMetadataCache.Notification
 		wsData.send(this.generateUpdateMetadataCacheNotification.get());
+		wsData.send(this.generateAllSyncableEntriesNotification.get());
 
 		return null; // No error
 	}

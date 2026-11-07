@@ -15,6 +15,7 @@ import { Service } from "./service";
 
 @Injectable({ providedIn: "root" })
 export class UserService {
+    /** Holds the currently selected user */
     public currentUser: WritableSignal<User | null> = signal(null);
 
     /** @deprecated Determines if applying new ui or old */
