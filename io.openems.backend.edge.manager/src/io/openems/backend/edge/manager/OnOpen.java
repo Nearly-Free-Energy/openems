@@ -15,6 +15,7 @@ import org.java_websocket.handshake.Handshakedata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.openems.backend.common.edge.jsonrpc.UpdateMetadataCache;
 import io.openems.common.exceptions.OpenemsError;
 import io.openems.common.jsonrpc.notification.AllSyncableEntriesNotification;
 import io.openems.common.websocket.CommonHttpHeader;
