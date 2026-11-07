@@ -14,14 +14,13 @@ import static org.mockito.Mockito.when;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
-import com.google.common.collect.TreeBasedTable;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonPrimitive;
 import com.influxdb.client.write.Point;
 
 import io.openems.common.jsonrpc.notification.AggregatedDataNotification;
 import io.openems.common.jsonrpc.notification.ResendDataNotification;
 import io.openems.common.oem.DummyOpenemsBackendOem;
+import io.openems.common.types.DataTable;
 import io.openems.shared.influxdb.InfluxConnector;
 
 public class TimedataInfluxDbTest {
@@ -79,13 +78,13 @@ public class TimedataInfluxDbTest {
 	}
 
 	private static ResendDataNotification createResendDataNotification() {
-		final var data = TreeBasedTable.<Long, String, JsonElement>create();
+		final var data = new DataTable();
 		data.put(TIMESTAMP, CHANNEL, new JsonPrimitive(123));
 		return new ResendDataNotification(data);
 	}
 
 	private static AggregatedDataNotification createAggregatedDataNotification() {
-		final var data = TreeBasedTable.<Long, String, JsonElement>create();
+		final var data = new DataTable();
 		data.put(TIMESTAMP, CHANNEL, new JsonPrimitive(456));
 		return new AggregatedDataNotification(data);
 	}
