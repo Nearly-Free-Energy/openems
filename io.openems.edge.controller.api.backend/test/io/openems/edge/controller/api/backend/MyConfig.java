@@ -13,6 +13,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private String id;
 		private String apikey;
 		private String uri;
+		private String edgeId = "";
 		private String proxyAddress;
 		private int proxyPort;
 		private Type proxyType;
@@ -39,6 +40,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setUri(String uri) {
 			this.uri = uri;
+			return this;
+		}
+
+		public Builder setEdgeId(String edgeId) {
+			this.edgeId = edgeId;
 			return this;
 		}
 
@@ -121,6 +127,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public String uri() {
 		return this.builder.uri;
+	}
+
+	@Override
+	public String edgeId() {
+		return this.builder.edgeId;
 	}
 
 	@Override

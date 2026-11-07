@@ -5,6 +5,7 @@ import java.util.Objects;
 import org.java_websocket.WebSocket;
 import org.slf4j.Logger;
 
+import io.openems.common.jsonrpc.notification.AllSyncableEntriesNotification;
 import io.openems.common.websocket.AbstractWebsocketServer;
 
 public class WebsocketServer extends AbstractWebsocketServer<WsData> {
@@ -19,7 +20,12 @@ public class WebsocketServer extends AbstractWebsocketServer<WsData> {
 	public WebsocketServer(EdgeManagerImpl parent, String name, int port, int poolSize) {
 		super(name, port, poolSize);
 		this.parent = parent;
-		this.onOpen = new OnOpen(parent);
+		this.onOpen = new OnOpen(//
+				parent.metadata::getEdgeIdForApikey, //
+				id -> parent.metadata.getEdge(id).isPresent(), //
+				parent.metadata::generateUpdateMetadataCacheNotification, //
+				() -> new AllSyncableEntriesNotification(parent.syncableRepository.getAllStaticEntries()), //
+				parent::logInfo);
 		this.onRequest = new OnRequest(//
 				name, //
 				parent, //

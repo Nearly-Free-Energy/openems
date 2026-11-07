@@ -1,7 +1,7 @@
 <ion-header class="ion-no-border">
     <ion-toolbar>
         <ion-buttons slot="end">
-            <ion-button color="none" (click)="modalCtrl.dismiss()">
+            <ion-button color="none" (click)="modalCtrl.dismiss()" [attr.aria-label]="'GENERAL.CANCEL' | translate">
                 <ion-icon name="close-outline"></ion-icon>
             </ion-button>
         </ion-buttons>
