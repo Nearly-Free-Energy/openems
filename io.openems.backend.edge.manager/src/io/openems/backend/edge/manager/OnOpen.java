@@ -77,8 +77,12 @@ public class OnOpen implements io.openems.common.websocket.OnOpen {
 		// ConnectedEdges.Notification (which creates the EdgeCache); a directly
 		// connected Edge announces only itself via the 'id' header, so register it
 		// here. Without this the EdgeCache is null and handleDataNotification silently
-		// drops every TimestampedData/AggregatedData notification.
-		wsData.updateEdgeStatus(id, true);
+		// drops every TimestampedData/AggregatedData notification. Only an Edge
+		// authenticated by its apikey is registered; a Backend.Edge relay connects
+		// without an apikey and announces its Edges via ConnectedEdges.
+		if (apikey != null) {
+			wsData.updateEdgeStatus(id, true);
+		}
 
 		// Send a UpdateMetadataCache.Notification
 		wsData.send(this.generateUpdateMetadataCacheNotification.get());
