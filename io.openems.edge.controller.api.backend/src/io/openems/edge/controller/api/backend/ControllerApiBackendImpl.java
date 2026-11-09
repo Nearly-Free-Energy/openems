@@ -182,7 +182,7 @@ public class ControllerApiBackendImpl extends AbstractOpenemsComponent
 					this.getLastSuccessFulResendChannel().address(), //
 					config.resendPriority(), //
 					t -> this.getLastSuccessFulResendChannel().setNextValue(t), //
-					t -> this.websocket.sendMessage(this.wrap(t)) //
+					t -> this.websocket.sendMessage(t) //
 			));
 			this.resendHistoricDataWorker.activate(this.id(), false);
 		}
@@ -253,7 +253,7 @@ public class ControllerApiBackendImpl extends AbstractOpenemsComponent
 				if (ws == null) {
 					return;
 				}
-				ws.sendMessage(this.wrap(message));
+				ws.sendMessage(message);
 
 				// Trigger sending of all channel values, because a Component might have
 				// disappeared
@@ -311,7 +311,7 @@ public class ControllerApiBackendImpl extends AbstractOpenemsComponent
 	 */
 	JsonrpcNotification wrap(JsonrpcNotification notification) {
 		var edgeId = this.config.edgeId();
-		if (edgeId == null || edgeId.isBlank()) {
+		if (edgeId == null || edgeId.isBlank() || notification instanceof EdgeRpcNotification) {
 			return notification;
 		}
 		return new EdgeRpcNotification(edgeId, notification);

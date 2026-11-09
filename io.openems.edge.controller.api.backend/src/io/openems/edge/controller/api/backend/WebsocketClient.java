@@ -13,6 +13,7 @@ import org.java_websocket.handshake.ClientHandshake;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.openems.common.jsonrpc.base.JsonrpcMessage;
 import io.openems.common.websocket.AbstractWebsocketClient;
 import io.openems.common.websocket.ClientReconnectorWorker;
 import io.openems.common.websocket.CommonHttpHeader;
@@ -118,6 +119,20 @@ public class WebsocketClient extends AbstractWebsocketClient<WsData> {
 	@Override
 	protected void logError(Logger log, String message) {
 		this.parent.logError(log, message);
+	}
+
+	/**
+	 * Sends a {@link JsonrpcMessage} to the Backend. Every notification is wrapped
+	 * in an {@link io.openems.common.jsonrpc.notification.EdgeRpcNotification}
+	 * here, once, when an Edge-ID is configured, so that every sender (including
+	 * ones added by upstream) works with the Backend Edge.Manager protocol.
+	 *
+	 * @param message the {@link JsonrpcMessage}
+	 * @return true if sending was successful
+	 */
+	@Override
+	public boolean sendMessage(JsonrpcMessage message) {
+		return super.sendMessage(this.parent.wrap(message));
 	}
 
 	public boolean isConnected() {
