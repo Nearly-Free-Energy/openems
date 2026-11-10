@@ -138,7 +138,7 @@ public class SrneBatteryInverterModeScheduleTest {
 				.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.DISABLED, state(sut));
 		assertNull(target(sut));
-		assertNull(reason(sut));
+		assertEquals(ModeScheduleReason.UNDEFINED, reason(sut)); // never set
 		assertNull(sut.modeScheduleForTest().queuedTarget());
 		assertFalse(sut.takeModeScheduleWriteForTest());
 		// Default bus traffic unchanged: no SoC read and no second E204 write task.
