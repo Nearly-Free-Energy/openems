@@ -165,7 +165,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.dischargeGuard = this.createDischargeGuard(config);
 		this.modeSchedule = ModeSchedule.fromConfig(config.modeScheduleEnabled(), config.daytimePriority(),
 				config.eveningPriority(), config.eveningStart(), config.daytimeStart(), config.outputPriority(),
-				config.daytimeSbuAboveSoc(), config.daytimeSbuBelowSoc(), config.minDwellMinutes());
+				config.daytimeSbuAboveSoc(), config.daytimeSbuBelowSoc(), config.minDwellMinutes(),
+				config.gridPresentMinVoltage());
 		if (this.modeSchedule.getInvalidReason() != null) {
 			this.logError(this.log, "Invalid mode schedule: " + this.modeSchedule.getInvalidReason()
 					+ "; the schedule stays off");
@@ -192,8 +193,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// Fresh machine-state reads for the mode schedule's mains confirmation.
 		this.getMachineStateChannel().onSetNextValue(ignore -> {
 			MachineState read = this.getMachineStateChannel().getNextValue().asEnum();
-			this.modeSchedule.onMachineStateRead(read != null && read.isVerified());
+			this.modeSchedule.onMachineStateRead(
+					read == null || read == MachineState.UNDEFINED ? null : Integer.valueOf(read.getValue()));
 		});
+		// Fresh grid-input voltage reads for the on-battery SUB path.
+		this.registerGridVoltage(1, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L1);
+		this.registerGridVoltage(2, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L2);
+		this.registerGridVoltage(3, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L3);
 
 		/*
 		 * Validated on the ASP48120SH3: SRNE battery current is positive while
@@ -233,6 +239,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
+	}
+
+	private void registerGridVoltage(int phase, SrneBatteryInverter.ChannelId channelId) {
+		((IntegerReadChannel) this.channel(channelId))
+				.onSetNextValue(value -> this.modeSchedule.onGridVoltageRead(phase, value.get()));
 	}
 
 	private void registerReadback(int index, SrneBatteryInverter.ChannelId channelId) {
@@ -435,6 +446,19 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		// The mode schedule's own E204 write task exists only while the schedule is
 		// active, so the default task list is unchanged.
+		// Grid-input voltages for the mode schedule's SUB write on battery: the SRNE's
+		// own AC-input sense (the same registers Srne.Grid-Meter reads, validated by a
+		// live grid-off/grid-on test). Read only while that path is enabled.
+		if (this.modeSchedule.isActive() && this.modeSchedule.isGridPresentPathEnabled()) {
+			protocol.addTask(new FC3ReadRegistersTask(0x0213, Priority.HIGH, //
+					m(SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L1, new UnsignedWordElement(0x0213),
+							SCALE_FACTOR_2)));
+			protocol.addTask(new FC3ReadRegistersTask(0x022A, Priority.HIGH, //
+					m(SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L2, new UnsignedWordElement(0x022A),
+							SCALE_FACTOR_2), //
+					m(SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L3, new UnsignedWordElement(0x022B),
+							SCALE_FACTOR_2)));
+		}
 		if (this.modeSchedule.isActive()) {
 			// Its own E204 element and task, so its one-shot handlers never touch the
 			// static outputPriority handler (index 8); only one of the two can own E204.

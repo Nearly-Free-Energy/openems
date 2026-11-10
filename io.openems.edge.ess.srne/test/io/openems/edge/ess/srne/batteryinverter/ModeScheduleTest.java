@@ -788,4 +788,88 @@ public class ModeScheduleTest {
 		assertStep(step(sut, LocalTime.of(18, 0), 50, SUB, true), ModeScheduleState.OVERRIDDEN, SBU, null);
 		assertTrue(sut.writesTodayForTest(DATE) < ModeSchedule.MAX_DAILY_WRITES);
 	}
+
+	// ---- SUB write on battery (state 3) when the grid is present ----
+
+	private static final int GRID_UP = 230_000; // mV
+
+	private static ModeSchedule.Step batteryStep(ModeSchedule sut, LocalDateTime now, int soc, int e204,
+			int l1, int l2, int l3) {
+		sut.onMachineStateRead(Integer.valueOf(ModeSchedule.ON_BATTERY_STATE));
+		sut.onGridVoltageRead(1, l1);
+		sut.onGridVoltageRead(2, l2);
+		sut.onGridVoltageRead(3, l3);
+		return sut.step(now, soc, e204, true, false, true, TIMEOUT, COOLDOWN);
+	}
+
+	// SBU written at 96 %, verified; returns the time of the switch.
+	private static LocalDateTime switchedToSbu(ModeSchedule sut) {
+		var t = at(LocalTime.of(11, 0));
+		assertEquals(SBU, socStep(sut, t, 96, SUB, true).write());
+		verified(sut, t, SBU, 96);
+		return t;
+	}
+
+	@Test
+	public void testSubWriteGoesOutOnBatteryWithTheGridPresent() {
+		var sut = primedSoc();
+		var later = switchedToSbu(sut).plusMinutes(30);
+		// The unit left the line at E020 (state 3); SoC fell below 85 %.
+		for (var i = 1; i < ModeSchedule.MAINS_CONFIRM_READS; i++) {
+			assertStep(batteryStep(sut, later, 80, SBU, GRID_UP, GRID_UP, GRID_UP), ModeScheduleState.WAITING_FOR_MAINS,
+					SUB, null);
+		}
+		assertStep(batteryStep(sut, later, 80, SBU, GRID_UP, GRID_UP, GRID_UP), ModeScheduleState.WRITE_PENDING, SUB,
+				SUB);
+		// The grid drops before the bridge took it: withdrawn.
+		var lost = batteryStep(sut, later, 80, SBU, 0, 0, 0);
+		assertStep(lost, ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
+		assertTrue(lost.withdraw());
+	}
+
+	@Test
+	public void testSubWriteOnBatteryWaitsWithoutTheGrid() {
+		var sut = primedSoc();
+		var later = switchedToSbu(sut).plusMinutes(30);
+		for (var i = 0; i < 50; i++) {
+			assertStep(batteryStep(sut, later, 80, SBU, 0, 0, 0), ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
+			// One phase below the threshold is not "grid present" either.
+			assertStep(batteryStep(sut, later, 80, SBU, GRID_UP, GRID_UP, 150_000),
+					ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
+		}
+		assertNull(sut.queuedTarget());
+	}
+
+	@Test
+	public void testSbuWriteOnBatteryStaysOnTheStateTwoGate() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(11, 0));
+		for (var i = 0; i < 50; i++) {
+			assertStep(batteryStep(sut, t, 96, SUB, GRID_UP, GRID_UP, GRID_UP), ModeScheduleState.WAITING_FOR_MAINS,
+					SBU, null);
+		}
+	}
+
+	@Test
+	public void testSubOnBatteryPathCanBeTurnedOff() {
+		var sut = ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1);
+		assertFalse(sut.isGridPresentPathEnabled());
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			step(sut, DAY, 50, SUB, true);
+		}
+		var t = at(LocalTime.of(11, 0));
+		for (var i = 0; i < 50; i++) {
+			assertStep(batteryStep(sut, t, 80, SBU, GRID_UP, GRID_UP, GRID_UP), ModeScheduleState.WAITING_FOR_MAINS,
+					SUB, null);
+		}
+	}
+
+	@Test
+	public void testGridPresentMinVoltageValidation() {
+		assertNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, 180).getInvalidReason());
+		assertNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, -1).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, 99).getInvalidReason());
+		assertNotNull(
+				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, 261).getInvalidReason());
+	}
 }

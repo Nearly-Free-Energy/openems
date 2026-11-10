@@ -40,6 +40,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int daytimeSbuAboveSoc = -1;
 		private int daytimeSbuBelowSoc = -1;
 		private int minDwellMinutes = 10;
+		private int gridPresentMinVoltage = 180;
 
 		private Builder() {
 		}
@@ -189,6 +190,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setMinDwellMinutes(int value) {
 			this.minDwellMinutes = value;
+			return this;
+		}
+
+		public Builder setGridPresentMinVoltage(int value) {
+			this.gridPresentMinVoltage = value;
 			return this;
 		}
 
@@ -379,5 +385,10 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int minDwellMinutes() {
 		return this.builder.minDwellMinutes;
+	}
+
+	@Override
+	public int gridPresentMinVoltage() {
+		return this.builder.gridPresentMinVoltage;
 	}
 }

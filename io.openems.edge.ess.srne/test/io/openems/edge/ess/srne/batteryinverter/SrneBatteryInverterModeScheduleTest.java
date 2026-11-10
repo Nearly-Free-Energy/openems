@@ -466,4 +466,55 @@ public class SrneBatteryInverterModeScheduleTest {
 		assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
 		assertFalse(sut.takeModeScheduleWriteForTest());
 	}
+
+	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3), SoC
+	// falls below daytimeSbuBelowSoc. With the grid present on all phases the SUB
+	// write goes out; with the grid absent it does not.
+	private static void sbuThenOnBatteryBelowThreshold(boolean gridPresent) throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt(DAY);
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 96) //
+				.withRegister(0x0213, 2300) // 230.0 V
+				.withRegisters(0x022A, 2300, 2300);
+		final var test = start(sut, bridge, clock,
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		for (var i = 0; i < 3; i++) {
+			clock.leap(4, ChronoUnit.MINUTES); // past the dwell from activation
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(SBU, sut.modeScheduleForTest().queuedTarget());
+		deviceWrites(sut, bridge, test, SBU);
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+
+		// The unit leaves the line at E020 and runs on battery; SoC falls to 80 %.
+		bridge.withRegister(0x0210, 3) //
+				.withRegisters(0x0100, 80);
+		if (!gridPresent) {
+			bridge.withRegister(0x0213, 0).withRegisters(0x022A, 0, 0);
+		}
+		for (var i = 0; i < 3; i++) {
+			clock.leap(4, ChronoUnit.MINUTES); // past the dwell from the SBU switch
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(SUB, target(sut));
+		if (gridPresent) {
+			assertEquals(SUB, sut.modeScheduleForTest().queuedTarget());
+			assertTrue(sut.takeModeScheduleWriteForTest());
+		} else {
+			assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
+			assertNull(sut.modeScheduleForTest().queuedTarget());
+			assertFalse(sut.takeModeScheduleWriteForTest());
+		}
+	}
+
+	@Test
+	public void testSubWriteOnBatteryWithGridPresent() throws Exception {
+		sbuThenOnBatteryBelowThreshold(true);
+	}
+
+	@Test
+	public void testNoSubWriteOnBatteryWithoutGrid() throws Exception {
+		sbuThenOnBatteryBelowThreshold(false);
+	}
 }

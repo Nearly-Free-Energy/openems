@@ -412,6 +412,22 @@ charge window is not touched.
   a frame. If the bridge already took it, the write is in flight and counts.
 * No schedule write in the first 300 cycles (about 5 minutes) after activation, so a
   crash/restart loop cannot spend the write budget (`STARTUP_HOLD`).
+* Which machine state each write direction is allowed in:
+  ** SBU (E204=2, onto the battery): only in state `2` (mains), confirmed by 3 fresh
+     state-2 reads.
+  ** SUB (E204=3, back to the grid): in state `2` as above, and also in state `3`
+     (running on battery after leaving the line at `switchToBatterySoc`; gw-pi2 field
+     data shows `3` there although the protocol labels it "soft start") when the
+     grid-input voltage (`0x0213` L1, `0x022A` L2, `0x022B` L3, the SRNE's own AC-input
+     sense, the same registers `Srne.Grid-Meter` reads) is above
+     `gridPresentMinVoltage` (default 180 V) on all three phases, confirmed by 3 fresh
+     state-3 reads and 3 fresh reads per phase. Without this the daytime SoC rule could
+     never switch back from SBU, and the battery would drain to `switchToLineSoc`.
+     `gridPresentMinVoltage=-1` turns this path off.
+  ** A SUB write in state `3` has not yet been done on a live unit: it needs one
+     supervised live validation (write in state 3 with the grid up, read back) before
+     it is relied on, like the state-2 writes had.
+  ** A queued write is withdrawn if its gate closes before the bridge takes it.
 * SBU preconditions: SBU is written only when the same checks as a static
   `outputPriority` arm pass (point (1) above): `switchToLineSoc`, `switchToBatterySoc`
   and `bmsCommunication` configured, in range, `switchToLineSoc` below

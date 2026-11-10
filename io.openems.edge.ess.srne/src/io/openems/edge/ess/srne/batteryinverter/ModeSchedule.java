@@ -88,6 +88,14 @@ final class ModeSchedule {
 	static final int DEFAULT_MIN_DWELL_MINUTES = 10;
 	/** Consecutive fresh verified machine-state reads needed before a write. */
 	static final int MAINS_CONFIRM_READS = 3;
+	/**
+	 * Machine state while running on battery with SBU. The protocol enum labels 3
+	 * "soft start", but gw-pi2 field data (v32 notes, 6 Nov 2026 reading) shows 3
+	 * while the unit runs on battery after leaving the line at E020.
+	 */
+	static final int ON_BATTERY_STATE = 3;
+	/** Default per-phase grid voltage that counts as grid present, in volts. */
+	static final int DEFAULT_GRID_PRESENT_MIN_VOLTAGE = 180;
 	/** Cycles after activation without any schedule write (about 5 minutes). */
 	static final int STARTUP_HOLD_CYCLES = 300;
 	/**
@@ -131,6 +139,7 @@ final class ModeSchedule {
 	private final int sbuAboveSoc;
 	private final int sbuBelowSoc;
 	private final Duration minDwell;
+	private final int gridPresentMinMillivolts;
 
 	private volatile SafeWriteHandler handler;
 	private Integer handlerTarget;
@@ -152,13 +161,18 @@ final class ModeSchedule {
 	private LocalDate overridesDate;
 	private int overridesToday;
 	private volatile int freshMainsReads;
+	private volatile int freshBatteryReads;
+	private volatile int gridAboveL1;
+	private volatile int gridAboveL2;
+	private volatile int gridAboveL3;
 	private int cycles;
 	private LocalTime lastNow;
 	private Instant lastInstant;
 	private int steadyClockCycles;
 
 	private ModeSchedule(boolean enabled, String invalidReason, int daytimePriority, int eveningPriority,
-			LocalTime eveningStart, LocalTime daytimeStart, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes) {
+			LocalTime eveningStart, LocalTime daytimeStart, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
+			int gridPresentMinVoltage) {
 		this.enabled = enabled;
 		this.invalidReason = invalidReason;
 		this.daytimePriority = daytimePriority;
@@ -168,6 +182,7 @@ final class ModeSchedule {
 		this.sbuAboveSoc = sbuAboveSoc;
 		this.sbuBelowSoc = sbuBelowSoc;
 		this.minDwell = Duration.ofMinutes(Math.max(minDwellMinutes, 0));
+		this.gridPresentMinMillivolts = gridPresentMinVoltage < 0 ? -1 : gridPresentMinVoltage * 1000;
 	}
 
 	/**
@@ -205,9 +220,34 @@ final class ModeSchedule {
 	 */
 	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
 			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes) {
+		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart,
+				staticOutputPriority, sbuAboveSoc, sbuBelowSoc, minDwellMinutes, DEFAULT_GRID_PRESENT_MIN_VOLTAGE);
+	}
+
+	/**
+	 * Builds and validates a schedule from configuration values.
+	 *
+	 * @param enabled               modeScheduleEnabled
+	 * @param daytimePriority       E204 value by day (2 or 3)
+	 * @param eveningPriority       E204 value in the evening (2 or 3, not the
+	 *                              daytime value)
+	 * @param eveningStart          "HH:MM" start of the evening priority
+	 * @param daytimeStart          "HH:MM" start of the daytime priority
+	 * @param staticOutputPriority  the static outputPriority target (-1 = unset)
+	 * @param sbuAboveSoc           daytimeSbuAboveSoc (-1 = SoC rule off)
+	 * @param sbuBelowSoc           daytimeSbuBelowSoc (-1 = SoC rule off)
+	 * @param minDwellMinutes       minimum dwell after a verified switch
+	 * @param gridPresentMinVoltage grid voltage (V) on every phase that counts as
+	 *                              grid present for a SUB write on battery; -1 =
+	 *                              SUB writes only in state 2
+	 * @return the schedule; check {@link #getInvalidReason()}
+	 */
+	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
+			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
+			int gridPresentMinVoltage) {
 		if (!enabled) {
 			return new ModeSchedule(false, null, daytimePriority, eveningPriority, null, null, -1, -1,
-					minDwellMinutes);
+					minDwellMinutes, -1);
 		}
 		var evening = parseTime(eveningStart);
 		var daytime = parseTime(daytimeStart);
@@ -226,11 +266,13 @@ final class ModeSchedule {
 					+ "] must be -1 while the mode schedule is enabled (one owner of E204)";
 		} else if (minDwellMinutes < 0 || minDwellMinutes > 1440) {
 			reason = "minDwellMinutes [" + minDwellMinutes + "] must be 0..1440";
+		} else if (gridPresentMinVoltage != -1 && (gridPresentMinVoltage < 100 || gridPresentMinVoltage > 260)) {
+			reason = "gridPresentMinVoltage [" + gridPresentMinVoltage + "] must be 100..260 V or -1";
 		} else {
 			reason = validateSocRule(eveningPriority, sbuAboveSoc, sbuBelowSoc);
 		}
 		return new ModeSchedule(true, reason, daytimePriority, eveningPriority, evening, daytime, sbuAboveSoc,
-				sbuBelowSoc, minDwellMinutes);
+				sbuBelowSoc, minDwellMinutes, gridPresentMinVoltage);
 	}
 
 	private static String validateSocRule(int eveningPriority, int above, int below) {
@@ -310,7 +352,51 @@ final class ModeSchedule {
 	 * @param verified whether this read is the verified state 2
 	 */
 	void onMachineStateRead(boolean verified) {
-		this.freshMainsReads = verified ? Math.min(this.freshMainsReads + 1, MAINS_CONFIRM_READS) : 0;
+		this.onMachineStateRead(verified ? 2 : null);
+	}
+
+	/**
+	 * Called on every fresh read of the machine state with its raw value. Counts
+	 * consecutive reads of state 2 (mains) and of {@link #ON_BATTERY_STATE}.
+	 *
+	 * @param state the raw machine state, or null if unreadable
+	 */
+	void onMachineStateRead(Integer state) {
+		var mainsRead = state != null && state == 2;
+		var batteryRead = state != null && state == ON_BATTERY_STATE;
+		this.freshMainsReads = mainsRead ? Math.min(this.freshMainsReads + 1, MAINS_CONFIRM_READS) : 0;
+		this.freshBatteryReads = batteryRead ? Math.min(this.freshBatteryReads + 1, MAINS_CONFIRM_READS) : 0;
+	}
+
+	/**
+	 * Called on every fresh read of a grid-input phase voltage (Modbus bridge
+	 * thread). Counts consecutive reads above {@code gridPresentMinVoltage} per
+	 * phase.
+	 *
+	 * @param phase      1, 2 or 3
+	 * @param millivolts the voltage in mV, or null if unreadable
+	 */
+	void onGridVoltageRead(int phase, Integer millivolts) {
+		var above = this.gridPresentMinMillivolts >= 0 && millivolts != null
+				&& millivolts > this.gridPresentMinMillivolts;
+		switch (phase) {
+		case 1 -> this.gridAboveL1 = above ? Math.min(this.gridAboveL1 + 1, MAINS_CONFIRM_READS) : 0;
+		case 2 -> this.gridAboveL2 = above ? Math.min(this.gridAboveL2 + 1, MAINS_CONFIRM_READS) : 0;
+		case 3 -> this.gridAboveL3 = above ? Math.min(this.gridAboveL3 + 1, MAINS_CONFIRM_READS) : 0;
+		default -> {
+		}
+		}
+	}
+
+	boolean isGridPresentPathEnabled() {
+		return this.gridPresentMinMillivolts >= 0;
+	}
+
+	// The on-battery SUB path is open: the last reads were the on-battery state and
+	// every phase above the grid-present voltage, `reads` times in a row.
+	private boolean onBatteryWithGrid(int reads) {
+		return this.isGridPresentPathEnabled() && this.freshBatteryReads >= reads && this.gridAboveL1 >= reads
+				&& this.gridAboveL2 >= reads && this.gridAboveL3 >= reads;
 	}
 
 	/**
@@ -516,10 +602,12 @@ final class ModeSchedule {
 		if (!controlEnabled) {
 			return new Step(ModeScheduleState.DISABLED, target, null);
 		}
-		if (handlerState == SafeWriteHandler.State.QUEUED && !mains && this.writeElement.withdraw()) {
-			// Mains lost before the bridge took the write: withdrawn, re-queued once
-			// mains is confirmed again. If the bridge already took it, the write is in
-			// flight and the handler is kept.
+		var gateStillOpen = mains || (Integer.valueOf(SUB).equals(this.handlerTarget) && this.onBatteryWithGrid(1));
+		if (handlerState == SafeWriteHandler.State.QUEUED && !gateStillOpen && this.writeElement.withdraw()) {
+			// The gate it was queued under is gone (mains lost, or for a SUB write on
+			// battery the grid is gone) before the bridge took the write: withdrawn,
+			// re-queued once the gate is confirmed again. If the bridge already took it,
+			// the write is in flight and the handler is kept.
 			this.handler = null;
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null, true);
 		}
@@ -576,7 +664,12 @@ final class ModeSchedule {
 		if (target == SBU && !sbuAllowed) {
 			return new Step(ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, target, null);
 		}
-		if (!mains || this.freshMainsReads < MAINS_CONFIRM_READS) {
+		// SBU (and any write) on mains: state 2, confirmed by fresh reads. SUB, the
+		// direction back to the grid, also on battery (state 3) when the grid voltage
+		// is present on every phase, confirmed by fresh reads.
+		var mainsConfirmed = mains && this.freshMainsReads >= MAINS_CONFIRM_READS;
+		var subOnBattery = target == SUB && this.onBatteryWithGrid(MAINS_CONFIRM_READS);
+		if (!mainsConfirmed && !subOnBattery) {
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null);
 		}
 		if (this.cycles < STARTUP_HOLD_CYCLES) {
