@@ -311,7 +311,7 @@ public class ModeScheduleTest {
 	public void testWithdrawnWriteIsANoOpThroughTheRealFc16Task() {
 		var element = new GuardedWordElement(0xE204);
 		var outcome = new ArrayList<ExecuteState>();
-		var task = new FC16WriteRegistersTask(outcome::add, 0xE204, element);
+		final var task = new FC16WriteRegistersTask(outcome::add, 0xE204, element);
 		element.arm(SUB);
 		assertTrue(element.withdraw());
 		// The bridge saw a value before the withdraw (simulated): still no frame.
