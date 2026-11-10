@@ -368,6 +368,15 @@ final class ModeSchedule {
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null, true);
 		}
 		if (handlerState == SafeWriteHandler.State.QUEUED
+				&& (target == null || !target.equals(this.handlerTarget)) && this.writeElement.withdraw()) {
+			// The time became unknown or crossed a boundary before the bridge took the
+			// write: withdraw it and evaluate the current target in this cycle. A
+			// withdrawn write does not count as an attempt.
+			this.handler = null;
+			handlerState = null;
+			this.attempts = Math.max(this.attempts - 1, 0);
+		}
+		if (handlerState == SafeWriteHandler.State.QUEUED
 				|| handlerState == SafeWriteHandler.State.AWAITING_READBACK) {
 			return new Step(ModeScheduleState.WRITE_PENDING, target, null);
 		}

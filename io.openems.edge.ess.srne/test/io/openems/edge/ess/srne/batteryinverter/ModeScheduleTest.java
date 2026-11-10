@@ -14,6 +14,7 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
 import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 
 /**
@@ -293,6 +294,55 @@ public class ModeScheduleTest {
 		element.arm(SUB);
 		assertNotNull(element.getNextWriteValueAndReset());
 		assertFalse(element.withdraw());
+	}
+
+	@Test
+	public void testFrameUsesTheArmedValue() {
+		var element = new GuardedWordElement(0xE204);
+		element.arm(SUB);
+		// Whatever value the bridge read outside the lock, the frame carries the armed one.
+		var raw = element.valueToRaw(SBU);
+		assertEquals(1, raw.length);
+		assertEquals(SUB, raw[0].getValue());
+		assertNull(element.valueToRaw(SBU)); // consumed once
+	}
+
+	@Test
+	public void testWithdrawnWriteIsANoOpThroughTheRealFc16Task() {
+		var element = new GuardedWordElement(0xE204);
+		var outcome = new ArrayList<ExecuteState>();
+		var task = new FC16WriteRegistersTask(outcome::add, 0xE204, element);
+		element.arm(SUB);
+		assertTrue(element.withdraw());
+		// The bridge saw a value before the withdraw (simulated): still no frame.
+		element.setNextWriteValue(SUB);
+		assertEquals(ExecuteState.NO_OP, task.execute(null));
+		assertEquals(List.of(ExecuteState.NO_OP), outcome);
+		assertNull(element.getNextWriteValueAndReset());
+	}
+
+	@Test
+	public void testQueuedWriteWithdrawnWhenTargetChangesOrTimeUnknown() {
+		var sut = primed();
+		assertStep(step(sut, LocalTime.of(17, 59, 59), 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		// 18:00 before the bridge took the SUB write: withdrawn, SBU queued instead.
+		assertStep(step(sut, LocalTime.of(18, 0), 50, SBU, true), ModeScheduleState.IN_SYNC, SBU, null);
+		assertNull(sut.handlerState());
+		assertNull(sut.writeElement().getNextWriteValueAndReset());
+
+		var unknown = primed();
+		assertStep(step(unknown, DAY, 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		assertStep(step(unknown, null, 50, SBU, true), ModeScheduleState.WAITING_FOR_DATA, null, null);
+		assertNull(unknown.handlerState());
+		assertEquals(0, unknown.attemptsInWindow());
+		assertNull(unknown.writeElement().getNextWriteValueAndReset());
+
+		// Already taken by the bridge: kept in flight.
+		var taken = primed();
+		assertStep(step(taken, DAY, 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		assertNotNull(taken.writeElement().getNextWriteValueAndReset());
+		assertStep(step(taken, null, 50, SBU, true), ModeScheduleState.WRITE_PENDING, null, null);
+		assertEquals(SafeWriteHandler.State.QUEUED, taken.handlerState());
 	}
 
 	@Test
