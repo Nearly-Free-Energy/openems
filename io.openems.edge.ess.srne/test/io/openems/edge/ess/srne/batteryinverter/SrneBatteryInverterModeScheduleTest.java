@@ -105,7 +105,7 @@ public class SrneBatteryInverterModeScheduleTest {
 	public void testDaytimeWriteQueuedAndVerified() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(SBU, MachineState.RUNNING_MAINS_BYPASS);
-		var test = start(sut, bridge, DAY, config().build());
+		final var test = start(sut, bridge, DAY, config().build());
 		assertTrue(readsSoc(sut));
 		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
 		assertEquals(SUB, target(sut));
@@ -137,7 +137,7 @@ public class SrneBatteryInverterModeScheduleTest {
 	public void testEveningWriteWaitsForMains() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(SUB, MachineState.INVERTER_POWERED);
-		var test = start(sut, bridge, EVENING, config().build()) //
+		final var test = start(sut, bridge, EVENING, config().build()) //
 				.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
 		assertEquals(SBU, target(sut));
@@ -156,7 +156,7 @@ public class SrneBatteryInverterModeScheduleTest {
 	public void testFailedReadbackReportsWriteFailed() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(SBU, MachineState.RUNNING_MAINS_BYPASS);
-		var test = start(sut, bridge, DAY, config().build());
+		final var test = start(sut, bridge, DAY, config().build());
 		assertTrue(sut.takeModeScheduleWriteForTest());
 		// The frame is accepted but the device keeps SBU.
 		sut.modeScheduleForTest().onExecute(ExecuteState.OK);
