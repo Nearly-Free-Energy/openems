@@ -426,10 +426,23 @@ charge window is not touched.
   reboot, with NTP unreachable) cannot be told apart from a correct one. Cross-checking
   against the inverter RTC is not possible on this unit: `0xE034-036` read `0` on gw-pi2
   (the registers appear to be write-only time setup).
+* Daytime SoC rule (optional, `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc`, both `-1` =
+  off): field finding 10 Nov 2026 on gw-pi2: in SUB, with PV below the load, PV only
+  charges the battery, and once the battery is nearly full (SoC 94 %) the inverter
+  switched PV off while buying ~700 W from the grid; SBU brought PV straight back. So in
+  the daytime window the target becomes the evening priority (SBU) once SoC is at or
+  above `daytimeSbuAboveSoc`, and the daytime priority (SUB) again once SoC is below
+  `daytimeSbuBelowSoc` (hysteresis; each day starts in the daytime priority). Both
+  10..100, below < above, and `eveningPriority` must be SBU. An unreadable SoC keeps the
+  current target and writes nothing. The SBU preconditions apply to these writes too.
+  A SoC-driven switch waits `minDwellMinutes` (default 10) after the last verified
+  switch (`MIN_DWELL`); the window switches at the boundaries do not wait. The evening
+  window is unchanged. Channel `ModeScheduleReason`: `WINDOW` / `HIGH_SOC` / `LOW_SOC`.
 * A failed write (error, wrong or missing read-back) leaves the device as it is.
-  Retries back off exponentially (60, 120, 240, 480 cycles) and at most 5 writes are
-  made per window; then `WRITE_FAILED` is latched, to spare the inverter's settings
-  memory. The budget is refilled only when the local time crosses `eveningStart` or
+  Retries back off exponentially (60, 120, 240, 480 cycles) and at most 5 failed writes
+  are allowed per window (successful writes do not count); then `WRITE_FAILED` is
+  latched, to spare the inverter's settings memory. Separately, at most 12 successful
+  `0xE204` writes per local day; when reached the mode is held (`DAILY_WRITE_LIMIT`). The budget is refilled only when the local time crosses `eveningStart` or
   `daytimeStart` forward in a small step (at most 5 minutes); a clock jump or a target
   flip does not refill it. A verified value that is
   overridden later (e.g. on the panel) is corrected with the same backoff and cap.
@@ -440,7 +453,7 @@ charge window is not touched.
 
 Channels: `ModeScheduleState` (`DISABLED` / `IN_SYNC` / `WRITE_PENDING` /
 `WAITING_FOR_MAINS` / `WRITE_FAILED` / `CONFIG_INVALID` / `WAITING_FOR_DATA` /
-`BLOCKED_SBU_PRECONDITIONS` / `STARTUP_HOLD`) and `ModeScheduleTargetPriority` (the value the schedule
+`BLOCKED_SBU_PRECONDITIONS` / `STARTUP_HOLD` / `DAILY_WRITE_LIMIT` / `MIN_DWELL`) and `ModeScheduleTargetPriority` (the value the schedule
 wants now).
 
 .*Configuration*:
@@ -457,7 +470,7 @@ wants now).
 * `chargeWindow1StopSoc` (int %, `-1` = leave unchanged and do not read; range `10..100`): target for `0xE03B`, the timed-charge stop SoC of charge window 1. Use with a `00:00-06:00` charge window and `50` so the night charge runs whenever the grid is present and stops at 50%. See "Night charge stop SoC" above.
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
-* Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
+* Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
 * TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]

@@ -138,6 +138,7 @@ public class SrneBatteryInverterModeScheduleTest {
 				.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.DISABLED, state(sut));
 		assertNull(target(sut));
+		assertNull(reason(sut));
 		assertNull(sut.modeScheduleForTest().queuedTarget());
 		assertFalse(sut.takeModeScheduleWriteForTest());
 		// Default bus traffic unchanged: no SoC read and no second E204 write task.
@@ -411,5 +412,50 @@ public class SrneBatteryInverterModeScheduleTest {
 			assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
 			assertFalse(sut.takeModeScheduleWriteForTest());
 		}
+	}
+
+	private static ModeScheduleReason reason(SrneBatteryInverterImpl sut) {
+		Channel<ModeScheduleReason> channel = sut.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_REASON);
+		return channel.value().asEnum();
+	}
+
+	@Test
+	public void testDaytimeHighSocQueuesSbu() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 96);
+		start(sut, bridge, DAY, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		assertEquals(SBU, target(sut));
+		assertEquals(ModeScheduleReason.HIGH_SOC, reason(sut));
+		assertEquals(SBU, sut.modeScheduleForTest().queuedTarget());
+	}
+
+	@Test
+	public void testDaytimeLowSocKeepsSub() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(SUB, MachineState.RUNNING_MAINS_BYPASS), DAY,
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(ModeScheduleReason.LOW_SOC, reason(sut));
+	}
+
+	@Test
+	public void testSocRuleOffReportsWindowReason() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 100);
+		start(sut, bridge, DAY, config().build());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(SUB, target(sut));
+		assertEquals(ModeScheduleReason.WINDOW, reason(sut));
+	}
+
+	@Test
+	public void testInvalidSocRuleMakesConfigInvalid() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(SUB, MachineState.RUNNING_MAINS_BYPASS), DAY,
+				config().setDaytimeSbuAboveSoc(85).setDaytimeSbuBelowSoc(95).build());
+		assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
+		assertFalse(sut.takeModeScheduleWriteForTest());
 	}
 }

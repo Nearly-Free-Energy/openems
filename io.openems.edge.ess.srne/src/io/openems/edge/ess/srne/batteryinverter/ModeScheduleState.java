@@ -27,7 +27,11 @@ public enum ModeScheduleState implements OptionsEnum {
 	/** SBU is due, but its reserve-band / BMS preconditions are not met. */
 	BLOCKED_SBU_PRECONDITIONS(7), //
 	/** First minutes after activation: no schedule write yet (caps a restart loop). */
-	STARTUP_HOLD(8);
+	STARTUP_HOLD(8), //
+	/** The daily ceiling of successful E204 writes is reached; the mode is held. */
+	DAILY_WRITE_LIMIT(9), //
+	/** A SoC-driven switch waits for the minimum dwell after the last switch. */
+	MIN_DWELL(10);
 
 	private final int value;
 

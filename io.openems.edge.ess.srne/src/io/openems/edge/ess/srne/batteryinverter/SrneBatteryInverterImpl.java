@@ -9,7 +9,6 @@ import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -165,7 +164,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.config = config;
 		this.dischargeGuard = this.createDischargeGuard(config);
 		this.modeSchedule = ModeSchedule.fromConfig(config.modeScheduleEnabled(), config.daytimePriority(),
-				config.eveningPriority(), config.eveningStart(), config.daytimeStart(), config.outputPriority());
+				config.eveningPriority(), config.eveningStart(), config.daytimeStart(), config.outputPriority(),
+				config.daytimeSbuAboveSoc(), config.daytimeSbuBelowSoc(), config.minDwellMinutes());
 		if (this.modeSchedule.getInvalidReason() != null) {
 			this.logError(this.log, "Invalid mode schedule: " + this.modeSchedule.getInvalidReason()
 					+ "; the schedule stays off");
@@ -532,7 +532,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// Inputs are read only while the schedule is active; otherwise step() returns
 		// DISABLED or CONFIG_INVALID without looking at them.
 		final var active = this.modeSchedule.isActive();
-		final LocalTime now = active ? this.modeSchedule.plausibleTime(this.instantOrNull(), this.scheduleZone)
+		final LocalDateTime now = active
+				? this.modeSchedule.plausibleTime(this.instantOrNull(), this.scheduleZone)
 				: null;
 		final var soc = active ? this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC) : null;
 		final var outputPriority = active ? this.readValue(SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY) : null;
@@ -559,6 +560,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		this.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_STATE).setNextValue(step.state());
 		this.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_TARGET_PRIORITY).setNextValue(step.target());
+		this.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_REASON)
+				.setNextValue(active ? this.modeSchedule.reason() : null);
 	}
 
 	// The plausibility of the time is judged by ModeSchedule.plausibleTime; this

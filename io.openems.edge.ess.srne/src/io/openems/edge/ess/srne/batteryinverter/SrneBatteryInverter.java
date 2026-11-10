@@ -102,6 +102,8 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("State of the daily output-priority schedule (0xE204)")), //
 		MODE_SCHEDULE_TARGET_PRIORITY(Doc.of(OpenemsType.INTEGER) //
 				.text("Output priority the daily schedule wants now (2 SBU, 3 SUB)")), //
+		MODE_SCHEDULE_REASON(Doc.of(ModeScheduleReason.values()) //
+				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC or LOW_SOC")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 

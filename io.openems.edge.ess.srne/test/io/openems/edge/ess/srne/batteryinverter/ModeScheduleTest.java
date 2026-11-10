@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -32,6 +34,11 @@ public class ModeScheduleTest {
 	private static final LocalTime DAY = LocalTime.of(10, 0);
 	private static final LocalTime EVENING = LocalTime.of(19, 0);
 	private static final ZoneId KAMPALA = ZoneId.of("Africa/Kampala");
+	private static final LocalDate DATE = LocalDate.of(2026, 11, 10);
+
+	private static LocalDateTime at(LocalTime time) {
+		return time == null ? null : LocalDateTime.of(DATE, time);
+	}
 
 	private static ModeSchedule defaults() {
 		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1);
@@ -51,7 +58,7 @@ public class ModeScheduleTest {
 	private static ModeSchedule.Step step(ModeSchedule sut, LocalTime now, Integer soc, Integer e204,
 			boolean mains) {
 		sut.onMachineStateRead(mains);
-		return sut.step(now, soc, e204, true, mains, true, TIMEOUT, COOLDOWN);
+		return sut.step(at(now), soc, e204, true, mains, true, TIMEOUT, COOLDOWN);
 	}
 
 	private static void assertStep(ModeSchedule.Step step, ModeScheduleState state, Integer target, Integer write) {
@@ -136,7 +143,7 @@ public class ModeScheduleTest {
 	public void testControlDisabledNeverWrites() {
 		var sut = defaults();
 		for (var i = 0; i < 200; i++) {
-			assertStep(sut.step(DAY, 50, SBU, false, true, true, TIMEOUT, COOLDOWN), ModeScheduleState.DISABLED,
+			assertStep(sut.step(at(DAY), 50, SBU, false, true, true, TIMEOUT, COOLDOWN), ModeScheduleState.DISABLED,
 					SUB, null);
 		}
 	}
@@ -171,9 +178,9 @@ public class ModeScheduleTest {
 			assertNull(sut.plausibleTime(t, KAMPALA));
 			t = t.plusSeconds(1);
 		}
-		assertEquals(LocalTime.of(10, 1), sut.plausibleTime(t, KAMPALA));
+		assertEquals(LocalTime.of(10, 1), sut.plausibleTime(t, KAMPALA).toLocalTime());
 		// A fixed (not advancing) clock is still steady.
-		assertEquals(LocalTime.of(10, 1), sut.plausibleTime(t, KAMPALA));
+		assertEquals(LocalTime.of(10, 1), sut.plausibleTime(t, KAMPALA).toLocalTime());
 		// A backward step restarts the settle period.
 		t = t.minusSeconds(30);
 		assertNull(sut.plausibleTime(t, KAMPALA));
@@ -261,7 +268,7 @@ public class ModeScheduleTest {
 		// One fresh read of state 2, then many cycles on the same cached value.
 		sut.onMachineStateRead(true);
 		for (var i = 0; i < 50; i++) {
-			assertStep(sut.step(EVENING, 50, SUB, true, true, true, TIMEOUT, COOLDOWN),
+			assertStep(sut.step(at(EVENING), 50, SUB, true, true, true, TIMEOUT, COOLDOWN),
 					ModeScheduleState.WAITING_FOR_MAINS, SBU, null);
 		}
 		assertNull(sut.handlerState());
@@ -334,7 +341,7 @@ public class ModeScheduleTest {
 		assertStep(step(unknown, DAY, 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
 		assertStep(step(unknown, null, 50, SBU, true), ModeScheduleState.WAITING_FOR_DATA, null, null);
 		assertNull(unknown.handlerState());
-		assertEquals(0, unknown.attemptsInWindow());
+		assertEquals(0, unknown.failuresInWindow());
 		assertNull(unknown.writeElement().getNextWriteValueAndReset());
 
 		// Already taken by the bridge: kept in flight.
@@ -355,7 +362,7 @@ public class ModeScheduleTest {
 		assertStep(lost, ModeScheduleState.WRITE_PENDING, SUB, null);
 		assertFalse(lost.withdraw());
 		assertEquals(SafeWriteHandler.State.QUEUED, sut.handlerState());
-		assertEquals(1, sut.attemptsInWindow());
+		assertEquals(0, sut.failuresInWindow());
 		sut.onExecute(ExecuteState.OK);
 		sut.verify(SUB);
 		assertEquals(SafeWriteHandler.State.VERIFIED, sut.handlerState());
@@ -379,12 +386,12 @@ public class ModeScheduleTest {
 	public void testMainsLostWhileQueuedWithdrawsTheWrite() {
 		var sut = primed();
 		assertStep(step(sut, DAY, 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
-		assertEquals(1, sut.attemptsInWindow());
+		assertEquals(0, sut.failuresInWindow());
 		var lost = step(sut, DAY, 50, SBU, false);
 		assertStep(lost, ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
 		assertTrue(lost.withdraw());
 		assertNull(sut.queuedTarget());
-		assertEquals(0, sut.attemptsInWindow()); // a withdrawn write is not an attempt
+		assertEquals(0, sut.failuresInWindow()); // a withdrawn write is not a failure
 		for (var i = 1; i < ModeSchedule.MAINS_CONFIRM_READS; i++) {
 			assertStep(step(sut, DAY, 50, SBU, true), ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
 		}
@@ -396,17 +403,17 @@ public class ModeScheduleTest {
 		var sut = primed();
 		// Evening, device in SUB, preconditions not met: blocked, never written.
 		for (var i = 0; i < 200; i++) {
-			assertStep(sut.step(EVENING, 50, SUB, true, true, false, TIMEOUT, COOLDOWN),
+			assertStep(sut.step(at(EVENING), 50, SUB, true, true, false, TIMEOUT, COOLDOWN),
 					ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, SBU, null);
 		}
 		assertNull(sut.handlerState());
 		// Preconditions met: SBU goes out.
-		assertStep(sut.step(EVENING, 50, SUB, true, true, true, TIMEOUT, COOLDOWN), ModeScheduleState.WRITE_PENDING,
+		assertStep(sut.step(at(EVENING), 50, SUB, true, true, true, TIMEOUT, COOLDOWN), ModeScheduleState.WRITE_PENDING,
 				SBU, SBU);
 
 		// By day SUB is written without them.
 		var day = primed();
-		assertStep(day.step(DAY, 50, SBU, true, true, false, TIMEOUT, COOLDOWN), ModeScheduleState.WRITE_PENDING,
+		assertStep(day.step(at(DAY), 50, SBU, true, true, false, TIMEOUT, COOLDOWN), ModeScheduleState.WRITE_PENDING,
 				SUB, SUB);
 	}
 
@@ -435,7 +442,7 @@ public class ModeScheduleTest {
 		assertStep(step(sut, LocalTime.of(17, 59, 30), 50, SBU, true), ModeScheduleState.WRITE_FAILED, SUB, null);
 		// Crossing 18:00 forward: a fresh budget, written at once.
 		assertStep(step(sut, LocalTime.of(18, 0), 50, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
-		assertEquals(1, sut.attemptsInWindow());
+		assertEquals(0, sut.failuresInWindow());
 	}
 
 	@Test
@@ -447,7 +454,7 @@ public class ModeScheduleTest {
 				sut.verify(SBU);
 			}
 		}
-		assertEquals(ModeSchedule.MAX_ATTEMPTS, sut.attemptsInWindow());
+		assertEquals(ModeSchedule.MAX_ATTEMPTS, sut.failuresInWindow());
 		assertStep(step(sut, DAY, 50, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
 		// Overridden again: still latched, no write until the boundary.
 		assertStep(step(sut, DAY, 50, SBU, true), ModeScheduleState.WRITE_FAILED, SUB, null);
@@ -525,5 +532,165 @@ public class ModeScheduleTest {
 		sut.verify(SUB);
 		assertNull(sut.handlerState());
 		assertNull(sut.queuedTarget());
+	}
+
+	// ---- Daytime SoC rule (SBU above 95 %, back to SUB below 85 %) ----
+
+	private static ModeSchedule socSchedule() {
+		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10);
+	}
+
+	private static ModeSchedule primedSoc() {
+		var sut = socSchedule();
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			assertEquals(ModeScheduleState.IN_SYNC, step(sut, DAY, 50, SUB, true).state());
+		}
+		return sut;
+	}
+
+	private static ModeSchedule.Step socStep(ModeSchedule sut, LocalDateTime now, Integer soc, int e204,
+			boolean sbuAllowed) {
+		sut.onMachineStateRead(true);
+		return sut.step(now, soc, e204, true, true, sbuAllowed, TIMEOUT, COOLDOWN);
+	}
+
+	// Plays a verified write and lets the schedule count it one second later.
+	private static void verified(ModeSchedule sut, LocalDateTime now, int value, int soc) {
+		sut.onExecute(ExecuteState.OK);
+		sut.verify(value);
+		assertEquals(ModeScheduleState.IN_SYNC, socStep(sut, now.plusSeconds(1), soc, value, true).state());
+	}
+
+	@Test
+	public void testSocRuleValidation() {
+		assertNull(socSchedule().getInvalidReason());
+		assertTrue(socSchedule().isSocRuleActive());
+		assertFalse(defaults().isSocRuleActive());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, -1, 10).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, 85, 10).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 101, 85, 10).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 9, 10).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 85, 85, 10).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 85, 95, 10).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SBU, SUB, "18:00", "00:30", -1, 95, 85, 10).getInvalidReason());
+		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, -1).getInvalidReason());
+		assertNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 100, 10, 0).getInvalidReason());
+	}
+
+	@Test
+	public void testSocRuleOffKeepsTheWindowTarget() {
+		var sut = defaults();
+		for (var soc : new int[] { 0, 50, 95, 100 }) {
+			assertEquals(SUB, sut.targetFor(at(DAY), soc));
+			assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+			assertEquals(SBU, sut.targetFor(at(EVENING), soc));
+		}
+	}
+
+	@Test
+	public void testHysteresisBothDirections() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(11, 0));
+		assertStep(socStep(sut, t, 94, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
+		assertEquals(ModeScheduleReason.LOW_SOC, sut.reason());
+		// At the upper threshold: SBU.
+		assertStep(socStep(sut, t.plusSeconds(10), 95, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		verified(sut, t.plusSeconds(10), SBU, 95);
+		// Between the thresholds the SBU target is held.
+		assertStep(socStep(sut, t.plusMinutes(20), 85, SBU, true), ModeScheduleState.IN_SYNC, SBU, null);
+		// Below the lower threshold: back to SUB.
+		assertStep(socStep(sut, t.plusMinutes(21), 84, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		assertEquals(ModeScheduleReason.LOW_SOC, sut.reason());
+		verified(sut, t.plusMinutes(21), SUB, 84);
+		// Between the thresholds again: SUB is held.
+		assertStep(socStep(sut, t.plusMinutes(40), 94, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
+	}
+
+	@Test
+	public void testSocUnreadableKeepsTheTargetAndNeverWrites() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(11, 0));
+		assertEquals(SBU, socStep(sut, t, 96, SUB, true).target());
+		verified(sut, t, SBU, 96);
+		for (var soc : new Integer[] { null, -1, 101 }) {
+			assertStep(socStep(sut, t.plusMinutes(30), soc, SUB, true), ModeScheduleState.WAITING_FOR_DATA, SBU,
+					null);
+			assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		}
+	}
+
+	@Test
+	public void testSocDrivenSbuNeedsThePreconditions() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(11, 0));
+		assertStep(socStep(sut, t, 96, SUB, false), ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, SBU, null);
+		assertNull(sut.handlerState());
+	}
+
+	@Test
+	public void testMinimumDwellAfterASocSwitch() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(11, 0));
+		assertEquals(SBU, socStep(sut, t, 96, SUB, true).write());
+		verified(sut, t, SBU, 96); // the switch is counted at t + 1 s
+		var switched = t.plusSeconds(1);
+		assertStep(socStep(sut, switched.plusMinutes(5), 80, SBU, true), ModeScheduleState.MIN_DWELL, SUB, null);
+		assertStep(socStep(sut, switched.plusMinutes(9).plusSeconds(59), 80, SBU, true), ModeScheduleState.MIN_DWELL,
+				SUB, null);
+		assertStep(socStep(sut, switched.plusMinutes(10), 80, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+	}
+
+	@Test
+	public void testWindowSwitchIsNotHeldByTheDwell() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(17, 50));
+		assertEquals(SBU, socStep(sut, t, 96, SUB, true).write());
+		verified(sut, t, SBU, 96);
+		assertEquals(SUB, socStep(sut, t.plusMinutes(1), 80, SBU, true).target()); // dwelling
+		assertEquals(SUB, socStep(sut, t.plusMinutes(2), 80, SBU, true).target());
+		// 18:00 is a window switch: evening SBU, the device already is SBU.
+		assertStep(socStep(sut, at(LocalTime.of(18, 0)), 80, SBU, true), ModeScheduleState.IN_SYNC, SBU, null);
+		assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+	}
+
+	@Test
+	public void testEveningUnchangedAndNextDayStartsInTheDaytimePriority() {
+		var sut = primedSoc();
+		for (var soc : new int[] { 10, 50, 100 }) {
+			assertEquals(SBU, socStep(sut, at(EVENING), soc, SBU, true).target());
+			assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+		}
+		// Next morning at 90 % (between the thresholds): the daytime priority.
+		var morning = LocalDateTime.of(DATE.plusDays(1), LocalTime.of(8, 0));
+		assertEquals(SUB, socStep(sut, morning, 90, SBU, true).target());
+		assertEquals(ModeScheduleReason.LOW_SOC, sut.reason());
+	}
+
+	@Test
+	public void testSuccessfulSwitchesDoNotUseTheFailureBudgetAndHitTheDailyCeiling() {
+		var sut = primedSoc();
+		var device = SUB;
+		var t = at(LocalTime.of(8, 0));
+		var writes = 0;
+		for (var k = 0; k < ModeSchedule.MAX_DAILY_WRITES + 1; k++) {
+			t = t.plusMinutes(11);
+			var soc = k % 2 == 0 ? 96 : 80;
+			var result = socStep(sut, t, soc, device, true);
+			if (k == ModeSchedule.MAX_DAILY_WRITES) {
+				assertStep(result, ModeScheduleState.DAILY_WRITE_LIMIT, device == SUB ? SBU : SUB, null);
+				break;
+			}
+			assertNotNull(result.write(), "switch " + k + " state " + result.state());
+			device = result.write();
+			verified(sut, t, device, soc);
+			writes++;
+		}
+		assertEquals(ModeSchedule.MAX_DAILY_WRITES, writes);
+		assertEquals(ModeSchedule.MAX_DAILY_WRITES, sut.writesTodayForTest(DATE));
+		assertEquals(0, sut.failuresInWindow());
+		// The next local day has a fresh ceiling.
+		var nextDay = LocalDateTime.of(DATE.plusDays(1), LocalTime.of(10, 0));
+		assertNotNull(socStep(sut, nextDay, 96, SUB, true).write());
 	}
 }
