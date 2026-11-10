@@ -370,6 +370,34 @@ back), there is no second write path. SoC source: register `0x0100`, the same on
 configured. Channels: `DischargeSuppressed` (boolean), `DischargeSuppressionReason`
 (`NONE` / `LOW_START` / `FLOOR_REACHED`) and `BatterySoc`.
 
+.*Daily output-priority schedule (ModeSchedule)*
+
+Optional, off by default (`modeScheduleEnabled=false`). Switches the output priority
+`0xE204` (`0` SOL, `1` UTI, `2` SBU, `3` SUB) between a daytime and an evening value
+every day, against the edge clock in `scheduleTimeZone`. The evening value applies from
+`eveningStart` (inclusive) to `daytimeStart` (exclusive), crossing midnight; the daytime
+value the rest of the day. Defaults: SUB `00:30`-`18:00`, SBU `18:00`-`00:30`. Reason: in
+SBU the inverter stays on battery after a grid cut until the battery is nearly empty,
+so by day the unit runs SUB (grid first, battery kept for the evening) and only in the
+evening runs SBU. The night charge window is not touched.
+
+* Each cycle, if `0xE204` reads differently from the target, one write is queued
+  through a `SafeWriteHandler` and read-back verified. It needs `controlEnabled=true`
+  and machine state `2` (mains): during a grid cut the write waits until mains returns
+  (intended).
+* Nothing is written while the SoC (`0x0100`), `0xE204` or the clock is unreadable.
+* A failed write (error, wrong or missing read-back) leaves the device as it is and is
+  retried only after a 60-cycle cooldown. A verified value that is overridden later
+  (e.g. on the panel) is corrected once per cooldown, never in a burst.
+* One owner of `0xE204`: with the schedule enabled, `outputPriority` must be `-1`.
+* Invalid configuration (a priority other than `2`/`3`, a time that is not `HH:MM`,
+  equal times, or `outputPriority` set) turns the schedule off and reports
+  `CONFIG_INVALID`.
+
+Channels: `ModeScheduleState` (`DISABLED` / `IN_SYNC` / `WRITE_PENDING` /
+`WAITING_FOR_MAINS` / `WRITE_FAILED` / `CONFIG_INVALID` / `WAITING_FOR_DATA`) and
+`ModeScheduleTargetPriority` (the value the schedule wants now).
+
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)
 * `alias` (String): Human-readable component name
@@ -383,6 +411,7 @@ configured. Channels: `DischargeSuppressed` (boolean), `DischargeSuppressionReas
 * source-transfer targets (int, `-1` = leave unchanged): `outputPriority` (E204, source-priority mode e.g. SBU; range `0..3`) and `bmsCommunication` (E215, BMS-comms enable; range `0..2`). These enable "switch to battery at a SoC" (SBU + BMS-SoC) fully from OpenEMS. `outputPriority` is the output/source priority, distinct from charge priority. Two safety points: (1) `outputPriority` = SBU transfers the load onto the battery, so it is reconciled together with its reserve band (`switchToLineSoc`/`switchToBatterySoc`) and BMS mode (`bmsCommunication`) as ONE coherent, validated operation. When an arm is requested the whole set is validated - all three present, individually in range, and the band coherent (`switchToLineSoc` below `switchToBatterySoc`) - BEFORE any of them is written; on failure NOTHING is written (not the band, not BMS, not `E204`) and the operation reports terminal FAILED, so a rejected arm can never leave a bad reserve band on a unit already in SBU mode. Once the set is valid, `E204` arms only after each prerequisite is settled: its handler at rest (IDLE = already correct, or VERIFIED) AND the device currently reads the configured value - a queued, awaiting or failed write, or a post-verify drift, never counts as settled. When no arm is requested, BMS remains an independent setting; the reserve band is still refused if both thresholds are configured but inverted (`switchToLineSoc` at or above `switchToBatterySoc`), because a bad band is dangerous whenever the unit is in SBU (its normal backup posture, settable from the panel) - so an incoherent band is never written regardless of whether OpenEMS armed it. (2) The exact value-to-mode mapping (which number is SBU, etc.) is NOT verified in the SRNE manuals and MUST be captured on the unit at commissioning; the ranges here are bounded only, read-back verify guards a mis-accepted value, and a wrong-but-in-range value is prevented only by keeping targets `-1` until the enum is confirmed.
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
+* Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`). Needs `controlEnabled=true` and `outputPriority=-1`; see "Daily output-priority schedule" above.
 * TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
