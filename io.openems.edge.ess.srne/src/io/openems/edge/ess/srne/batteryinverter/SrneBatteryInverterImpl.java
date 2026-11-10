@@ -494,10 +494,6 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 	}
 
-	// Only the disarm of the discharge schedule bypasses the verified machine-state
-	// gate: E033 is a plain holding-register write and disarming only reduces the
-	// exposure. Arming, restoring and every window write still wait for state 2. A
-	// queued arm is withdrawn here too, so a latch cannot leave it waiting for state 2.
 	/**
 	 * Daily output-priority schedule. Runs every cycle so its state channel stays
 	 * current; a write is queued only with controlEnabled, readable SoC/E204/clock
@@ -559,6 +555,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		return this.modeScheduleWrite.getNextWriteValueAndReset() != null;
 	}
 
+	// Only the disarm of the discharge schedule bypasses the verified machine-state
+	// gate: E033 is a plain holding-register write and disarming only reduces the
+	// exposure. Arming, restoring and every window write still wait for state 2. A
+	// queued arm is withdrawn here too, so a latch cannot leave it waiting for state 2.
 	private void reconcileDisarmUnverified() {
 		if (!this.dischargeRulesApply()) {
 			return;
