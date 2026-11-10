@@ -129,6 +129,9 @@ final class ModeSchedule {
 	private int failures;
 	private boolean outcomeCounted;
 	private boolean highSoc;
+	private boolean socStateSeeded;
+	private LocalDateTime activatedAt;
+	private LocalDateTime queuedAt;
 	private ModeScheduleReason reason;
 	private LocalDateTime lastSwitchAt;
 	private Integer lastSwitchTarget;
@@ -399,11 +402,18 @@ final class ModeSchedule {
 	 * The target for this cycle, applying the daytime SoC rule (with hysteresis)
 	 * on top of the window. Updates {@link #reason()}.
 	 *
-	 * @param now the local date-time, or null if unknown
-	 * @param soc the battery SoC, or null if unreadable
+	 * <p>The hysteresis state is not persisted, so after an activation in the
+	 * daytime it is seeded once from the device: a device already in the evening
+	 * priority (SBU) with SoC at or above the lower threshold stays high, otherwise
+	 * the upper threshold decides. A restart in the band therefore never writes
+	 * SUB over a running SBU.
+	 *
+	 * @param now            the local date-time, or null if unknown
+	 * @param soc            the battery SoC, or null if unreadable
+	 * @param outputPriority the E204 read-back, or null if unreadable
 	 * @return the target priority, or null if the time is unknown
 	 */
-	Integer targetFor(LocalDateTime now, Integer soc) {
+	Integer targetFor(LocalDateTime now, Integer soc, Integer outputPriority) {
 		if (now == null) {
 			this.reason = null;
 			return null;
@@ -412,10 +422,16 @@ final class ModeSchedule {
 		if (this.isEvening(time) || !this.isSocRuleActive()) {
 			// Each day starts again in the daytime priority.
 			this.highSoc = false;
+			this.socStateSeeded = true;
 			this.reason = ModeScheduleReason.WINDOW;
 			return this.targetAt(time);
 		}
-		if (soc != null && soc >= 0 && soc <= 100) {
+		var socUsable = soc != null && soc >= 0 && soc <= 100;
+		if (!this.socStateSeeded && socUsable && outputPriority != null) {
+			this.highSoc = (outputPriority == this.eveningPriority && soc >= this.sbuBelowSoc)
+					|| soc >= this.sbuAboveSoc;
+			this.socStateSeeded = true;
+		} else if (this.socStateSeeded && socUsable) {
 			if (!this.highSoc && soc >= this.sbuAboveSoc) {
 				this.highSoc = true;
 			} else if (this.highSoc && soc < this.sbuBelowSoc) {
@@ -468,7 +484,10 @@ final class ModeSchedule {
 			}
 			this.countOutcome(handlerState, now);
 		}
-		var target = this.targetFor(now, soc);
+		if (this.activatedAt == null && now != null) {
+			this.activatedAt = now;
+		}
+		var target = this.targetFor(now, soc, outputPriority);
 		if (now != null && this.crossedBoundaryForward(this.lastNow, now.toLocalTime())) {
 			// A boundary was crossed forward: the new window gets a fresh failure budget.
 			this.failures = 0;
@@ -540,6 +559,7 @@ final class ModeSchedule {
 		this.handlerTarget = target;
 		this.cyclesSinceDone = 0;
 		this.outcomeCounted = false;
+		this.queuedAt = now;
 		this.handler = next;
 		this.writeElement.arm(target);
 		return new Step(ModeScheduleState.WRITE_PENDING, target, target);
@@ -556,14 +576,16 @@ final class ModeSchedule {
 			this.outcomeCounted = true;
 		} else if (state == SafeWriteHandler.State.VERIFIED) {
 			this.outcomeCounted = true;
-			var date = now != null ? now.toLocalDate() : this.writesDate;
-			if (date != null) {
+			// While the clock is gated, count against the time the write was queued.
+			var at = now != null ? now : this.queuedAt;
+			if (at != null) {
+				var date = at.toLocalDate();
 				this.writesToday = this.writesOn(date) + 1;
 				this.writesDate = date;
-			}
-			if (now != null && !this.handlerTarget.equals(this.lastSwitchTarget)) {
-				this.lastSwitchAt = now;
-				this.lastSwitchTarget = this.handlerTarget;
+				if (!this.handlerTarget.equals(this.lastSwitchTarget)) {
+					this.lastSwitchAt = at;
+					this.lastSwitchTarget = this.handlerTarget;
+				}
 			}
 		}
 	}
@@ -573,13 +595,18 @@ final class ModeSchedule {
 	}
 
 	// The minimum dwell applies to SoC-driven switches only; the window switches at
-	// the boundaries happen on time. A clock that moved backwards never holds.
+	// the boundaries happen on time. Before the first verified switch it runs from
+	// the activation, so a restart loop cannot switch faster than the dwell. A clock
+	// that moved backwards never holds.
 	private boolean isDwelling(LocalDateTime now, Integer target) {
-		if (this.reason == ModeScheduleReason.WINDOW || this.lastSwitchAt == null
-				|| target.equals(this.lastSwitchTarget)) {
+		if (this.reason == ModeScheduleReason.WINDOW) {
 			return false;
 		}
-		return !now.isBefore(this.lastSwitchAt) && now.isBefore(this.lastSwitchAt.plus(this.minDwell));
+		var since = this.lastSwitchAt != null ? this.lastSwitchAt : this.activatedAt;
+		if (since == null || (this.lastSwitchAt != null && target.equals(this.lastSwitchTarget))) {
+			return false;
+		}
+		return !now.isBefore(since) && now.isBefore(since.plus(this.minDwell));
 	}
 
 	/**

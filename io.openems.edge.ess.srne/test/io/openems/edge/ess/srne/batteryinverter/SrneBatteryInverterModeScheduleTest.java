@@ -424,9 +424,17 @@ public class SrneBatteryInverterModeScheduleTest {
 		var sut = new SrneBatteryInverterImpl();
 		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
 				.withRegisters(0x0100, 96);
-		start(sut, bridge, DAY, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		final var clock = clockAt(DAY);
+		final var test = start(sut, bridge, clock,
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
 		assertEquals(SBU, target(sut));
 		assertEquals(ModeScheduleReason.HIGH_SOC, reason(sut));
+		// The first SoC-driven switch after activation waits the minimum dwell.
+		assertEquals(ModeScheduleState.MIN_DWELL, state(sut));
+		for (var i = 0; i < 3; i++) {
+			clock.leap(4, ChronoUnit.MINUTES); // small steps: no clock-gate reset
+			test.next(new TestCase(), CYCLES);
+		}
 		assertEquals(SBU, sut.modeScheduleForTest().queuedTarget());
 	}
 

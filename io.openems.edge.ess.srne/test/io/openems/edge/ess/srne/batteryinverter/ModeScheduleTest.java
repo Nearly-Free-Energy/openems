@@ -581,9 +581,9 @@ public class ModeScheduleTest {
 	public void testSocRuleOffKeepsTheWindowTarget() {
 		var sut = defaults();
 		for (var soc : new int[] { 0, 50, 95, 100 }) {
-			assertEquals(SUB, sut.targetFor(at(DAY), soc));
+			assertEquals(SUB, sut.targetFor(at(DAY), soc, SBU));
 			assertEquals(ModeScheduleReason.WINDOW, sut.reason());
-			assertEquals(SBU, sut.targetFor(at(EVENING), soc));
+			assertEquals(SBU, sut.targetFor(at(EVENING), soc, SUB));
 		}
 	}
 
@@ -692,5 +692,55 @@ public class ModeScheduleTest {
 		// The next local day has a fresh ceiling.
 		var nextDay = LocalDateTime.of(DATE.plusDays(1), LocalTime.of(10, 0));
 		assertNotNull(socStep(sut, nextDay, 96, SUB, true).write());
+	}
+
+	@Test
+	public void testRestartInTheBandKeepsTheDeviceMode() {
+		// Device already in SBU at 90 % (between 85 and 95): stays SBU, never writes.
+		var sbu = socSchedule();
+		var t = at(LocalTime.of(14, 0));
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES + 50; i++) {
+			assertStep(socStep(sbu, t, 90, SBU, true), ModeScheduleState.IN_SYNC, SBU, null);
+		}
+		assertEquals(ModeScheduleReason.HIGH_SOC, sbu.reason());
+		// Device in SUB at 90 %: stays SUB.
+		var sub = socSchedule();
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES + 50; i++) {
+			assertStep(socStep(sub, t, 90, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
+		}
+		assertEquals(ModeScheduleReason.LOW_SOC, sub.reason());
+		// Device in SBU but SoC below the lower threshold: back to SUB.
+		var low = socSchedule();
+		assertEquals(SUB, socStep(low, t, 80, SBU, true).target());
+	}
+
+	@Test
+	public void testWriteVerifiedWhileTheClockIsGatedIsCounted() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(11, 0));
+		assertEquals(SBU, socStep(sut, t, 96, SUB, true).write());
+		sut.onExecute(ExecuteState.OK);
+		sut.verify(SBU);
+		// The clock is gated (unknown) when the outcome is counted.
+		sut.onMachineStateRead(true);
+		assertEquals(ModeScheduleState.WAITING_FOR_DATA,
+				sut.step(null, 96, SBU, true, true, true, TIMEOUT, COOLDOWN).state());
+		assertEquals(1, sut.writesTodayForTest(DATE));
+		// The dwell runs from the queue time.
+		assertStep(socStep(sut, t.plusMinutes(5), 80, SBU, true), ModeScheduleState.MIN_DWELL, SUB, null);
+		assertStep(socStep(sut, t.plusMinutes(10), 80, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+	}
+
+	@Test
+	public void testFirstSocSwitchAfterActivationWaitsTheDwell() {
+		var sut = socSchedule();
+		var t = at(LocalTime.of(14, 0));
+		ModeSchedule.Step result = null;
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES + 10; i++) {
+			result = socStep(sut, t, 96, SUB, true);
+			assertNull(result.write());
+		}
+		assertStep(result, ModeScheduleState.MIN_DWELL, SBU, null);
+		assertStep(socStep(sut, t.plusMinutes(10), 96, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 	}
 }
