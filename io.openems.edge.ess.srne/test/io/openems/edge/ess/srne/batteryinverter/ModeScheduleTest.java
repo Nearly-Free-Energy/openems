@@ -536,8 +536,9 @@ public class ModeScheduleTest {
 
 	// ---- Daytime SoC rule (SBU above 95 %, back to SUB below 85 %) ----
 
+	// With the SUB-on-battery path enabled at 180 V (it is off by default).
 	private static ModeSchedule socSchedule() {
-		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10);
+		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, 180);
 	}
 
 	private static ModeSchedule primedSoc() {
@@ -847,6 +848,22 @@ public class ModeScheduleTest {
 		for (var i = 0; i < 50; i++) {
 			assertStep(batteryStep(sut, t, 96, SUB, GRID_UP, GRID_UP, GRID_UP), ModeScheduleState.WAITING_FOR_MAINS,
 					SBU, null);
+		}
+	}
+
+	@Test
+	public void testSubOnBatteryPathIsOffByDefault() {
+		assertFalse(defaults().isGridPresentPathEnabled());
+		assertFalse(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10).isGridPresentPathEnabled());
+		// Window switch to SUB while the unit runs on battery with the grid up: waits for
+		// mains as before.
+		var sut = defaults();
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			step(sut, DAY, 50, SUB, true);
+		}
+		for (var i = 0; i < 50; i++) {
+			assertStep(batteryStep(sut, at(LocalTime.of(0, 40)), 80, SBU, GRID_UP, GRID_UP, GRID_UP),
+					ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
 		}
 	}
 

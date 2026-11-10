@@ -40,7 +40,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int daytimeSbuAboveSoc = -1;
 		private int daytimeSbuBelowSoc = -1;
 		private int minDwellMinutes = 10;
-		private int gridPresentMinVoltage = 180;
+		private int gridPresentMinVoltage = -1;
 
 		private Builder() {
 		}

@@ -94,8 +94,11 @@ final class ModeSchedule {
 	 * while the unit runs on battery after leaving the line at E020.
 	 */
 	static final int ON_BATTERY_STATE = 3;
-	/** Default per-phase grid voltage that counts as grid present, in volts. */
-	static final int DEFAULT_GRID_PRESENT_MIN_VOLTAGE = 180;
+	/**
+	 * Default for gridPresentMinVoltage: -1, the SUB-on-battery path is off until a
+	 * gateway enables it after one supervised live state-3 SUB write.
+	 */
+	static final int DEFAULT_GRID_PRESENT_MIN_VOLTAGE = -1;
 	/** Cycles after activation without any schedule write (about 5 minutes). */
 	static final int STARTUP_HOLD_CYCLES = 300;
 	/**

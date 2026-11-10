@@ -470,15 +470,16 @@ public class SrneBatteryInverterModeScheduleTest {
 	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3), SoC
 	// falls below daytimeSbuBelowSoc. With the grid present on all phases the SUB
 	// write goes out; with the grid absent it does not.
-	private static void sbuThenOnBatteryBelowThreshold(boolean gridPresent) throws Exception {
+	private static void sbuThenOnBatteryBelowThreshold(boolean gridPresent, int gridPresentMinVoltage)
+			throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var clock = clockAt(DAY);
 		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
 				.withRegisters(0x0100, 96) //
 				.withRegister(0x0213, 2300) // 230.0 V
 				.withRegisters(0x022A, 2300, 2300);
-		final var test = start(sut, bridge, clock,
-				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		final var test = start(sut, bridge, clock, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85)
+				.setGridPresentMinVoltage(gridPresentMinVoltage).build());
 		for (var i = 0; i < 3; i++) {
 			clock.leap(4, ChronoUnit.MINUTES); // past the dwell from activation
 			test.next(new TestCase(), CYCLES);
@@ -498,23 +499,31 @@ public class SrneBatteryInverterModeScheduleTest {
 			test.next(new TestCase(), CYCLES);
 		}
 		assertEquals(SUB, target(sut));
-		if (gridPresent) {
+		if (gridPresent && gridPresentMinVoltage > 0) {
+			assertTrue(hasTask(sut, false, 0x0213));
 			assertEquals(SUB, sut.modeScheduleForTest().queuedTarget());
 			assertTrue(sut.takeModeScheduleWriteForTest());
 		} else {
 			assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
 			assertNull(sut.modeScheduleForTest().queuedTarget());
 			assertFalse(sut.takeModeScheduleWriteForTest());
+			assertEquals(gridPresentMinVoltage > 0, hasTask(sut, false, 0x0213));
 		}
 	}
 
 	@Test
 	public void testSubWriteOnBatteryWithGridPresent() throws Exception {
-		sbuThenOnBatteryBelowThreshold(true);
+		sbuThenOnBatteryBelowThreshold(true, 180);
+	}
+
+	@Test
+	public void testSubOnBatteryOffByDefaultWaitsForMains() throws Exception {
+		// Default -1: no grid-voltage reads, the state-3 SUB target waits for mains.
+		sbuThenOnBatteryBelowThreshold(true, -1);
 	}
 
 	@Test
 	public void testNoSubWriteOnBatteryWithoutGrid() throws Exception {
-		sbuThenOnBatteryBelowThreshold(false);
+		sbuThenOnBatteryBelowThreshold(false, 180);
 	}
 }

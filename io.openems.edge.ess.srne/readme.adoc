@@ -420,10 +420,12 @@ charge window is not touched.
      data shows `3` there although the protocol labels it "soft start") when the
      grid-input voltage (`0x0213` L1, `0x022A` L2, `0x022B` L3, the SRNE's own AC-input
      sense, the same registers `Srne.Grid-Meter` reads) is above
-     `gridPresentMinVoltage` (default 180 V) on all three phases, confirmed by 3 fresh
+     `gridPresentMinVoltage` (e.g. 180 V) on all three phases, confirmed by 3 fresh
      state-3 reads and 3 fresh reads per phase. Without this the daytime SoC rule could
      never switch back from SBU, and the battery would drain to `switchToLineSoc`.
-     `gridPresentMinVoltage=-1` turns this path off.
+     **Off by default** (`gridPresentMinVoltage=-1`: SUB only in state `2`, no
+     grid-voltage reads, behaviour as before). gw-pi2 enables it explicitly in its
+     gateway config only after one supervised live state-3 SUB write.
   ** A SUB write in state `3` has not yet been done on a live unit: it needs one
      supervised live validation (write in state 3 with the grid up, read back) before
      it is relied on, like the state-2 writes had.
