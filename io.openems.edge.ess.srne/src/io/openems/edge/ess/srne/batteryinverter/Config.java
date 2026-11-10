@@ -78,6 +78,13 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Charge window 1 stop", description = "Target for E027, encoded hour*256+min; -1 leaves unchanged.")
 	int chargeWindow1Stop() default -1;
 
+	// Timed-charge stop SoC for charge window 1 (E03B, protocol V1.94+). The night
+	// charge in window 1 stops once the battery reaches this SoC, so a wide off-peak
+	// window (e.g. 00:00-06:00) charges in whatever minutes the grid is present.
+	// -1 leaves the register unmanaged (and unread). Valid 10..100.
+	@AttributeDefinition(name = "Charge window 1 stop SoC", description = "Target for E03B (timed-charge stop SoC of charge window 1) in percent; range 10..100; -1 leaves unchanged and does not read the register.")
+	int chargeWindow1StopSoc() default -1;
+
 	@AttributeDefinition(name = "Discharge window 1 start", description = "Target for E02D, encoded hour*256+min; -1 leaves unchanged.")
 	int dischargeWindow1Start() default -1;
 

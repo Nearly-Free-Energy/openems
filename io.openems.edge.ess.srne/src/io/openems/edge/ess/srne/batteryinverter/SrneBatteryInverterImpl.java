@@ -97,9 +97,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// 4 Nov 2026): 0 SOL, 1 UTI, 2 SBU, 3 SUB.
 	private final UnsignedWordElement outputPriorityWrite = new UnsignedWordElement(0xE204);
 	private final UnsignedWordElement bmsCommunicationWrite = new UnsignedWordElement(0xE215);
+	// Timed-charge stop SoC of charge window 1 (E03B). Its read and write tasks are
+	// added only when chargeWindow1StopSoc is configured, so default traffic is unchanged.
+	private final UnsignedWordElement chargeWindow1StopSocWrite = new UnsignedWordElement(0xE03B);
 	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
-			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler() };
+			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
+			new SafeWriteHandler() };
 	/*
 	 * TOU schedule windows for arbitrage. Each window is a coherent (start, stop,
 	 * enable) unit: the contiguous start/stop pair (charge 0xE026/0xE027, discharge
@@ -218,6 +222,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.registerReadback(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT);
 		this.registerReadback(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY);
 		this.registerReadback(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION);
+		this.registerReadback(10, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC);
 		((IntegerReadChannel) this.channel(SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY))
 				.onSetNextValue(value -> this.modeSchedule.verify(value.get()));
 		this.registerWindowReadback(this.chargeWindow, //
@@ -419,6 +424,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			protocol.addTask(new FC3ReadRegistersTask(0x0100, Priority.HIGH, //
 					m(SrneBatteryInverter.ChannelId.BATTERY_SOC, new UnsignedWordElement(0x0100))));
 		}
+		// Charge window 1 stop SoC (E03B): read and written only when configured. A read
+		// the device rejects marks the whole component defective, so unmanaged edges
+		// never touch this register.
+		if (this.isChargeWindow1StopSocManaged()) {
+			protocol.addTask(new FC3ReadRegistersTask(0xE03B, Priority.LOW, //
+					m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC, new UnsignedWordElement(0xE03B))));
+			protocol.addTask(new FC16WriteRegistersTask(this.writeHandlers[10]::onExecute, 0xE03B,
+					this.chargeWindow1StopSocWrite));
+		}
 		// The mode schedule's own E204 write task exists only while the schedule is
 		// active, so the default task list is unchanged.
 		if (this.modeSchedule.isActive()) {
@@ -481,6 +495,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.stopChargeSoc(), 0, 100, 1, this.stopChargeSocWrite);
 		this.reconcile(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM,
 				this.config.lowSocAlarm(), 0, 100, 1, this.lowSocAlarmWrite);
+		// An unset device reads 4096, which differs from every valid target, so a
+		// configured target queues exactly one write and 4096 never verifies.
+		this.reconcile(10, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC,
+				this.config.chargeWindow1StopSoc(), 10, 100, 1, this.chargeWindow1StopSocWrite);
 		this.reconcile(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
 				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
@@ -904,6 +922,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC))
 				&& isPrerequisiteSettled(bms, this.writeHandlers[9].getState(),
 						this.readValue(SrneBatteryInverter.ChannelId.BMS_COMMUNICATION));
+	}
+
+	private boolean isChargeWindow1StopSocManaged() {
+		return this.config != null && this.config.chargeWindow1StopSoc() >= 0;
+	}
+
+	UnsignedWordElement chargeWindow1StopSocWriteForTest() {
+		return this.chargeWindow1StopSocWrite;
+	}
+
+	SafeWriteHandler chargeWindow1StopSocHandlerForTest() {
+		return this.writeHandlers[10];
 	}
 
 	// Package-private for tests: lets a test assert that a reserve-band / BMS write did
