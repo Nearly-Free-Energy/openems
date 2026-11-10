@@ -492,3 +492,48 @@ metered-consumption meter.
 * `modbusUnitId` (int): Device Unit-ID (default: `1`)
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_charger]]
+
+=== SRNE PV-Charger
+
+*Name*: SRNE PV-Charger
+
+*Factory-PID*: `Srne.Charger`
+
+.Implemented Natures/Interfaces
+* EssDcCharger
+* ModbusComponent
+
+*Description*: Reads the PV (MPPT) input, read-only. `_sum` adds it to
+`ProductionDcActualPower` and `ProductionActivePower`. Production energy stays
+empty (`ActualEnergy` is not read yet); for daily kWh use `charger0/PvEnergyToday`.
+It is a separate Modbus component on the same device and Unit-ID, so a rejected
+PV address backs off only this component and not the battery reads.
+
+[cols="1,1,1,2"]
+|===
+| Register | Scale | Channel | Note
+
+| `0x0107` / `0x0108` / `0x0109` | 0.1 V / 0.1 A / 1 W | `Pv1Voltage` (mV), `Pv1Current` (mA), `Pv1Power` (W) | live-read on gw-pi2, 27 Oct 2026
+| `0x010F` / `0x0110` / `0x0111` | 0.1 V / 0.1 A / 1 W | `Pv2Voltage` (mV), `Pv2Current` (mA), `Pv2Power` (W) | answers 0 (PV2 not connected)
+| `0xF02F` | 0.1 kWh | `PvEnergyToday` (Wh) | inverter counter, resets at the inverter's midnight; own single-register LOW task
+|===
+
+`ActualPower` = `Pv1Power` + `Pv2Power`, `Current` = PV1 + PV2 current and
+`Voltage` = PV1 voltage. A register reading `0xFFFF` gives no value, and a
+missing MPPT value gives no `ActualPower` rather than 0 W. `ActualEnergy` is left
+unset (null), so `_sum` production energy stays empty until the inverter's
+accumulated counter (`0xF038`-`0xF039`) is validated live; power is not
+integrated. The bridge backs off per component, so a rejected `0xF02F` would also
+pause this component's PV power reads (never the ESS). The ESS `ActivePower` is
+unchanged (battery only).
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `charger0`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
