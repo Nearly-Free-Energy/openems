@@ -42,6 +42,11 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Charge window 1 start, encoded hour*256+min (0xE026)")), //
 		CHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
 				.text("Charge window 1 stop, encoded hour*256+min (0xE027)")), //
+		// Raw register, no unit: the device reports 4096 until the value has been set
+		// (protocol default marker), which would show as 4096 %. Read only when
+		// chargeWindow1StopSoc is configured.
+		CHARGE_WINDOW_1_STOP_SOC(Doc.of(OpenemsType.INTEGER) //
+				.text("Charge window 1 stop SoC in percent (0xE03B); 4096 = never set")), //
 		DISCHARGE_WINDOW_1_START(Doc.of(OpenemsType.INTEGER) //
 				.text("Discharge window 1 start, encoded hour*256+min (0xE02D)")), //
 		DISCHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
