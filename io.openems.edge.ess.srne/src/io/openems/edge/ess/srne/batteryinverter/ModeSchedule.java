@@ -25,16 +25,23 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * <li>nothing is written while the SoC, E204 or the local time is unknown; the
  * time counts as known only once it is plausible (see
  * {@link #plausibleTime}),</li>
- * <li>a write is queued only after the machine state has been verified
- * (state 2, mains) for {@link #MAINS_CONFIRM_CYCLES} consecutive cycles, and a
- * write still queued when mains is lost is withdrawn,</li>
+ * <li>a write is queued only while the machine state is verified (state 2,
+ * mains) and the last {@link #MAINS_CONFIRM_READS} fresh reads of it were all
+ * verified; a write still queued when mains is lost is withdrawn if the bridge
+ * has not taken it yet ({@link GuardedWordElement}), otherwise it stays in
+ * flight and counts as an attempt,</li>
+ * <li>no write in the first {@link #STARTUP_HOLD_CYCLES} cycles after
+ * activation, so a crash/restart loop cannot spend more than one write per
+ * hold period,</li>
  * <li>SBU is written only when the caller confirms the SBU preconditions (the
  * same reserve-band / BMS checks as a static outputPriority arm); SUB needs
  * none,</li>
  * <li>a failed write (execute error, wrong or missing read-back) leaves the
  * device as it is; retries back off exponentially and at most
- * {@link #MAX_ATTEMPTS} writes are made per window (between two boundaries),
- * then WRITE_FAILED is latched until the next boundary,</li>
+ * {@link #MAX_ATTEMPTS} writes are made per window; the budget is refilled only
+ * when the local time crosses a boundary forward in a small step (a clock jump
+ * or a target flip does not refill it), and WRITE_FAILED is latched until
+ * then,</li>
  * <li>a write that verified but is later overridden (e.g. from the panel) is
  * re-corrected with the same backoff and the same per-window cap,</li>
  * <li>an invalid configuration turns the schedule off.</li>
@@ -51,8 +58,10 @@ final class ModeSchedule {
 
 	/** Writes allowed between two schedule boundaries. */
 	static final int MAX_ATTEMPTS = 5;
-	/** Consecutive verified-mains cycles needed before a write is queued. */
-	static final int MAINS_CONFIRM_CYCLES = 3;
+	/** Consecutive fresh verified machine-state reads needed before a write. */
+	static final int MAINS_CONFIRM_READS = 3;
+	/** Cycles after activation without any schedule write (about 5 minutes). */
+	static final int STARTUP_HOLD_CYCLES = 300;
 	/**
 	 * Earliest plausible wall-clock time (build-time floor). gw-pi2 has no RTC: a
 	 * time before this is an unset clock.
@@ -95,9 +104,11 @@ final class ModeSchedule {
 	private volatile SafeWriteHandler handler;
 	private Integer handlerTarget;
 	private int cyclesSinceDone;
-	private Integer windowTarget;
+	private final GuardedWordElement writeElement = new GuardedWordElement(0xE204);
 	private int attempts;
-	private int mainsCycles;
+	private volatile int freshMainsReads;
+	private int cycles;
+	private LocalTime lastNow;
 	private Instant lastInstant;
 	private int steadyClockCycles;
 
@@ -180,6 +191,56 @@ final class ModeSchedule {
 	}
 
 	/**
+	 * The E204 write element of the schedule's own write task.
+	 *
+	 * @return the element
+	 */
+	GuardedWordElement writeElement() {
+		return this.writeElement;
+	}
+
+	/**
+	 * Called on every fresh read of the machine state (the channel's
+	 * onSetNextValue), from the Modbus bridge thread. Counts consecutive verified
+	 * reads, so a cached value can never count twice.
+	 *
+	 * @param verified whether this read is the verified state 2
+	 */
+	void onMachineStateRead(boolean verified) {
+		this.freshMainsReads = verified ? Math.min(this.freshMainsReads + 1, MAINS_CONFIRM_READS) : 0;
+	}
+
+	/**
+	 * Whether the local time moved forward across a boundary since the last
+	 * cycle, in a step no larger than the clock-step limit.
+	 *
+	 * @param previous the previous local time, or null
+	 * @param now      the current local time
+	 * @return true on a forward boundary crossing
+	 */
+	boolean crossedBoundaryForward(LocalTime previous, LocalTime now) {
+		if (previous == null) {
+			return false;
+		}
+		var step = forwardNanos(previous, now);
+		if (step == 0 || step > MAX_CLOCK_STEP.toNanos()) {
+			return false;
+		}
+		for (var boundary : new LocalTime[] { this.eveningStart, this.daytimeStart }) {
+			var toBoundary = forwardNanos(previous, boundary);
+			if (toBoundary > 0 && toBoundary <= step) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static long forwardNanos(LocalTime from, LocalTime to) {
+		var day = Duration.ofDays(1).toNanos();
+		return ((to.toNanoOfDay() - from.toNanoOfDay()) % day + day) % day;
+	}
+
+	/**
 	 * Clock plausibility gate, fed once per cycle. Returns the local time only if
 	 * the instant is at or after {@link #MIN_PLAUSIBLE_TIME} and the clock has run
 	 * steadily for {@link #CLOCK_SETTLE_CYCLES} cycles; otherwise null (unknown).
@@ -249,15 +310,17 @@ final class ModeSchedule {
 	}
 
 	/**
-	 * Evaluates one cycle. The returned write (if any) must be put on the E204
-	 * write element by the caller, and a withdraw must clear it; the outcome of a
-	 * write reaches this schedule through {@link #onExecute} and {@link #verify}.
+	 * Evaluates one cycle. A write is armed on {@link #writeElement()} here; the
+	 * returned write is informational. The outcome of a write reaches this
+	 * schedule through {@link #onExecute} and {@link #verify}.
 	 *
 	 * @param now             plausible local time, or null if unknown
 	 * @param soc             battery SoC, or null if unreadable
 	 * @param outputPriority  E204 read-back, or null if unreadable
 	 * @param controlEnabled  the settings-write safety gate
-	 * @param mains           whether the verified machine-state gate holds now
+	 * @param mains           whether the verified machine-state gate holds now;
+	 *                        fresh reads are counted by
+	 *                        {@link #onMachineStateRead}
 	 * @param sbuAllowed      whether the SBU preconditions (reserve band, BMS)
 	 *                        are met
 	 * @param readbackTimeout cycles allowed for a fresh read-back
@@ -273,7 +336,9 @@ final class ModeSchedule {
 		if (this.invalidReason != null) {
 			return new Step(ModeScheduleState.CONFIG_INVALID, null, null);
 		}
-		this.mainsCycles = mains ? Math.min(this.mainsCycles + 1, MAINS_CONFIRM_CYCLES) : 0;
+		if (this.cycles < STARTUP_HOLD_CYCLES) {
+			this.cycles++;
+		}
 		var current = this.handler;
 		SafeWriteHandler.State handlerState = null;
 		if (current != null) {
@@ -285,12 +350,19 @@ final class ModeSchedule {
 			}
 		}
 		var target = this.targetAt(now);
+		if (now != null && this.crossedBoundaryForward(this.lastNow, now)) {
+			// A boundary was crossed forward: the new window gets a fresh budget.
+			this.attempts = 0;
+		}
+		this.lastNow = now;
 		if (!controlEnabled) {
 			return new Step(ModeScheduleState.DISABLED, target, null);
 		}
-		if (handlerState == SafeWriteHandler.State.QUEUED && !mains) {
-			// Mains lost before the write went out: withdraw it, it is re-queued once
+		if (handlerState == SafeWriteHandler.State.QUEUED && !mains && this.writeElement.withdraw()) {
+			// Mains lost before the bridge took the write: withdrawn, re-queued once
 			// mains is confirmed again. A withdrawn write does not count as an attempt.
+			// If the bridge already took it, the write is in flight: the handler is
+			// kept and the attempt stays counted.
 			this.handler = null;
 			this.attempts = Math.max(this.attempts - 1, 0);
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null, true);
@@ -301,11 +373,6 @@ final class ModeSchedule {
 		}
 		if (target == null) {
 			return new Step(ModeScheduleState.WAITING_FOR_DATA, null, null);
-		}
-		if (!target.equals(this.windowTarget)) {
-			// A boundary: a new window gets a fresh attempt budget.
-			this.windowTarget = target;
-			this.attempts = 0;
 		}
 		var sameTarget = target.equals(this.handlerTarget);
 		var backingOff = this.attempts > 0 && this.cyclesSinceDone < backoffCycles(this.attempts, cooldown);
@@ -332,8 +399,11 @@ final class ModeSchedule {
 		if (target == SBU && !sbuAllowed) {
 			return new Step(ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, target, null);
 		}
-		if (this.mainsCycles < MAINS_CONFIRM_CYCLES) {
+		if (!mains || this.freshMainsReads < MAINS_CONFIRM_READS) {
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null);
+		}
+		if (this.cycles < STARTUP_HOLD_CYCLES) {
+			return new Step(ModeScheduleState.STARTUP_HOLD, target, null);
 		}
 		var next = new SafeWriteHandler();
 		next.queueIfChanged(outputPriority, target);
@@ -341,6 +411,7 @@ final class ModeSchedule {
 		this.cyclesSinceDone = 0;
 		this.attempts++;
 		this.handler = next;
+		this.writeElement.arm(target);
 		return new Step(ModeScheduleState.WRITE_PENDING, target, target);
 	}
 

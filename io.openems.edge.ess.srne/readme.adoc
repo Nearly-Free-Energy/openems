@@ -385,9 +385,14 @@ charge window is not touched.
 * Each cycle, if `0xE204` reads differently from the target, one write is queued
   through a `SafeWriteHandler` and read-back verified. It needs `controlEnabled=true`
   and the same verified machine-state gate as every settings write (state `2`, mains),
-  held for 3 consecutive cycles so a one-cycle state-2 blip cannot trigger a write.
-  During a grid cut the write waits until mains returns (intended); a write still
-  queued when mains is lost is withdrawn.
+  and the last 3 fresh reads of `0x0210` must all be state `2` (counted on each read,
+  not each cycle), so a state-2 blip on one poll cannot trigger a write. During a grid
+  cut the write waits until mains returns (intended). A write still queued when mains
+  is lost is withdrawn if the bridge has not taken it yet; the take and the withdraw
+  are decided under one lock (`GuardedWordElement`), so a withdrawn value never builds
+  a frame. If the bridge already took it, the write is in flight and counts.
+* No schedule write in the first 300 cycles (about 5 minutes) after activation, so a
+  crash/restart loop cannot spend the write budget (`STARTUP_HOLD`).
 * SBU preconditions: SBU is written only when the same checks as a static
   `outputPriority` arm pass (point (1) above): `switchToLineSoc`, `switchToBatterySoc`
   and `bmsCommunication` configured, in range, `switchToLineSoc` below
@@ -398,12 +403,16 @@ charge window is not touched.
   until NTP syncs. The time counts only once it is at or after a build-time floor
   (2026-11-01) and has run steadily for 60 cycles (no backward step, no forward jump of
   more than 5 minutes); an NTP correction is such a jump and restarts the count.
-  Limitation: a stale but steadily running time (fake-hwclock) that NTP has not yet
-  corrected cannot be told apart from a correct one.
+  Limitation: a stale but steadily running time (fake-hwclock after a power-cut
+  reboot, with NTP unreachable) cannot be told apart from a correct one. Cross-checking
+  against the inverter RTC is not possible on this unit: `0xE034-036` read `0` on gw-pi2
+  (the registers appear to be write-only time setup).
 * A failed write (error, wrong or missing read-back) leaves the device as it is.
   Retries back off exponentially (60, 120, 240, 480 cycles) and at most 5 writes are
-  made per window (between two boundaries); then `WRITE_FAILED` is latched until the
-  next boundary, to spare the inverter's settings memory. A verified value that is
+  made per window; then `WRITE_FAILED` is latched, to spare the inverter's settings
+  memory. The budget is refilled only when the local time crosses `eveningStart` or
+  `daytimeStart` forward in a small step (at most 5 minutes); a clock jump or a target
+  flip does not refill it. A verified value that is
   overridden later (e.g. on the panel) is corrected with the same backoff and cap.
 * One owner of `0xE204`: with the schedule enabled, `outputPriority` must be `-1`.
 * Invalid configuration (a priority other than `2`/`3`, equal priorities, a time that
@@ -412,7 +421,7 @@ charge window is not touched.
 
 Channels: `ModeScheduleState` (`DISABLED` / `IN_SYNC` / `WRITE_PENDING` /
 `WAITING_FOR_MAINS` / `WRITE_FAILED` / `CONFIG_INVALID` / `WAITING_FOR_DATA` /
-`BLOCKED_SBU_PRECONDITIONS`) and `ModeScheduleTargetPriority` (the value the schedule
+`BLOCKED_SBU_PRECONDITIONS` / `STARTUP_HOLD`) and `ModeScheduleTargetPriority` (the value the schedule
 wants now).
 
 .*Configuration*:

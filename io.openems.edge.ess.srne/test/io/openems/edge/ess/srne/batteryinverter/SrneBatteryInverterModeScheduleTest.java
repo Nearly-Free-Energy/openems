@@ -29,15 +29,18 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
  * SUB) and 16:00Z is 19:00 local (evening, SBU). The dummy bridge does not
  * execute writes, so a test plays the device by invoking the same execute
  * callback the write task uses and then presenting the register read-back.
- * The clock gate needs {@link ModeSchedule#CLOCK_SETTLE_CYCLES} steady cycles
- * after start (or after a jump) before the schedule acts.
+ * The schedule writes nothing for {@link ModeSchedule#STARTUP_HOLD_CYCLES}
+ * cycles after activation, and the clock gate needs
+ * {@link ModeSchedule#CLOCK_SETTLE_CYCLES} steady cycles after a jump.
  */
 public class SrneBatteryInverterModeScheduleTest {
 
 	private static final int SBU = 2;
 	private static final int SUB = 3;
 	private static final int CYCLES = 16; // >= number of LOW read tasks
-	private static final int START_CYCLES = ModeSchedule.CLOCK_SETTLE_CYCLES + CYCLES;
+	// Past the startup hold (which also covers the clock settle period).
+	private static final int START_CYCLES = ModeSchedule.STARTUP_HOLD_CYCLES + CYCLES;
+	private static final int SETTLE_CYCLES = ModeSchedule.CLOCK_SETTLE_CYCLES + CYCLES;
 	private static final String DAY = "2026-11-10T07:00:00Z";
 	private static final String EVENING = "2026-11-10T16:00:00Z";
 	// Reserve band / BMS as configured for the SBU preconditions.
@@ -194,9 +197,15 @@ public class SrneBatteryInverterModeScheduleTest {
 		var sut = new SrneBatteryInverterImpl();
 		final var bridge = bridge(SUB, MachineState.INVERTER_POWERED);
 		final var test = start(sut, bridge, EVENING, config().build());
-		// State 2 for a single cycle only, then back on battery.
+		// State 2 across exactly one fresh read of 0x0210, then back on battery.
+		final var reads = new int[1];
+		sut.getMachineStateChannel().onSetNextValue(ignore -> reads[0]++);
 		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
-		test.next(new TestCase());
+		final var before = reads[0];
+		for (var i = 0; i < CYCLES && reads[0] == before; i++) {
+			test.next(new TestCase());
+		}
+		assertEquals(before + 1, reads[0]);
 		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
 		test.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
@@ -226,6 +235,32 @@ public class SrneBatteryInverterModeScheduleTest {
 	}
 
 	@Test
+	public void testStartupHoldAfterActivation() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", bridge(SBU, MachineState.RUNNING_MAINS_BYPASS)) //
+				.addReference("componentManager", new DummyComponentManager(clockAt(DAY))) //
+				.activate(config().build()) //
+				.next(new TestCase(), ModeSchedule.STARTUP_HOLD_CYCLES - 10);
+		assertEquals(ModeScheduleState.STARTUP_HOLD, state(sut));
+		assertFalse(sut.takeModeScheduleWriteForTest());
+	}
+
+	@Test
+	public void testMainsLossAfterBridgeTookTheWriteKeepsItInFlight() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(SBU, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, DAY, config().build());
+		// The bridge takes the value, then mains drops before the execute callback.
+		assertTrue(sut.takeModeScheduleWriteForTest());
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.QUEUED, sut.modeScheduleForTest().handlerState());
+		assertEquals(1, sut.modeScheduleForTest().attemptsInWindow());
+		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
+	}
+
+	@Test
 	public void testLeapsAcrossBothBoundaries() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var clock = clockAt("2026-11-10T14:59:00Z"); // 17:59 local
@@ -246,7 +281,7 @@ public class SrneBatteryInverterModeScheduleTest {
 		clock.leap(Duration.ofHours(6).plusMinutes(30).toMinutes(), ChronoUnit.MINUTES);
 		test.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.WAITING_FOR_DATA, state(sut));
-		test.next(new TestCase(), START_CYCLES);
+		test.next(new TestCase(), SETTLE_CYCLES);
 		assertEquals(SUB, target(sut));
 		assertEquals(SUB, sut.modeScheduleForTest().queuedTarget());
 		deviceWrites(sut, bridge, test, SUB);

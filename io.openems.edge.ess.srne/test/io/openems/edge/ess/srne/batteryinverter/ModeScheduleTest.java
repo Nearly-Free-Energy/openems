@@ -36,17 +36,20 @@ public class ModeScheduleTest {
 		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1);
 	}
 
-	// A schedule that has seen mains confirmed and the device in sync by day.
+	// A schedule past the startup hold, with mains confirmed and the device in sync
+	// by day.
 	private static ModeSchedule primed() {
 		var sut = defaults();
-		for (var i = 0; i < ModeSchedule.MAINS_CONFIRM_CYCLES; i++) {
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
 			assertEquals(ModeScheduleState.IN_SYNC, step(sut, DAY, 50, SUB, true).state());
 		}
 		return sut;
 	}
 
+	// One cycle with one fresh machine-state read.
 	private static ModeSchedule.Step step(ModeSchedule sut, LocalTime now, Integer soc, Integer e204,
 			boolean mains) {
+		sut.onMachineStateRead(mains);
 		return sut.step(now, soc, e204, true, mains, true, TIMEOUT, COOLDOWN);
 	}
 
@@ -227,13 +230,13 @@ public class ModeScheduleTest {
 
 	@Test
 	public void testWaitsForConfirmedMains() {
-		var sut = defaults();
+		var sut = primed();
 		for (var i = 0; i < 200; i++) {
 			assertStep(step(sut, EVENING, 50, SUB, false), ModeScheduleState.WAITING_FOR_MAINS, SBU, null);
 		}
 		assertNull(sut.handlerState());
-		// Mains is back: written only once it has held for the confirmation cycles.
-		for (var i = 1; i < ModeSchedule.MAINS_CONFIRM_CYCLES; i++) {
+		// Mains is back: written only once it has held for the confirmation reads.
+		for (var i = 1; i < ModeSchedule.MAINS_CONFIRM_READS; i++) {
 			assertStep(step(sut, EVENING, 50, SUB, true), ModeScheduleState.WAITING_FOR_MAINS, SBU, null);
 		}
 		assertStep(step(sut, EVENING, 50, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
@@ -241,13 +244,85 @@ public class ModeScheduleTest {
 
 	@Test
 	public void testMainsBlipNeverWrites() {
-		var sut = defaults();
+		var sut = primed();
 		for (var i = 0; i < 300; i++) {
-			// State 2 for fewer cycles than the confirmation, then lost again.
-			var mains = i % ModeSchedule.MAINS_CONFIRM_CYCLES != 0;
+			// State 2 for fewer fresh reads than the confirmation, then lost again.
+			var mains = i % ModeSchedule.MAINS_CONFIRM_READS != 0;
 			assertNull(step(sut, EVENING, 50, SUB, mains).write());
 		}
 		assertNull(sut.handlerState());
+	}
+
+	@Test
+	public void testCachedMainsValueCountsAsOneRead() {
+		var sut = primed();
+		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, step(sut, EVENING, 50, SUB, false).state());
+		// One fresh read of state 2, then many cycles on the same cached value.
+		sut.onMachineStateRead(true);
+		for (var i = 0; i < 50; i++) {
+			assertStep(sut.step(EVENING, 50, SUB, true, true, true, TIMEOUT, COOLDOWN),
+					ModeScheduleState.WAITING_FOR_MAINS, SBU, null);
+		}
+		assertNull(sut.handlerState());
+	}
+
+	@Test
+	public void testStartupHold() {
+		var sut = defaults();
+		for (var i = 1; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			var result = step(sut, DAY, 50, SBU, true);
+			assertNull(result.write());
+			if (i >= ModeSchedule.MAINS_CONFIRM_READS) {
+				assertEquals(ModeScheduleState.STARTUP_HOLD, result.state());
+			}
+		}
+		assertStep(step(sut, DAY, 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+	}
+
+	@Test
+	public void testWithdrawnValueNeverBuildsAFrame() {
+		var element = new GuardedWordElement(0xE204);
+		element.arm(SUB);
+		assertTrue(element.withdraw());
+		assertNull(element.getNextWriteValueAndReset());
+		// The bridge read the value before the withdraw, then converts it: no frame.
+		element.arm(SUB);
+		assertTrue(element.withdraw());
+		assertNull(element.valueToRaw(SUB));
+		// Taken first: the withdraw loses.
+		element.arm(SUB);
+		assertNotNull(element.getNextWriteValueAndReset());
+		assertFalse(element.withdraw());
+	}
+
+	@Test
+	public void testMainsLostAfterTheBridgeTookTheWriteKeepsItInFlight() {
+		var sut = primed();
+		assertStep(step(sut, DAY, 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		// The bridge takes the value, then mains drops before the execute callback.
+		assertNotNull(sut.writeElement().getNextWriteValueAndReset());
+		var lost = step(sut, DAY, 50, SBU, false);
+		assertStep(lost, ModeScheduleState.WRITE_PENDING, SUB, null);
+		assertFalse(lost.withdraw());
+		assertEquals(SafeWriteHandler.State.QUEUED, sut.handlerState());
+		assertEquals(1, sut.attemptsInWindow());
+		sut.onExecute(ExecuteState.OK);
+		sut.verify(SUB);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.handlerState());
+	}
+
+	@Test
+	public void testBoundaryCrossingDetection() {
+		var sut = defaults();
+		assertTrue(sut.crossedBoundaryForward(LocalTime.of(17, 59, 59), LocalTime.of(18, 0)));
+		assertTrue(sut.crossedBoundaryForward(LocalTime.of(17, 56), LocalTime.of(18, 1)));
+		assertTrue(sut.crossedBoundaryForward(LocalTime.of(0, 29), LocalTime.of(0, 30)));
+		assertFalse(sut.crossedBoundaryForward(LocalTime.of(18, 0), LocalTime.of(18, 0, 1)));
+		assertFalse(sut.crossedBoundaryForward(LocalTime.of(17, 55), LocalTime.of(18, 1))); // jump > 5 min
+		assertFalse(sut.crossedBoundaryForward(LocalTime.of(18, 1), LocalTime.of(17, 59))); // backward
+		assertFalse(sut.crossedBoundaryForward(LocalTime.of(10, 0), LocalTime.of(19, 0))); // jump
+		assertFalse(sut.crossedBoundaryForward(null, LocalTime.of(18, 0)));
+		assertFalse(sut.crossedBoundaryForward(LocalTime.of(23, 59, 59), LocalTime.of(0, 0, 1))); // not a boundary
 	}
 
 	@Test
@@ -260,7 +335,7 @@ public class ModeScheduleTest {
 		assertTrue(lost.withdraw());
 		assertNull(sut.queuedTarget());
 		assertEquals(0, sut.attemptsInWindow()); // a withdrawn write is not an attempt
-		for (var i = 1; i < ModeSchedule.MAINS_CONFIRM_CYCLES; i++) {
+		for (var i = 1; i < ModeSchedule.MAINS_CONFIRM_READS; i++) {
 			assertStep(step(sut, DAY, 50, SBU, true), ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
 		}
 		assertStep(step(sut, DAY, 50, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
@@ -305,8 +380,11 @@ public class ModeScheduleTest {
 		for (var n = 1; n < writeCycles.size(); n++) {
 			assertEquals(COOLDOWN << (n - 1), writeCycles.get(n) - writeCycles.get(n - 1));
 		}
-		// Next boundary (evening): a fresh budget, written at once.
-		assertStep(step(sut, EVENING, 50, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
+		// A target flip by a clock jump does not refill the budget.
+		assertStep(step(sut, EVENING, 50, SUB, true), ModeScheduleState.WRITE_FAILED, SBU, null);
+		assertStep(step(sut, LocalTime.of(17, 59, 30), 50, SBU, true), ModeScheduleState.WRITE_FAILED, SUB, null);
+		// Crossing 18:00 forward: a fresh budget, written at once.
+		assertStep(step(sut, LocalTime.of(18, 0), 50, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 		assertEquals(1, sut.attemptsInWindow());
 	}
 

@@ -97,10 +97,6 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// 4 Nov 2026): 0 SOL, 1 UTI, 2 SBU, 3 SUB.
 	private final UnsignedWordElement outputPriorityWrite = new UnsignedWordElement(0xE204);
 	private final UnsignedWordElement bmsCommunicationWrite = new UnsignedWordElement(0xE215);
-	// Daily output-priority schedule: its own E204 write element and task, so its
-	// one-shot handlers never touch the static outputPriority handler (index 8).
-	// Only one of the two can own E204 (validated in ModeSchedule).
-	private final UnsignedWordElement modeScheduleWrite = new UnsignedWordElement(0xE204);
 	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler() };
@@ -189,6 +185,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
+		// Fresh machine-state reads for the mode schedule's mains confirmation.
+		this.getMachineStateChannel().onSetNextValue(ignore -> {
+			MachineState read = this.getMachineStateChannel().getNextValue().asEnum();
+			this.modeSchedule.onMachineStateRead(read != null && read.isVerified());
+		});
 
 		/*
 		 * Validated on the ASP48120SH3: SRNE battery current is positive while
@@ -421,7 +422,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// The mode schedule's own E204 write task exists only while the schedule is
 		// active, so the default task list is unchanged.
 		if (this.modeSchedule.isActive()) {
-			protocol.addTask(new FC16WriteRegistersTask(this.modeSchedule::onExecute, 0xE204, this.modeScheduleWrite));
+			// Its own E204 element and task, so its one-shot handlers never touch the
+			// static outputPriority handler (index 8); only one of the two can own E204.
+			protocol.addTask(new FC16WriteRegistersTask(this.modeSchedule::onExecute, 0xE204,
+					this.modeSchedule.writeElement()));
 		}
 		return protocol;
 	}
@@ -519,11 +523,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		var step = this.modeSchedule.step(now, soc, outputPriority, this.config.controlEnabled(), mains, sbuAllowed,
 				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES);
 		if (step.withdraw()) {
-			this.modeScheduleWrite.getNextWriteValueAndReset();
 			this.logInfo(this.log, "Mode schedule: mains lost, withdrew the queued E204 write");
 		}
 		if (step.write() != null) {
-			this.modeScheduleWrite.setNextWriteValue(step.write());
 			this.logInfo(this.log,
 					"Mode schedule: queued E204 write from [" + outputPriority + "] to [" + step.write() + "]");
 		}
@@ -583,10 +585,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		return this.modeSchedule;
 	}
 
-	// Package-private for tests: drops a write the dummy bridge never consumes and
-	// returns whether one was pending.
+	// Package-private for tests: takes the queued write exactly as the bridge does
+	// (the dummy bridge never consumes writes) and returns whether one was pending.
 	boolean takeModeScheduleWriteForTest() {
-		return this.modeScheduleWrite.getNextWriteValueAndReset() != null;
+		return this.modeSchedule.writeElement().getNextWriteValueAndReset() != null;
 	}
 
 	// Only the disarm of the discharge schedule bypasses the verified machine-state

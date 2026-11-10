@@ -25,7 +25,9 @@ public enum ModeScheduleState implements OptionsEnum {
 	/** SoC or E204 is unreadable, or the clock is not yet plausible; nothing is written. */
 	WAITING_FOR_DATA(6), //
 	/** SBU is due, but its reserve-band / BMS preconditions are not met. */
-	BLOCKED_SBU_PRECONDITIONS(7);
+	BLOCKED_SBU_PRECONDITIONS(7), //
+	/** First minutes after activation: no schedule write yet (caps a restart loop). */
+	STARTUP_HOLD(8);
 
 	private final int value;
 
