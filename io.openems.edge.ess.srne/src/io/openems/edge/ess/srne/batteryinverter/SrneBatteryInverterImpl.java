@@ -395,7 +395,6 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.maxChargeCurrentLimitWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[8]::onExecute, 0xE204, this.outputPriorityWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[9]::onExecute, 0xE215, this.bmsCommunicationWrite), //
-				new FC16WriteRegistersTask(this.modeSchedule::onExecute, 0xE204, this.modeScheduleWrite), //
 				// Start and stop each get their OWN single-register task: the SRNE mis-stored
 				// a two-register FC16 here (see ScheduleWindow), and one task would merge the
 				// contiguous elements into one frame. The enable is a separate write, last.
@@ -417,6 +416,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive()) {
 			protocol.addTask(new FC3ReadRegistersTask(0x0100, Priority.HIGH, //
 					m(SrneBatteryInverter.ChannelId.BATTERY_SOC, new UnsignedWordElement(0x0100))));
+		}
+		// The mode schedule's own E204 write task exists only while the schedule is
+		// active, so the default task list is unchanged.
+		if (this.modeSchedule.isActive()) {
+			protocol.addTask(new FC16WriteRegistersTask(this.modeSchedule::onExecute, 0xE204, this.modeScheduleWrite));
 		}
 		return protocol;
 	}
