@@ -257,7 +257,7 @@ public class SrneBatteryInverterModeScheduleTest {
 		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
 		test.next(new TestCase(), CYCLES);
 		assertEquals(SafeWriteHandler.State.QUEUED, sut.modeScheduleForTest().handlerState());
-		assertEquals(1, sut.modeScheduleForTest().attemptsInWindow());
+		assertEquals(0, sut.modeScheduleForTest().failuresInWindow());
 		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
 	}
 
