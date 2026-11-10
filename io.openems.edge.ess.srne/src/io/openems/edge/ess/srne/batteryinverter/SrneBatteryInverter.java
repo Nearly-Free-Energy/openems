@@ -30,8 +30,8 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		SWITCH_TO_BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
 		AC_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
 		MAX_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
-		// Output priority = source transfer (SBU/SUB/SOL/UTI). The value->mode enum is
-		// confirmed on the unit at commissioning; not the same as charge priority.
+		// Output priority = source transfer: 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual,
+		// confirmed on gw-pi2 v29). Not the same as charge priority.
 		OUTPUT_PRIORITY(Doc.of(OpenemsType.INTEGER) //
 				.text("Output source priority mode (0xE204)")), //
 		BMS_COMMUNICATION(Doc.of(OpenemsType.INTEGER) //
@@ -88,11 +88,15 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		OVER_DISCHARGE_DELAY(Doc.of(OpenemsType.INTEGER).unit(Unit.SECONDS) //
 				.text("Over-discharge delay (0xE010)")), //
 		BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
-				.text("Battery state of charge (0x0100); read only when a discharge SoC rule is configured")), //
+				.text("Battery state of charge (0x0100); read only when a discharge SoC rule or the mode schedule is configured")), //
 		DISCHARGE_SUPPRESSED(Doc.of(OpenemsType.BOOLEAN) //
 				.text("Discharge schedule held disabled by the start-threshold or floor rule")), //
 		DISCHARGE_SUPPRESSION_REASON(Doc.of(DischargeSuppressionReason.values()) //
 				.text("Why the discharge schedule is held disabled")), //
+		MODE_SCHEDULE_STATE(Doc.of(ModeScheduleState.values()) //
+				.text("State of the daily output-priority schedule (0xE204)")), //
+		MODE_SCHEDULE_TARGET_PRIORITY(Doc.of(OpenemsType.INTEGER) //
+				.text("Output priority the daily schedule wants now (2 SBU, 3 SUB)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 
