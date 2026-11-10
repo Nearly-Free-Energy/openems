@@ -15,12 +15,17 @@ public enum ModeScheduleState implements OptionsEnum {
 	WRITE_PENDING(2), //
 	/** E204 differs from the target, but the inverter is not on mains (state 2). */
 	WAITING_FOR_MAINS(3), //
-	/** The last write failed or read back wrong; retried after a cooldown. */
+	/**
+	 * The last write failed or read back wrong; retried with backoff, latched after
+	 * the per-window attempt cap until the next boundary.
+	 */
 	WRITE_FAILED(4), //
 	/** Invalid schedule configuration; the schedule stays off. */
 	CONFIG_INVALID(5), //
-	/** SoC, E204 or the clock is unreadable; nothing is written. */
-	WAITING_FOR_DATA(6);
+	/** SoC or E204 is unreadable, or the clock is not yet plausible; nothing is written. */
+	WAITING_FOR_DATA(6), //
+	/** SBU is due, but its reserve-band / BMS preconditions are not met. */
+	BLOCKED_SBU_PRECONDITIONS(7);
 
 	private final int value;
 

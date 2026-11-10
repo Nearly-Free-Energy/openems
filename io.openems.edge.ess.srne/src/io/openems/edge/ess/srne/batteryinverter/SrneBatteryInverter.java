@@ -30,8 +30,8 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		SWITCH_TO_BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
 		AC_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
 		MAX_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
-		// Output priority = source transfer (SBU/SUB/SOL/UTI). The value->mode enum is
-		// confirmed on the unit at commissioning; not the same as charge priority.
+		// Output priority = source transfer: 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual,
+		// confirmed on gw-pi2 v29). Not the same as charge priority.
 		OUTPUT_PRIORITY(Doc.of(OpenemsType.INTEGER) //
 				.text("Output source priority mode (0xE204)")), //
 		BMS_COMMUNICATION(Doc.of(OpenemsType.INTEGER) //

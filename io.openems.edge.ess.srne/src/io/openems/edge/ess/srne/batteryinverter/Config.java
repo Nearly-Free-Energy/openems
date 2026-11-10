@@ -60,10 +60,10 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Maximum charge-current limit", description = "Target for E20A in amperes; -1 leaves unchanged.")
 	int maxChargeCurrentLimit() default -1;
 
-	// Output priority (source transfer) and BMS-comms enable. Raw mode numbers; the
-	// value->mode mapping (which value is SBU, etc.) is unverified in the manuals and
-	// must be confirmed on the unit before use. -1 leaves unchanged. See #71.
-	@AttributeDefinition(name = "Output priority mode", description = "Raw target for E204 (source transfer, e.g. SBU); range 0..3; confirm the value->mode mapping on the unit; -1 leaves unchanged. Must be -1 when the daily mode schedule is enabled (one owner of E204), otherwise the schedule reports CONFIG_INVALID and stays off.")
+	// Output priority (source transfer) and BMS-comms enable. Raw mode numbers. E204:
+	// 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual; confirmed on gw-pi2 v29,
+	// microgrid-gateway #97, 4 Nov 2026). -1 leaves unchanged. See #71.
+	@AttributeDefinition(name = "Output priority mode", description = "Raw target for E204 (source transfer): 0 SOL, 1 UTI, 2 SBU, 3 SUB; -1 leaves unchanged. Must be -1 when the daily mode schedule is enabled (one owner of E204), otherwise the schedule reports CONFIG_INVALID and stays off.")
 	int outputPriority() default -1;
 
 	@AttributeDefinition(name = "BMS communication enable", description = "Raw target for E215 (BMS comms); range 0..2; confirm the value->mode mapping on the unit; -1 leaves unchanged.")
@@ -119,7 +119,7 @@ import io.openems.edge.ess.srne.SrneConstants;
 			@Option(label = "SUB", value = "3") })
 	int daytimePriority() default 3;
 
-	@AttributeDefinition(name = "Evening output priority", description = "E204 value from eveningStart to daytimeStart: 2 = SBU, 3 = SUB (only 2 or 3 allowed).", options = {
+	@AttributeDefinition(name = "Evening output priority", description = "E204 value from eveningStart to daytimeStart: 2 = SBU, 3 = SUB (only 2 or 3 allowed, and not the daytime value). SBU is written only when switchToLineSoc, switchToBatterySoc and bmsCommunication are configured, coherent and settled.", options = {
 			@Option(label = "SBU", value = "2"), //
 			@Option(label = "SUB", value = "3") })
 	int eveningPriority() default 2;
