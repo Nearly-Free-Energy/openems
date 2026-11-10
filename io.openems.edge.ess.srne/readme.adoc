@@ -451,7 +451,8 @@ https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source 
 * ModbusComponent
 
 *Description*: Reads the PV (MPPT) input, read-only. `_sum` adds it to
-`ProductionDcActualPower`, `ProductionActivePower` and the production energy.
+`ProductionDcActualPower` and `ProductionActivePower`. Production energy stays
+empty (`ActualEnergy` is not read yet); for daily kWh use `charger0/PvEnergyToday`.
 It is a separate Modbus component on the same device and Unit-ID, so a rejected
 PV address backs off only this component and not the battery reads.
 
