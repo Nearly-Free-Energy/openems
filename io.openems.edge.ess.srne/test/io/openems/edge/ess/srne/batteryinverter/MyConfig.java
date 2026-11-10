@@ -31,6 +31,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int dischargeStartMinSoc = -1;
 		private int dischargeFloorSoc = -1;
 		private String scheduleTimeZone = "Africa/Kampala";
+		private boolean modeScheduleEnabled = false;
+		private int daytimePriority = 3;
+		private int eveningPriority = 2;
+		private String eveningStart = "18:00";
+		private String daytimeStart = "00:30";
 
 		private Builder() {
 		}
@@ -135,6 +140,31 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setScheduleTimeZone(String value) {
 			this.scheduleTimeZone = value;
+			return this;
+		}
+
+		public Builder setModeScheduleEnabled(boolean value) {
+			this.modeScheduleEnabled = value;
+			return this;
+		}
+
+		public Builder setDaytimePriority(int value) {
+			this.daytimePriority = value;
+			return this;
+		}
+
+		public Builder setEveningPriority(int value) {
+			this.eveningPriority = value;
+			return this;
+		}
+
+		public Builder setEveningStart(String value) {
+			this.eveningStart = value;
+			return this;
+		}
+
+		public Builder setDaytimeStart(String value) {
+			this.daytimeStart = value;
 			return this;
 		}
 
@@ -280,5 +310,30 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int bmsCommunication() {
 		return this.builder.bmsCommunication;
+	}
+
+	@Override
+	public boolean modeScheduleEnabled() {
+		return this.builder.modeScheduleEnabled;
+	}
+
+	@Override
+	public int daytimePriority() {
+		return this.builder.daytimePriority;
+	}
+
+	@Override
+	public int eveningPriority() {
+		return this.builder.eveningPriority;
+	}
+
+	@Override
+	public String eveningStart() {
+		return this.builder.eveningStart;
+	}
+
+	@Override
+	public String daytimeStart() {
+		return this.builder.daytimeStart;
 	}
 }
