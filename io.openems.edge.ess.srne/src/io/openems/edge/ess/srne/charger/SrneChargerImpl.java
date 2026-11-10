@@ -23,9 +23,7 @@ import io.openems.edge.bridge.modbus.api.ElementToChannelConverter;
 import io.openems.edge.bridge.modbus.api.ModbusComponent;
 import io.openems.edge.bridge.modbus.api.ModbusProtocol;
 import io.openems.edge.bridge.modbus.api.element.DummyRegisterElement;
-import io.openems.edge.bridge.modbus.api.element.UnsignedDoublewordElement;
 import io.openems.edge.bridge.modbus.api.element.UnsignedWordElement;
-import io.openems.edge.bridge.modbus.api.element.WordOrder;
 import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
 import io.openems.edge.common.component.OpenemsComponent;
 import io.openems.edge.common.taskmanager.Priority;
@@ -55,9 +53,6 @@ public class SrneChargerImpl extends AbstractOpenemsModbusComponent
 	private static final ElementToChannelConverter WORD_DIRECT = SET_NULL_FOR_DEFAULT(0xFFFF);
 	/** 0.1 unit to milli-unit (V to mV, A to mA, kWh to Wh), 0xFFFF = no value. */
 	private static final ElementToChannelConverter WORD_SCALE_2 = chain(SET_NULL_FOR_DEFAULT(0xFFFF),
-			SCALE_FACTOR_2);
-	/** 32-bit 0.1 kWh counter to Wh, 0xFFFFFFFF = no value. */
-	private static final ElementToChannelConverter DOUBLEWORD_SCALE_2 = chain(SET_NULL_FOR_DEFAULT(0xFFFFFFFFL),
 			SCALE_FACTOR_2);
 
 	@Override
@@ -142,16 +137,17 @@ public class SrneChargerImpl extends AbstractOpenemsModbusComponent
 						m(SrneCharger.ChannelId.PV2_CURRENT, new UnsignedWordElement(0x0110), WORD_SCALE_2), //
 						m(SrneCharger.ChannelId.PV2_POWER, new UnsignedWordElement(0x0111), WORD_DIRECT)), //
 				/*
-				 * Inverter energy counters, SRNE protocol V1.96 P08. 0xF02F (PV energy today,
-				 * 0.1 kWh) answered live on gw-pi2 (27 Oct 2026). 0xF038-0xF039 (accumulated
-				 * PV generation, 0.1 kWh, 32-bit, low word first) is not yet validated live.
+				 * PV energy today, SRNE protocol V1.96 P08: 0xF02F, 0.1 kWh. Answered live on
+				 * gw-pi2 (27 Oct 2026). A single-register LOW task. Note: the Modbus bridge
+				 * backs off per component, so a rejected 0xF02F would also pause the PV power
+				 * task above (but never the ESS battery reads).
+				 *
+				 * ActualEnergy is deliberately left unset (null): the accumulated counter
+				 * 0xF038-0xF039 is not validated live yet (follow-up PR), and power is not
+				 * integrated.
 				 */
 				new FC3ReadRegistersTask(0xF02F, Priority.LOW, //
-						m(SrneCharger.ChannelId.PV_ENERGY_TODAY, new UnsignedWordElement(0xF02F), WORD_SCALE_2), //
-						new DummyRegisterElement(0xF030, 0xF037), //
-						m(EssDcCharger.ChannelId.ACTUAL_ENERGY,
-								new UnsignedDoublewordElement(0xF038).wordOrder(WordOrder.LSWMSW),
-								DOUBLEWORD_SCALE_2)));
+						m(SrneCharger.ChannelId.PV_ENERGY_TODAY, new UnsignedWordElement(0xF02F), WORD_SCALE_2)));
 	}
 
 	@Override

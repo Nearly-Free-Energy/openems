@@ -24,23 +24,20 @@ public class SrneChargerImplTest {
 	}
 
 	private static DummyModbusBridge bridge(int pv1V, int pv1A, int pv1W, int pv2V, int pv2A, int pv2W,
-			int todayX10, int totalLow, int totalHigh) {
+			int todayX10) {
 		return new DummyModbusBridge("modbus0") //
 				.withRegisters(0x0107, //
 						pv1V, pv1A, pv1W, //
 						/* 0x010A-0x010E: not PV input */ 0, 0, 0, 0, 0, //
 						pv2V, pv2A, pv2W) //
-				.withRegisters(0xF02F, //
-						todayX10, //
-						/* 0xF030-0xF037: not read */ 0, 0, 0, 0, 0, 0, 0, 0, //
-						totalLow, totalHigh);
+				.withRegisters(0xF02F, todayX10);
 	}
 
 	@Test
 	public void testLiveMiddayReadOnPv1() throws Exception {
 		// gw-pi2, 27 Oct 2026 09:41 EAT: 366.0 V, 1.2 A, 470 W; PV2 not connected;
-		// 0.5 kWh today; 1234.5 kWh accumulated (low word first)
-		activate(bridge(3_660, 12, 470, 0, 0, 0, 5, 12_345, 0)) //
+		// 0.5 kWh today
+		activate(bridge(3_660, 12, 470, 0, 0, 0, 5)) //
 				.next(new TestCase(), 4) //
 				.next(new TestCase() //
 						.output(SrneCharger.ChannelId.PV1_VOLTAGE, 366_000) //
@@ -53,14 +50,14 @@ public class SrneChargerImplTest {
 						.output(EssDcCharger.ChannelId.ACTUAL_POWER, 470) //
 						.output(EssDcCharger.ChannelId.VOLTAGE, 366_000) //
 						.output(EssDcCharger.ChannelId.CURRENT, 1_200) //
-						.output(EssDcCharger.ChannelId.ACTUAL_ENERGY, 1_234_500L)) //
+						.output(EssDcCharger.ChannelId.ACTUAL_ENERGY, null)) //
 				.deactivate();
 	}
 
 	@Test
-	public void testBothMpptsAreSummedAndHighWordIsDecoded() throws Exception {
-		// 1500 W + 2000 W; 6.5 kWh today; accumulated 0x0001_0010 x 0.1 kWh
-		activate(bridge(3_600, 42, 1_500, 3_500, 57, 2_000, 65, 0x0010, 0x0001)) //
+	public void testBothMpptsAreSummed() throws Exception {
+		// 1500 W + 2000 W; 6.5 kWh today
+		activate(bridge(3_600, 42, 1_500, 3_500, 57, 2_000, 65)) //
 				.next(new TestCase(), 4) //
 				.next(new TestCase() //
 						.output(SrneCharger.ChannelId.PV2_VOLTAGE, 350_000) //
@@ -70,26 +67,26 @@ public class SrneChargerImplTest {
 						.output(EssDcCharger.ChannelId.ACTUAL_POWER, 3_500) //
 						.output(EssDcCharger.ChannelId.CURRENT, 9_900) //
 						.output(EssDcCharger.ChannelId.VOLTAGE, 360_000) //
-						.output(EssDcCharger.ChannelId.ACTUAL_ENERGY, 6_555_200L)) //
+						.output(EssDcCharger.ChannelId.ACTUAL_ENERGY, null)) //
 				.deactivate();
 	}
 
 	@Test
 	public void testNightReadsZeroWatt() throws Exception {
-		activate(bridge(0, 0, 0, 0, 0, 0, 0, 12_345, 0)) //
+		activate(bridge(0, 0, 0, 0, 0, 0, 0)) //
 				.next(new TestCase(), 4) //
 				.next(new TestCase() //
 						.output(EssDcCharger.ChannelId.ACTUAL_POWER, 0) //
 						.output(EssDcCharger.ChannelId.CURRENT, 0) //
 						.output(SrneCharger.ChannelId.PV_ENERGY_TODAY, 0) //
-						.output(EssDcCharger.ChannelId.ACTUAL_ENERGY, 1_234_500L)) //
+						.output(EssDcCharger.ChannelId.ACTUAL_ENERGY, null)) //
 				.deactivate();
 	}
 
 	@Test
 	public void testInvalidRegistersGiveNoValue() throws Exception {
 		// 0xFFFF on PV1 power must not become 65535 W, and must null the total
-		activate(bridge(3_660, 0xFFFF, 0xFFFF, 0, 0, 0, 0xFFFF, 0xFFFF, 0xFFFF)) //
+		activate(bridge(3_660, 0xFFFF, 0xFFFF, 0, 0, 0, 0xFFFF)) //
 				.next(new TestCase(), 4) //
 				.next(new TestCase() //
 						.output(SrneCharger.ChannelId.PV1_VOLTAGE, 366_000) //
