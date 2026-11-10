@@ -102,6 +102,16 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("State of the daily output-priority schedule (0xE204)")), //
 		MODE_SCHEDULE_TARGET_PRIORITY(Doc.of(OpenemsType.INTEGER) //
 				.text("Output priority the daily schedule wants now (2 SBU, 3 SUB)")), //
+		// Grid-input voltages (0x0213 L1, 0x022A L2, 0x022B L3, 0.1 V), read only when
+		// the mode schedule's SUB-on-battery path is enabled.
+		GRID_VOLTAGE_L1(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Grid-input voltage L1 (0x0213), for the mode schedule's grid-present check")), //
+		GRID_VOLTAGE_L2(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Grid-input voltage L2 (0x022A), for the mode schedule's grid-present check")), //
+		GRID_VOLTAGE_L3(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Grid-input voltage L3 (0x022B), for the mode schedule's grid-present check")), //
+		MODE_SCHEDULE_REASON(Doc.of(ModeScheduleReason.values()) //
+				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC or LOW_SOC")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 

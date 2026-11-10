@@ -37,6 +37,10 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int eveningPriority = 2;
 		private String eveningStart = "18:00";
 		private String daytimeStart = "00:30";
+		private int daytimeSbuAboveSoc = -1;
+		private int daytimeSbuBelowSoc = -1;
+		private int minDwellMinutes = 10;
+		private int gridPresentMinVoltage = -1;
 
 		private Builder() {
 		}
@@ -171,6 +175,26 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setDaytimeStart(String value) {
 			this.daytimeStart = value;
+			return this;
+		}
+
+		public Builder setDaytimeSbuAboveSoc(int value) {
+			this.daytimeSbuAboveSoc = value;
+			return this;
+		}
+
+		public Builder setDaytimeSbuBelowSoc(int value) {
+			this.daytimeSbuBelowSoc = value;
+			return this;
+		}
+
+		public Builder setMinDwellMinutes(int value) {
+			this.minDwellMinutes = value;
+			return this;
+		}
+
+		public Builder setGridPresentMinVoltage(int value) {
+			this.gridPresentMinVoltage = value;
 			return this;
 		}
 
@@ -346,5 +370,25 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public String daytimeStart() {
 		return this.builder.daytimeStart;
+	}
+
+	@Override
+	public int daytimeSbuAboveSoc() {
+		return this.builder.daytimeSbuAboveSoc;
+	}
+
+	@Override
+	public int daytimeSbuBelowSoc() {
+		return this.builder.daytimeSbuBelowSoc;
+	}
+
+	@Override
+	public int minDwellMinutes() {
+		return this.builder.minDwellMinutes;
+	}
+
+	@Override
+	public int gridPresentMinVoltage() {
+		return this.builder.gridPresentMinVoltage;
 	}
 }

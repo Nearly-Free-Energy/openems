@@ -137,6 +137,21 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Daytime start", description = "Local time HH:MM when the daytime output priority starts; must differ from eveningStart.")
 	String daytimeStart() default "00:30";
 
+	// Daytime SoC rule: in SUB the SRNE curtails PV once the battery is nearly full,
+	// so the daytime target becomes SBU above an upper SoC and SUB again below a
+	// lower one (hysteresis). Both -1 = off (default).
+	@AttributeDefinition(name = "Daytime SBU above SoC", description = "In the daytime window, switch to the evening priority (SBU) once SoC is at or above this percent; 10..100 and above daytimeSbuBelowSoc; -1 = off (set both or neither).")
+	int daytimeSbuAboveSoc() default -1;
+
+	@AttributeDefinition(name = "Daytime SBU below SoC", description = "In the daytime window, return to the daytime priority (SUB) once SoC is below this percent; 10..100 and below daytimeSbuAboveSoc; -1 = off (set both or neither).")
+	int daytimeSbuBelowSoc() default -1;
+
+	@AttributeDefinition(name = "Minimum dwell minutes", description = "A SoC-driven mode switch waits at least this many minutes after the last verified switch; 0..1440.")
+	int minDwellMinutes() default 10;
+
+	@AttributeDefinition(name = "Grid present min voltage", description = "Mode schedule: a SUB write (back to the grid) is also allowed while the unit runs on battery (machine state 3) if the grid-input voltage is above this on all three phases for 3 fresh reads; 100..260 V (e.g. 180). Default -1 = off: SUB writes only in state 2 and no grid-voltage reads. Enable only after one supervised live state-3 SUB write. SBU writes always need state 2.")
+	int gridPresentMinVoltage() default -1;
+
 	@AttributeDefinition(name = "Schedule time zone", description = "Time zone used to evaluate the discharge window and the mode schedule against the edge clock.")
 	String scheduleTimeZone() default "Africa/Kampala";
 

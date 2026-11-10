@@ -138,6 +138,7 @@ public class SrneBatteryInverterModeScheduleTest {
 				.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.DISABLED, state(sut));
 		assertNull(target(sut));
+		assertEquals(ModeScheduleReason.UNDEFINED, reason(sut)); // never set
 		assertNull(sut.modeScheduleForTest().queuedTarget());
 		assertFalse(sut.takeModeScheduleWriteForTest());
 		// Default bus traffic unchanged: no SoC read and no second E204 write task.
@@ -256,7 +257,7 @@ public class SrneBatteryInverterModeScheduleTest {
 		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
 		test.next(new TestCase(), CYCLES);
 		assertEquals(SafeWriteHandler.State.QUEUED, sut.modeScheduleForTest().handlerState());
-		assertEquals(1, sut.modeScheduleForTest().attemptsInWindow());
+		assertEquals(0, sut.modeScheduleForTest().failuresInWindow());
 		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
 	}
 
@@ -411,5 +412,118 @@ public class SrneBatteryInverterModeScheduleTest {
 			assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
 			assertFalse(sut.takeModeScheduleWriteForTest());
 		}
+	}
+
+	private static ModeScheduleReason reason(SrneBatteryInverterImpl sut) {
+		Channel<ModeScheduleReason> channel = sut.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_REASON);
+		return channel.value().asEnum();
+	}
+
+	@Test
+	public void testDaytimeHighSocQueuesSbu() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 96);
+		final var clock = clockAt(DAY);
+		final var test = start(sut, bridge, clock,
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		assertEquals(SBU, target(sut));
+		assertEquals(ModeScheduleReason.HIGH_SOC, reason(sut));
+		// The first SoC-driven switch after activation waits the minimum dwell.
+		assertEquals(ModeScheduleState.MIN_DWELL, state(sut));
+		for (var i = 0; i < 3; i++) {
+			clock.leap(4, ChronoUnit.MINUTES); // small steps: no clock-gate reset
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(SBU, sut.modeScheduleForTest().queuedTarget());
+	}
+
+	@Test
+	public void testDaytimeLowSocKeepsSub() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(SUB, MachineState.RUNNING_MAINS_BYPASS), DAY,
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(ModeScheduleReason.LOW_SOC, reason(sut));
+	}
+
+	@Test
+	public void testSocRuleOffReportsWindowReason() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 100);
+		start(sut, bridge, DAY, config().build());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(SUB, target(sut));
+		assertEquals(ModeScheduleReason.WINDOW, reason(sut));
+	}
+
+	@Test
+	public void testInvalidSocRuleMakesConfigInvalid() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(SUB, MachineState.RUNNING_MAINS_BYPASS), DAY,
+				config().setDaytimeSbuAboveSoc(85).setDaytimeSbuBelowSoc(95).build());
+		assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
+		assertFalse(sut.takeModeScheduleWriteForTest());
+	}
+
+	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3), SoC
+	// falls below daytimeSbuBelowSoc. With the grid present on all phases the SUB
+	// write goes out; with the grid absent it does not.
+	private static void sbuThenOnBatteryBelowThreshold(boolean gridPresent, int gridPresentMinVoltage)
+			throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt(DAY);
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 96) //
+				.withRegister(0x0213, 2300) // 230.0 V
+				.withRegisters(0x022A, 2300, 2300);
+		final var test = start(sut, bridge, clock, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85)
+				.setGridPresentMinVoltage(gridPresentMinVoltage).build());
+		for (var i = 0; i < 3; i++) {
+			clock.leap(4, ChronoUnit.MINUTES); // past the dwell from activation
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(SBU, sut.modeScheduleForTest().queuedTarget());
+		deviceWrites(sut, bridge, test, SBU);
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+
+		// The unit leaves the line at E020 and runs on battery; SoC falls to 80 %.
+		bridge.withRegister(0x0210, 3) //
+				.withRegisters(0x0100, 80);
+		if (!gridPresent) {
+			bridge.withRegister(0x0213, 0).withRegisters(0x022A, 0, 0);
+		}
+		for (var i = 0; i < 3; i++) {
+			clock.leap(4, ChronoUnit.MINUTES); // past the dwell from the SBU switch
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(SUB, target(sut));
+		if (gridPresent && gridPresentMinVoltage > 0) {
+			assertTrue(hasTask(sut, false, 0x0213));
+			assertEquals(SUB, sut.modeScheduleForTest().queuedTarget());
+			assertTrue(sut.takeModeScheduleWriteForTest());
+		} else {
+			assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
+			assertNull(sut.modeScheduleForTest().queuedTarget());
+			assertFalse(sut.takeModeScheduleWriteForTest());
+			assertEquals(gridPresentMinVoltage > 0, hasTask(sut, false, 0x0213));
+		}
+	}
+
+	@Test
+	public void testSubWriteOnBatteryWithGridPresent() throws Exception {
+		sbuThenOnBatteryBelowThreshold(true, 180);
+	}
+
+	@Test
+	public void testSubOnBatteryOffByDefaultWaitsForMains() throws Exception {
+		// Default -1: no grid-voltage reads, the state-3 SUB target waits for mains.
+		sbuThenOnBatteryBelowThreshold(true, -1);
+	}
+
+	@Test
+	public void testNoSubWriteOnBatteryWithoutGrid() throws Exception {
+		sbuThenOnBatteryBelowThreshold(false, 180);
 	}
 }
