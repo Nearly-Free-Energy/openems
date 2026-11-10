@@ -743,4 +743,49 @@ public class ModeScheduleTest {
 		assertStep(result, ModeScheduleState.MIN_DWELL, SBU, null);
 		assertStep(socStep(sut, t.plusMinutes(10), 96, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 	}
+
+	// A device that reverts E204 to `other` right after every verified write. Returns
+	// the cycle index of each write made in `cycles` cycles at a fixed time.
+	private static List<Integer> fight(ModeSchedule sut, LocalTime time, int target, int other, int cycles) {
+		List<Integer> writes = new ArrayList<>();
+		for (var i = 0; i < cycles; i++) {
+			var result = step(sut, time, 50, other, true);
+			if (result.write() != null) {
+				assertEquals(target, result.write());
+				sut.onExecute(ExecuteState.OK);
+				sut.verify(target);
+				writes.add(i);
+			}
+		}
+		return writes;
+	}
+
+	@Test
+	public void testRepeatedOverrideBacksOffAndHoldsPerWindow() {
+		var sut = primed();
+		var writes = fight(sut, LocalTime.of(10, 0), SUB, SBU, 2000);
+		// The switch, then 3 re-corrections 60 / 120 / 240 cycles apart.
+		assertEquals(1 + ModeSchedule.MAX_OVERRIDES_PER_WINDOW, writes.size());
+		for (var n = 1; n < writes.size(); n++) {
+			assertEquals(COOLDOWN << (n - 1), writes.get(n) - writes.get(n - 1));
+		}
+		assertStep(step(sut, LocalTime.of(10, 0), 50, SBU, true), ModeScheduleState.OVERRIDDEN, SUB, null);
+		assertStep(step(sut, LocalTime.of(17, 59, 59), 50, SBU, true), ModeScheduleState.OVERRIDDEN, SUB, null);
+		// The next boundary: a fresh override budget.
+		assertEquals(1 + ModeSchedule.MAX_OVERRIDES_PER_WINDOW, fight(sut, LocalTime.of(18, 0), SBU, SUB, 2000).size());
+		assertEquals(2 * (1 + ModeSchedule.MAX_OVERRIDES_PER_WINDOW), sut.writesTodayForTest(DATE));
+	}
+
+	@Test
+	public void testOverridesCannotSpendTheDailyCeiling() {
+		var sut = primed();
+		assertEquals(4, fight(sut, LocalTime.of(0, 10), SBU, SUB, 2000).size()); // night window
+		step(sut, LocalTime.of(0, 29, 59), 50, SUB, true);
+		assertEquals(4, fight(sut, LocalTime.of(0, 30), SUB, SBU, 2000).size()); // day window
+		step(sut, LocalTime.of(17, 59, 59), 50, SBU, true);
+		// Evening: the window switch still goes out, but no more re-corrections today.
+		assertEquals(1, fight(sut, LocalTime.of(18, 0), SBU, SUB, 2000).size());
+		assertStep(step(sut, LocalTime.of(18, 0), 50, SUB, true), ModeScheduleState.OVERRIDDEN, SBU, null);
+		assertTrue(sut.writesTodayForTest(DATE) < ModeSchedule.MAX_DAILY_WRITES);
+	}
 }

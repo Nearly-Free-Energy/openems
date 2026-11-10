@@ -31,7 +31,12 @@ public enum ModeScheduleState implements OptionsEnum {
 	/** The daily ceiling of successful E204 writes is reached; the mode is held. */
 	DAILY_WRITE_LIMIT(9), //
 	/** A SoC-driven switch waits for the minimum dwell after the last switch. */
-	MIN_DWELL(10);
+	MIN_DWELL(10), //
+	/**
+	 * E204 keeps being overridden (panel, app, firmware); the re-correction budget
+	 * is spent, held until the next boundary or SoC-driven target change.
+	 */
+	OVERRIDDEN(11);
 
 	private final int value;
 

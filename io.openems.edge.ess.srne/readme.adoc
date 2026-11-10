@@ -445,7 +445,10 @@ charge window is not touched.
   `0xE204` writes per local day; when reached the mode is held (`DAILY_WRITE_LIMIT`). The budget is refilled only when the local time crosses `eveningStart` or
   `daytimeStart` forward in a small step (at most 5 minutes); a clock jump or a target
   flip does not refill it. A verified value that is
-  overridden later (e.g. on the panel) is corrected with the same backoff and cap.
+  overridden later (panel, app, firmware) is re-corrected with exponential backoff (60,
+  120, 240 cycles), at most 3 times per window and 6 times per local day, so overrides
+  cannot spend the daily ceiling; then `OVERRIDDEN` is held until the next boundary or
+  a SoC-driven target change.
 * One owner of `0xE204`: with the schedule enabled, `outputPriority` must be `-1`.
 * Invalid configuration (a priority other than `2`/`3`, equal priorities, a time that
   is not `HH:MM`, equal times, or `outputPriority` set) turns the schedule off and
@@ -453,7 +456,8 @@ charge window is not touched.
 
 Channels: `ModeScheduleState` (`DISABLED` / `IN_SYNC` / `WRITE_PENDING` /
 `WAITING_FOR_MAINS` / `WRITE_FAILED` / `CONFIG_INVALID` / `WAITING_FOR_DATA` /
-`BLOCKED_SBU_PRECONDITIONS` / `STARTUP_HOLD` / `DAILY_WRITE_LIMIT` / `MIN_DWELL`) and `ModeScheduleTargetPriority` (the value the schedule
+`BLOCKED_SBU_PRECONDITIONS` / `STARTUP_HOLD` / `DAILY_WRITE_LIMIT` / `MIN_DWELL` /
+`OVERRIDDEN`) and `ModeScheduleTargetPriority` (the value the schedule
 wants now).
 
 .*Configuration*:

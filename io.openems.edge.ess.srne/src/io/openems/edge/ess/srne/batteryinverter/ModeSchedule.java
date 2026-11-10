@@ -56,8 +56,11 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * (EEPROM), then the mode is held (DAILY_WRITE_LIMIT),</li>
  * <li>a SoC-driven switch waits until {@code minDwellMinutes} after the last
  * verified switch (MIN_DWELL); window switches at the boundaries do not,</li>
- * <li>a write that verified but is later overridden (e.g. from the panel) is
- * re-corrected with the same backoff and the same per-window cap,</li>
+ * <li>a write that verified but is later overridden (panel, app, firmware) is
+ * re-corrected with exponential backoff, at most
+ * {@link #MAX_OVERRIDES_PER_WINDOW} times per window and
+ * {@link #MAX_OVERRIDES_PER_DAY} times per day; then OVERRIDDEN is held until
+ * the next boundary or a SoC-driven target change,</li>
  * <li>an invalid configuration turns the schedule off.</li>
  * </ul>
  *
@@ -74,6 +77,13 @@ final class ModeSchedule {
 	static final int MAX_ATTEMPTS = 5;
 	/** Successful E204 writes allowed per local day. */
 	static final int MAX_DAILY_WRITES = 12;
+	/** Re-corrections of an overridden E204 allowed per window (same target). */
+	static final int MAX_OVERRIDES_PER_WINDOW = 3;
+	/**
+	 * Re-corrections allowed per local day, leaving headroom in the daily ceiling
+	 * for the window and SoC-driven switches.
+	 */
+	static final int MAX_OVERRIDES_PER_DAY = 6;
 	/** Default minimum dwell after a verified switch, in minutes. */
 	static final int DEFAULT_MIN_DWELL_MINUTES = 10;
 	/** Consecutive fresh verified machine-state reads needed before a write. */
@@ -137,6 +147,10 @@ final class ModeSchedule {
 	private Integer lastSwitchTarget;
 	private LocalDate writesDate;
 	private int writesToday;
+	private Integer overrideTarget;
+	private int overrides;
+	private LocalDate overridesDate;
+	private int overridesToday;
 	private volatile int freshMainsReads;
 	private int cycles;
 	private LocalTime lastNow;
@@ -488,9 +502,15 @@ final class ModeSchedule {
 			this.activatedAt = now;
 		}
 		var target = this.targetFor(now, soc, outputPriority);
+		if (target != null && !target.equals(this.overrideTarget)) {
+			// A new target (boundary or SoC-driven) gets a fresh override budget.
+			this.overrideTarget = target;
+			this.overrides = 0;
+		}
 		if (now != null && this.crossedBoundaryForward(this.lastNow, now.toLocalTime())) {
-			// A boundary was crossed forward: the new window gets a fresh failure budget.
+			// A boundary was crossed forward: the new window gets fresh budgets.
 			this.failures = 0;
+			this.overrides = 0;
 		}
 		this.lastNow = now == null ? null : now.toLocalTime();
 		if (!controlEnabled) {
@@ -534,10 +554,18 @@ final class ModeSchedule {
 			// Failure budget for this window spent: latched until the next boundary.
 			return new Step(ModeScheduleState.WRITE_FAILED, target, null);
 		}
-		if (handlerState == SafeWriteHandler.State.VERIFIED && sameTarget && this.cyclesSinceDone < cooldown) {
-			// Verified, but the cached read-back is stale or was overridden since:
-			// wait out the cooldown before correcting, never a burst.
-			return new Step(ModeScheduleState.WRITE_PENDING, target, null);
+		// Verified, but the read-back differs: stale or overridden (panel, app,
+		// firmware). A re-correction backs off exponentially and is capped per window
+		// and per day, so an override cannot spend the daily ceiling.
+		var reCorrection = handlerState == SafeWriteHandler.State.VERIFIED && sameTarget;
+		if (reCorrection) {
+			if (this.overrides >= MAX_OVERRIDES_PER_WINDOW
+					|| this.overridesOn(now.toLocalDate()) >= MAX_OVERRIDES_PER_DAY) {
+				return new Step(ModeScheduleState.OVERRIDDEN, target, null);
+			}
+			if (this.cyclesSinceDone < backoffCycles(this.overrides + 1, cooldown)) {
+				return new Step(ModeScheduleState.WRITE_PENDING, target, null);
+			}
 		}
 		if (this.isDwelling(now, target)) {
 			return new Step(ModeScheduleState.MIN_DWELL, target, null);
@@ -560,6 +588,11 @@ final class ModeSchedule {
 		this.cyclesSinceDone = 0;
 		this.outcomeCounted = false;
 		this.queuedAt = now;
+		if (reCorrection) {
+			this.overrides++;
+			this.overridesToday = this.overridesOn(now.toLocalDate()) + 1;
+			this.overridesDate = now.toLocalDate();
+		}
 		this.handler = next;
 		this.writeElement.arm(target);
 		return new Step(ModeScheduleState.WRITE_PENDING, target, target);
@@ -588,6 +621,10 @@ final class ModeSchedule {
 				}
 			}
 		}
+	}
+
+	private int overridesOn(LocalDate date) {
+		return date.equals(this.overridesDate) ? this.overridesToday : 0;
 	}
 
 	private int writesOn(LocalDate date) {
