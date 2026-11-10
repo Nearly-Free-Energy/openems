@@ -86,8 +86,8 @@ public class SrneBatteryInverterChargeStopSocTest {
 	@Test
 	public void testWriteQueuedAndVerifiedByReadback() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var bridge = bridge(UNSET, MachineState.RUNNING_MAINS_BYPASS);
-		var test = start(sut, bridge, config(true, 50));
+		final var bridge = bridge(UNSET, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, config(true, 50));
 		assertTrue(hasTask(sut, false, E03B));
 		assertTrue(hasTask(sut, true, E03B));
 		// 4096 (never set) differs from every valid target, so one write of 50 is queued.
@@ -111,8 +111,8 @@ public class SrneBatteryInverterChargeStopSocTest {
 	@Test
 	public void testUnsetMarkerNeverVerifies() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var bridge = bridge(UNSET, MachineState.RUNNING_MAINS_BYPASS);
-		var test = start(sut, bridge, config(true, 50));
+		final var bridge = bridge(UNSET, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, config(true, 50));
 		assertEquals(50, pendingWrite(sut));
 		sut.chargeWindow1StopSocHandlerForTest().onExecute(ExecuteState.OK);
 		// The device still reads 4096 after the write: FAILED, and never retried.
@@ -175,8 +175,8 @@ public class SrneBatteryInverterChargeStopSocTest {
 	@Test
 	public void testUnverifiedMachineStateNeverQueues() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		var bridge = bridge(UNSET, MachineState.INVERTER_POWERED);
-		var test = start(sut, bridge, config(true, 50)) //
+		final var bridge = bridge(UNSET, MachineState.INVERTER_POWERED);
+		final var test = start(sut, bridge, config(true, 50)) //
 				.next(new TestCase(), CYCLES);
 		assertEquals(SafeWriteHandler.State.IDLE, sut.chargeWindow1StopSocHandlerForTest().getState());
 		assertNull(pendingWrite(sut));
