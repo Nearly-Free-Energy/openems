@@ -135,6 +135,33 @@ discharge" result without the positive control proves nothing, because the
 mode itself might suppress scheduled discharge. Nothing in this driver enforces
 that gate; it is a commissioning rule.
 
+*Charge window retry*: a charge-window change (`0xE026/0xE027`, enable `0xE02C`)
+that fails at runtime is retried; a configuration rejection (for example
+`start >= stop`) never is. Seen on site on 11 Nov 2026: the disarm before a window
+change failed silently, the device was left at enable `0` with the old window and no
+night charge ran. Behaviour:
+
+* It applies with `controlEnabled=true` and `chargeScheduleEnable` `0` or `1`. With
+  `-1` the end state would be taken from the `0` the failed disarm left behind, so
+  the window is not retried; set `chargeScheduleEnable` explicitly.
+* A write the bridge never executes fails after 30 cycles (the pending value is
+  withdrawn), like a read-back that does not arrive.
+* Each retry re-opens the window after a backoff of 60, 120, 240, then 480 cycles in
+  `FAILED`, at most 6 retries per local day (`scheduleTimeZone`); the count resets at
+  local midnight. Retries count only while the machine state is verified.
+* The safety invariant is unchanged: after a retry the next step waits until the
+  enable register has been read again, the window registers are written only while
+  that read is `0`, and the enable is raised only after the window reads back
+  correctly. A retry never writes the window of an armed schedule.
+* Channel `ChargeWindowState` shows the charge-window state (`IDLE`, `*_QUEUED`,
+  `*_AWAITING_READBACK`, `*_VERIFIED`, `DONE`, `FAILED`). A warning is logged once per
+  runtime failure, once when the daily retry cap is reached, and once when
+  `chargeScheduleEnable=1` but the device has read enable `0` without progress for
+  more than 30 cycles.
+
+This supersedes the statements in the review notes below that the charge window has
+no queued timeout and no retry.
+
 *Night charge stop SoC (`0xE03B`)*: `chargeWindow1StopSoc` sets the timed-charge
 stop SoC of charge window 1 (`TimedChg1StopSOC`, protocol V1.94+, unit %, valid
 `10..100` here). Intended use: a wide off-peak window `00:00-06:00`
@@ -214,11 +241,12 @@ is not.
   for state 2. Residual risk: how the unit behaves when the schedule is disarmed
   while off-grid is unconfirmed. Before enabling the floor, confirm on the live unit
   which `MachineState` is reported during the 21:00-23:00 discharge.
-* Queued writes: for the rules-managed discharge window only, a schedule write that
-  the bridge never executes fails after 30 cycles (the pending value is withdrawn)
-  and the normal retry takes over. The charge window and a discharge window with both
-  rules off keep the original behaviour: a write queued while the link is down
-  executes when it returns.
+* Queued writes: for the rules-managed discharge window, a schedule write that the
+  bridge never executes fails after 30 cycles (the pending value is withdrawn) and the
+  normal retry takes over. The charge window does the same when it is retried (see
+  "Charge window retry" below). A discharge window with both rules off, and a charge
+  window with `chargeScheduleEnable=-1`, keep the original behaviour: a write queued
+  while the link is down executes when it returns.
 * Threshold validation: `dischargeStartMinSoc` and `dischargeFloorSoc` must be in
   `0..99` (or `-1` = off). A value outside that range is logged as an error and only
   that rule is off. When both are set, `dischargeFloorSoc` must be below
@@ -505,7 +533,7 @@ wants now).
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
 * Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`), `eveningReserveSoc` (int %, default `-1` = off), `eveningReserveFrom` (String `HH:MM`, default `14:00`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
-* TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
+* TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window. A failed charge-window write is retried (bounded, see "Charge window retry") only when `chargeScheduleEnable` is `0` or `1`.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
 

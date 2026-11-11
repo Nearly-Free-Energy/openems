@@ -23,8 +23,9 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * disarm &rarr; verify-disabled &rarr; window write &rarr; verify-window
  * &rarr; re-arm. A live enabled window is never mutated in place; a failed or
  * mismatched write leaves the schedule disabled (the safe resting state) and is
- * never retried by this class itself; only an explicit {@link #reopen()} by the
- * caller (the discharge rules, see the component) starts a new attempt.
+ * never retried by this class itself; only an explicit {@link #reopen()} or
+ * {@link #retry()} by the caller (the discharge rules and the charge-window
+ * retry, see the component) starts a new attempt.
  *
  * <p>The desired end enable state is captured when a sequence starts and, for an
  * explicit {@code enable=0}/{@code 1}, refreshed from config at each later step of
@@ -101,6 +102,10 @@ final class ScheduleWindow {
 	private boolean rejected;
 	private boolean queuedTimeout;
 	private boolean staleEnableExecutePending;
+	// Set by retry(): the next sequence may only start from an enable value that was
+	// read after the retry, never from a read taken before the failure.
+	private boolean awaitingFreshEnable;
+	private Integer freshEnable;
 
 	ScheduleWindow(int startAddress, int enableAddress, String label) {
 		this.label = label;
@@ -112,8 +117,9 @@ final class ScheduleWindow {
 	/**
 	 * Enables or disables the bound on how long a write may stay queued. Off by
 	 * default: a write queued while the link is down then executes when it returns,
-	 * exactly as before the discharge rules existed. Only the rules-managed
-	 * discharge window turns it on, because only it is retried after a failure.
+	 * exactly as before the discharge rules existed. Only a window that is retried
+	 * after a failure turns it on (the rules-managed discharge window and the
+	 * explicitly enabled or disabled charge window).
 	 *
 	 * @param enabled true to fail and withdraw a write that stays queued too long
 	 */
@@ -246,6 +252,15 @@ final class ScheduleWindow {
 		// and, when a window is managed, the current window before deciding anything.
 		if (actualEnable == null || (windowManaged && (actualStart == null || actualStop == null))) {
 			return null;
+		}
+		// After a retry, wait until the enable has been read again and the cycle sees
+		// that read, so a pre-failure value can never let the window be written.
+		if (this.awaitingFreshEnable) {
+			if (this.freshEnable == null || !this.freshEnable.equals(actualEnable)) {
+				return null;
+			}
+			this.awaitingFreshEnable = false;
+			this.freshEnable = null;
 		}
 		// Capture the desired end enable state ONCE: an explicit 0/1 is the target;
 		// -1 (unmanaged) keeps whatever the device currently is, so a window change on
@@ -393,6 +408,9 @@ final class ScheduleWindow {
 		if (actual == null) {
 			return;
 		}
+		if (this.awaitingFreshEnable) {
+			this.freshEnable = actual;
+		}
 		switch (this.state) {
 		case DISABLE_AWAITING_READBACK ->
 			// disarm verified -> re-enter convergence (window write / re-arm / done)
@@ -494,6 +512,24 @@ final class ScheduleWindow {
 			return false;
 		}
 		this.state = State.IDLE;
+		return true;
+	}
+
+	/**
+	 * Re-opens a window that failed at runtime (never a configuration rejection),
+	 * like {@link #reopen()}, and holds the next sequence until the enable register
+	 * has been read again. The retried sequence therefore decides from a read taken
+	 * after the failure: the window is still only written while that read is 0.
+	 *
+	 * @return true if the failed window was re-opened
+	 */
+	public synchronized boolean retry() {
+		if (!this.isRetryableFailure()) {
+			return false;
+		}
+		this.reopen();
+		this.awaitingFreshEnable = true;
+		this.freshEnable = null;
 		return true;
 	}
 

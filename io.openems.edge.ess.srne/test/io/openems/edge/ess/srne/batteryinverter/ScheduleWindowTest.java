@@ -780,4 +780,41 @@ public class ScheduleWindowTest {
 		sut.onEnableExecute(ExecuteState.OK);
 		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
 	}
+
+	@Test
+	void retryWaitsForAFreshEnableReadBeforeTheNextStep() {
+		var sut = newDischargeWindow();
+		// Disarmed device with a stale window: the window write fails.
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		sut.onStartExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertTrue(sut.isRetryableFailure());
+
+		assertTrue(sut.retry());
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+		// The cached enable (0) predates the retry: nothing is written.
+		assertNull(sut.reconcile(0, 0, 0, 4608, 5947, 1));
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		// A fresh read says the device is armed; the stale 0 still must not pass.
+		sut.verifyEnable(1);
+		assertNull(sut.reconcile(0, 0, 0, 4608, 5947, 1));
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+		// Once the cycle sees the fresh 1, the retry disarms first.
+		assertNotNull(sut.reconcile(0, 0, 1, 4608, 5947, 1));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.stopWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void retryIsRefusedForARejectionAndOutsideFailed() {
+		var sut = newDischargeWindow();
+		assertFalse(sut.retry());
+		sut.reconcile(0, 0, 0, 5947, 4608, 1);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertFalse(sut.isRetryableFailure());
+		assertFalse(sut.retry());
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+	}
 }
