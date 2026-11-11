@@ -72,7 +72,8 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 				.activate(config);
 	}
 
-	// Steps one cycle at a time; returns the cycles needed to reach the state, or -1.
+	// Steps one cycle at a time; returns the cycles needed to reach the state, or
+	// -1.
 	private static int cyclesUntil(ComponentTest test, SrneBatteryInverterImpl sut, State state, int max)
 			throws Exception {
 		for (var i = 1; i <= max; i++) {
