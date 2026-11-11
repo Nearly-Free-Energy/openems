@@ -13,7 +13,12 @@ public enum ModeScheduleReason implements OptionsEnum {
 	/** Daytime, SoC rule active, battery high: SBU so PV is not curtailed. */
 	HIGH_SOC(1), //
 	/** Daytime, SoC rule active, battery not high: the daytime priority. */
-	LOW_SOC(2);
+	LOW_SOC(2), //
+	/**
+	 * Daytime, between eveningReserveFrom and eveningStart, SoC below
+	 * eveningReserveSoc: the daytime priority so the battery charges for the peak.
+	 */
+	EVENING_RESERVE(3);
 
 	private final int value;
 

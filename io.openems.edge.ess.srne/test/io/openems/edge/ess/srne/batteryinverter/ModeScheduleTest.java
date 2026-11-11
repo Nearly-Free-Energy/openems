@@ -889,4 +889,125 @@ public class ModeScheduleTest {
 		assertNotNull(
 				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, 261).getInvalidReason());
 	}
+
+	// ---- Evening reserve (SoC rule 95 / 85, reserve 90 % from 14:00 to 18:00) ----
+
+	private static ModeSchedule reserveSchedule() {
+		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, "14:00");
+	}
+
+	// Past the startup hold and the dwell from activation (at 10:00), device in SBU at
+	// 88 % (seeded high).
+	private static ModeSchedule primedReserve() {
+		var sut = reserveSchedule();
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			assertEquals(ModeScheduleState.IN_SYNC, step(sut, DAY, 88, SBU, true).state());
+		}
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		return sut;
+	}
+
+	@Test
+	public void testEveningReserveValidation() {
+		assertNull(reserveSchedule().getInvalidReason());
+		assertTrue(reserveSchedule().isEveningReserveActive());
+		assertFalse(socSchedule().isEveningReserveActive());
+		assertFalse(defaults().isEveningReserveActive());
+		for (var bad : new int[] { 0, 19, 101 }) {
+			assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, bad, "14:00")
+					.getInvalidReason(), "" + bad);
+		}
+		for (var bad : new String[] { null, "2pm", "18:00", "19:00", "00:10" }) {
+			assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, bad)
+					.getInvalidReason(), "" + bad);
+		}
+		assertNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 20, "00:30")
+				.getInvalidReason());
+		assertNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, -1, "nonsense")
+				.getInvalidReason());
+	}
+
+	@Test
+	public void testReserveWindowBoundaries() {
+		var sut = reserveSchedule();
+		assertFalse(sut.isInReserveWindow(LocalTime.of(13, 59, 59)));
+		assertTrue(sut.isInReserveWindow(LocalTime.of(14, 0)));
+		assertTrue(sut.isInReserveWindow(LocalTime.of(17, 59, 59)));
+		assertFalse(sut.isInReserveWindow(LocalTime.of(18, 0)));
+		assertFalse(sut.isInReserveWindow(LocalTime.of(0, 0)));
+		assertFalse(socSchedule().isInReserveWindow(LocalTime.of(15, 0)));
+
+		var primed = primedReserve();
+		assertEquals(SBU, primed.targetFor(at(LocalTime.of(13, 59, 59)), 88, SBU));
+		assertEquals(ModeScheduleReason.HIGH_SOC, primed.reason());
+		assertEquals(SUB, primed.targetFor(at(LocalTime.of(14, 0)), 88, SBU));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, primed.reason());
+		assertEquals(SUB, primed.targetFor(at(LocalTime.of(17, 59, 59)), 88, SUB));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, primed.reason());
+		assertEquals(SBU, primed.targetFor(at(LocalTime.of(18, 0)), 88, SUB));
+		assertEquals(ModeScheduleReason.WINDOW, primed.reason());
+	}
+
+	@Test
+	public void testReserveAndTheSocRuleHysteresis() {
+		var sut = primedReserve();
+		var t = at(LocalTime.of(15, 0));
+		// Below the reserve: SUB, even though the SoC rule was high.
+		assertEquals(SUB, sut.targetFor(t, 89, SBU));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, sut.reason());
+		// Unreadable SoC keeps the reserve decision.
+		assertEquals(SUB, sut.targetFor(t, null, SUB));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, sut.reason());
+		// Back at the reserve: the normal SoC rule, which must reach 95 % again.
+		assertEquals(SUB, sut.targetFor(t, 90, SUB));
+		assertEquals(ModeScheduleReason.LOW_SOC, sut.reason());
+		assertEquals(SUB, sut.targetFor(t, 94, SUB));
+		assertEquals(SBU, sut.targetFor(t, 95, SUB));
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		// In the band above the reserve the SoC rule holds SBU.
+		assertEquals(SBU, sut.targetFor(t, 91, SBU));
+		// Dropping below the reserve overrides it again.
+		assertEquals(SUB, sut.targetFor(t, 89, SBU));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, sut.reason());
+	}
+
+	@Test
+	public void testReserveOffByDefaultKeepsTheSocRule() {
+		var sut = primedSoc();
+		var t = at(LocalTime.of(15, 0));
+		assertEquals(SBU, sut.targetFor(t, 96, SUB));
+		for (var soc : new int[] { 89, 86, 85 }) {
+			assertEquals(SBU, sut.targetFor(t, soc, SBU));
+			assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		}
+	}
+
+	@Test
+	public void testReserveWritesSubAtTwoAndTheEveningSwitchIsNotHeld() {
+		var sut = primedReserve();
+		// 14:00 at 88 %: the reserve switch to SUB goes out (SoC-driven, the dwell from
+		// activation at 10:00 has passed).
+		var two = at(LocalTime.of(14, 0));
+		assertStep(socStep(sut, two, 88, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		verified(sut, two, SUB, 88);
+		// 17:59: still below the reserve, SUB held.
+		assertStep(socStep(sut, at(LocalTime.of(17, 59)), 89, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
+		// 18:00: the evening switch goes out at once, not held by the dwell.
+		assertStep(socStep(sut, at(LocalTime.of(18, 0)), 89, SUB, true), ModeScheduleState.WRITE_PENDING, SBU,
+				SBU);
+		assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+	}
+
+	@Test
+	public void testReserveSwitchIsSocDrivenAndWaitsTheDwell() {
+		var sut = primedReserve();
+		var t = at(LocalTime.of(15, 0));
+		// 95 %: SBU (from SUB) at 15:00.
+		assertStep(socStep(sut, t, 95, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
+		verified(sut, t, SBU, 95);
+		// Five minutes later at 89 %: the reserve wants SUB but waits the dwell.
+		assertStep(socStep(sut, t.plusMinutes(5), 89, SBU, true), ModeScheduleState.MIN_DWELL, SUB, null);
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, sut.reason());
+		assertStep(socStep(sut, t.plusMinutes(11), 89, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+	}
 }

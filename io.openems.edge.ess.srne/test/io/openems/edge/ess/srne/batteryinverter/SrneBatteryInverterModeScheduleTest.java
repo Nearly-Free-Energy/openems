@@ -526,4 +526,33 @@ public class SrneBatteryInverterModeScheduleTest {
 	public void testNoSubWriteOnBatteryWithoutGrid() throws Exception {
 		sbuThenOnBatteryBelowThreshold(false, 180);
 	}
+
+	@Test
+	public void testEveningReserveWritesSub() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-10T12:00:00Z"); // 15:00 local, in the reserve window
+		final var bridge = bridge(SBU, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 88);
+		final var test = start(sut, bridge, clock, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85)
+				.setEveningReserveSoc(90).build());
+		assertEquals(SUB, target(sut));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, reason(sut));
+		for (var i = 0; i < 3; i++) {
+			clock.leap(4, ChronoUnit.MINUTES); // past the dwell from activation
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(SUB, sut.modeScheduleForTest().queuedTarget());
+	}
+
+	@Test
+	public void testEveningReserveOffByDefault() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(SBU, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 88);
+		start(sut, bridge, "2026-11-10T12:00:00Z",
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).build());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(SBU, target(sut));
+		assertEquals(ModeScheduleReason.HIGH_SOC, reason(sut));
+	}
 }
