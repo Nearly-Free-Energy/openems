@@ -99,6 +99,8 @@ final class ModeSchedule {
 	 * gateway enables it after one supervised live state-3 SUB write.
 	 */
 	static final int DEFAULT_GRID_PRESENT_MIN_VOLTAGE = -1;
+	/** Default start of the evening-reserve window ("HH:MM", local). */
+	static final String DEFAULT_EVENING_RESERVE_FROM = "14:00";
 	/** Cycles after activation without any schedule write (about 5 minutes). */
 	static final int STARTUP_HOLD_CYCLES = 300;
 	/**
@@ -134,7 +136,10 @@ final class ModeSchedule {
 	}
 
 	private final boolean enabled;
-	private final String invalidReason;
+	// Set once while building (fromConfig), never changed afterwards.
+	private String invalidReason;
+	private int eveningReserveSoc = -1;
+	private LocalTime eveningReserveFrom;
 	private final int daytimePriority;
 	private final int eveningPriority;
 	private final LocalTime eveningStart;
@@ -151,6 +156,7 @@ final class ModeSchedule {
 	private int failures;
 	private boolean outcomeCounted;
 	private boolean highSoc;
+	private boolean reserveActive;
 	private boolean socStateSeeded;
 	private LocalDateTime activatedAt;
 	private LocalDateTime queuedAt;
@@ -248,6 +254,58 @@ final class ModeSchedule {
 	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
 			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
 			int gridPresentMinVoltage) {
+		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart,
+				staticOutputPriority, sbuAboveSoc, sbuBelowSoc, minDwellMinutes, gridPresentMinVoltage, -1,
+				DEFAULT_EVENING_RESERVE_FROM);
+	}
+
+	/**
+	 * Builds and validates a schedule from configuration values, including the
+	 * evening reserve.
+	 *
+	 * @param enabled               modeScheduleEnabled
+	 * @param daytimePriority       E204 value by day (2 or 3)
+	 * @param eveningPriority       E204 value in the evening (2 or 3, not the
+	 *                              daytime value)
+	 * @param eveningStart          "HH:MM" start of the evening priority
+	 * @param daytimeStart          "HH:MM" start of the daytime priority
+	 * @param staticOutputPriority  the static outputPriority target (-1 = unset)
+	 * @param sbuAboveSoc           daytimeSbuAboveSoc (-1 = SoC rule off)
+	 * @param sbuBelowSoc           daytimeSbuBelowSoc (-1 = SoC rule off)
+	 * @param minDwellMinutes       minimum dwell after a verified switch
+	 * @param gridPresentMinVoltage grid voltage (V) for a SUB write on battery;
+	 *                              -1 = SUB writes only in state 2
+	 * @param eveningReserveSoc     eveningReserveSoc (-1 = off, else 20..100)
+	 * @param eveningReserveFrom    "HH:MM" start of the reserve window, which
+	 *                              ends at eveningStart
+	 * @return the schedule; check {@link #getInvalidReason()}
+	 */
+	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
+			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
+			int gridPresentMinVoltage, int eveningReserveSoc, String eveningReserveFrom) {
+		var schedule = build(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart,
+				staticOutputPriority, sbuAboveSoc, sbuBelowSoc, minDwellMinutes, gridPresentMinVoltage);
+		if (!enabled || schedule.invalidReason != null || eveningReserveSoc == -1) {
+			return schedule;
+		}
+		var from = parseTime(eveningReserveFrom);
+		if (eveningReserveSoc < 20 || eveningReserveSoc > 100) {
+			schedule.invalidReason = "eveningReserveSoc [" + eveningReserveSoc + "] must be 20..100 or -1";
+		} else if (from == null) {
+			schedule.invalidReason = "eveningReserveFrom [" + eveningReserveFrom + "] must be HH:MM";
+		} else if (schedule.isEvening(from) || from.equals(schedule.eveningStart)) {
+			schedule.invalidReason = "eveningReserveFrom [" + eveningReserveFrom
+					+ "] must be in the daytime window, before eveningStart";
+		} else {
+			schedule.eveningReserveSoc = eveningReserveSoc;
+			schedule.eveningReserveFrom = from;
+		}
+		return schedule;
+	}
+
+	private static ModeSchedule build(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
+			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
+			int gridPresentMinVoltage) {
 		if (!enabled) {
 			return new ModeSchedule(false, null, daytimePriority, eveningPriority, null, null, -1, -1,
 					minDwellMinutes, -1);
@@ -296,6 +354,27 @@ final class ModeSchedule {
 			return "the daytime SoC rule needs eveningPriority 2 (SBU)";
 		}
 		return null;
+	}
+
+	boolean isEveningReserveActive() {
+		return this.eveningReserveSoc >= 0;
+	}
+
+	/**
+	 * Whether a local time is in the evening-reserve window, from
+	 * eveningReserveFrom (inclusive) to eveningStart (exclusive).
+	 *
+	 * @param time the local time
+	 * @return true inside the window; always false while the reserve is off
+	 */
+	boolean isInReserveWindow(LocalTime time) {
+		if (!this.isEveningReserveActive()) {
+			return false;
+		}
+		if (this.eveningReserveFrom.isBefore(this.eveningStart)) {
+			return !time.isBefore(this.eveningReserveFrom) && time.isBefore(this.eveningStart);
+		}
+		return !time.isBefore(this.eveningReserveFrom) || time.isBefore(this.eveningStart);
 	}
 
 	boolean isSocRuleActive() {
@@ -522,14 +601,33 @@ final class ModeSchedule {
 			return null;
 		}
 		var time = now.toLocalTime();
-		if (this.isEvening(time) || !this.isSocRuleActive()) {
+		var socUsable = soc != null && soc >= 0 && soc <= 100;
+		if (this.isEvening(time)) {
 			// Each day starts again in the daytime priority.
 			this.highSoc = false;
 			this.socStateSeeded = true;
+			this.reserveActive = false;
 			this.reason = ModeScheduleReason.WINDOW;
 			return this.targetAt(time);
 		}
-		var socUsable = soc != null && soc >= 0 && soc <= 100;
+		if (!this.isInReserveWindow(time)) {
+			this.reserveActive = false;
+		} else if (socUsable) {
+			// An unreadable SoC keeps the reserve decision.
+			this.reserveActive = soc < this.eveningReserveSoc;
+		}
+		if (this.reserveActive) {
+			// Evening reserve: the daytime priority, so the sun charges the battery for
+			// the peak. The SoC rule has to reach its upper threshold again afterwards.
+			this.highSoc = false;
+			this.socStateSeeded = true;
+			this.reason = ModeScheduleReason.EVENING_RESERVE;
+			return this.daytimePriority;
+		}
+		if (!this.isSocRuleActive()) {
+			this.reason = ModeScheduleReason.WINDOW;
+			return this.targetAt(time);
+		}
 		if (!this.socStateSeeded && socUsable && outputPriority != null) {
 			this.highSoc = (outputPriority == this.eveningPriority && soc >= this.sbuBelowSoc)
 					|| soc >= this.sbuAboveSoc;
