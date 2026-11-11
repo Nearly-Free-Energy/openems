@@ -108,7 +108,9 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 		assertEquals(1, sut.chargeRetriesTodayForTest());
 		assertEquals(0, window.queuedEnable());
 
-		// Disarm lands and reads back 0: only now the window is queued.
+		// Disarm lands and reads back 0: only now the window is queued. The bridge
+		// takes the queued value before it executes (the dummy bridge does not).
+		assertEquals(0, window.enableWriteElement().getNextWriteValueAndReset()[0].getValue());
 		window.onEnableExecute(ExecuteState.OK);
 		bridge.withRegisters(0xE02C, 0);
 		assertTrue(cyclesUntil(test, sut, State.WINDOW_QUEUED, CYCLES) > 0);
@@ -116,6 +118,8 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 		assertNull(window.enableWriteElement().getNextWriteValueAndReset());
 
 		// Window lands and reads back correctly: only now the arm is queued.
+		assertEquals(START, window.startWriteElement().getNextWriteValueAndReset()[0].getValue());
+		assertEquals(STOP, window.stopWriteElement().getNextWriteValueAndReset()[0].getValue());
 		window.onStartExecute(ExecuteState.OK);
 		window.onStopExecute(ExecuteState.OK);
 		bridge.withRegisters(0xE026, START, STOP);
@@ -136,17 +140,16 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 		// does not reach the window in time, so it fails silently. It must be retried.
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge();
-		var test = start(sut, bridge, clock(), config().build()) //
+		final var test = start(sut, bridge, clock(), config().build()) //
 				.next(new TestCase(), CYCLES);
-		var window = sut.chargeWindowForTest();
-		window.onEnableExecute(new ExecuteState.Error(new RuntimeException("response timeout")));
+		sut.chargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("response timeout")));
 		bridge.withRegisters(0xE02C, 0);
-		assertEquals(State.FAILED, window.getState());
+		assertEquals(State.FAILED, sut.chargeWindowForTest().getState());
 
 		// The retry reads enable=0 afresh and goes straight to the window write.
 		assertTrue(cyclesUntil(test, sut, State.WINDOW_QUEUED, MAX_RETRY_CYCLES) > 0);
 		assertEquals(1, sut.chargeRetriesTodayForTest());
-		assertEquals(STOP, window.queuedStop());
+		assertEquals(STOP, sut.chargeWindowForTest().queuedStop());
 	}
 
 	@Test
@@ -189,7 +192,6 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 		var clock = clock();
 		var test = start(sut, bridge(), clock, config().build()) //
 				.next(new TestCase(), CYCLES);
-		var window = sut.chargeWindowForTest();
 
 		// Every attempt's disarm stays unexecuted and times out.
 		for (var attempt = 1; attempt <= SrneBatteryInverterImpl.MAX_CHARGE_RETRIES_PER_DAY; attempt++) {
@@ -201,6 +203,7 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 
 		// Capped: no further attempt on the same day, and nothing left queued.
 		test.next(new TestCase(), 3 * MAX_RETRY_CYCLES);
+		var window = sut.chargeWindowForTest();
 		assertEquals(State.FAILED, window.getState());
 		assertEquals(SrneBatteryInverterImpl.MAX_CHARGE_RETRIES_PER_DAY, sut.chargeRetriesTodayForTest());
 		assertNull(window.enableWriteElement().getNextWriteValueAndReset());

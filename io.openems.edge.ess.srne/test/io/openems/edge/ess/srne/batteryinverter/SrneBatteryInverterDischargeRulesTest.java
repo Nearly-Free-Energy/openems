@@ -586,7 +586,24 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	@Test
-	public void testChargeWindowWriteStaysQueuedWhileTheLinkIsSlow() throws Exception {
+	public void testUnmanagedChargeWindowWriteStaysQueuedWhileTheLinkIsSlow() throws Exception {
+		// chargeScheduleEnable=-1 is not retried, so its queued write is never withdrawn.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0xE026, 0, 0);
+		var config = config(75, 45).setChargeWindow1Start(START).setChargeWindow1Stop(STOP)
+				.setChargeScheduleEnable(-1).build();
+		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.chargeWindowForTest().getState());
+		test.next(new TestCase(), 3 * RETRY_CYCLES);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.chargeWindowForTest().getState());
+	}
+
+	@Test
+	public void testManagedChargeWindowWriteStuckInQueuedIsWithdrawnAndQueuedAgain() throws Exception {
+		// With an explicit enable the charge window is retried, so a write the bridge
+		// never executes fails after the queued timeout and is queued again.
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(80, MachineState.RUNNING_MAINS_BYPASS) //
 				.withRegisters(0xE026, 0, 0);
@@ -594,9 +611,16 @@ public class SrneBatteryInverterDischargeRulesTest {
 				.setChargeScheduleEnable(0).build();
 		var test = start(sut, bridge, clockAt("2026-01-10T18:05:00Z"), config) //
 				.next(new TestCase(), CYCLES);
-		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.chargeWindowForTest().getState());
-		test.next(new TestCase(), 3 * RETRY_CYCLES);
-		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.chargeWindowForTest().getState());
+		var window = sut.chargeWindowForTest();
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, window.getState());
+		var sawFailed = false;
+		for (var i = 0; i < 3 * RETRY_CYCLES && !(sawFailed && window.getState() == State.WINDOW_QUEUED); i++) {
+			test.next(new TestCase());
+			sawFailed |= window.getState() == State.FAILED;
+		}
+		assertTrue(sawFailed);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, window.getState());
+		assertEquals(1, sut.chargeRetriesTodayForTest());
 	}
 
 	@Test
