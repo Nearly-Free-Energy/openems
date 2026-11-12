@@ -507,36 +507,53 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
 * The night value (`nightChargePriority`, default `2`) applies from `nightChargeFrom`
   (inclusive, default `00:00`) to `nightChargeTo` (exclusive, default `06:00`),
   crossing midnight when needed; the day value (`dayChargePriority`, default `3`) the
-  rest of the day. The target switches exactly at the window start and stop: never
-  earlier into the night value (that would let the grid charge before the window) and
-  never later back to it. The night-charge timer (charge window 1, `0xE026`/`0xE027`
-  with `chargeScheduleEnable` and the stop SoC `0xE03B`) needs the night value while
-  it runs, so set `nightChargeFrom` at or before the timer start and `nightChargeTo` at
-  or after the timer stop; a timer outside the night window logs a warning at
-  activation.
+  rest of the day. The target switches exactly at the window start and stop. The night
+  value is never written before `nightChargeFrom`: it needs state `2` (on the line),
+  where hybrid would charge immediately.
+* Night-charge timer (charge window 1, `0xE026`/`0xE027` with `chargeScheduleEnable`
+  and the stop SoC `0xE03B`): it needs the night value while it runs. Start the timer
+  at least 5 minutes after `nightChargeFrom` (e.g. night window `00:00`-`06:00`,
+  timer `00:05`-`06:00`), so the night value is written before the timer starts.
+  Whether the SRNE re-evaluates `0xE20F` during a running timer, or only at its start,
+  is not live-verified. A timer outside the night window, or one starting less than 5
+  minutes after `nightChargeFrom`, logs a warning at activation.
 * Written only on change: while in sync, two writes a day. Each write goes through its
   own guarded write element and a `SafeWriteHandler` and is read-back verified, with
-  the same gates as the output-priority schedule: `controlEnabled=true`, machine state
-  `2` (mains) confirmed by 3 fresh reads (a write still queued when mains is lost is
-  withdrawn), the clock plausibility gate (build-time floor, 60 steady cycles), no
-  write in the first 300 cycles after activation, at most 5 failed writes per window
-  with exponential backoff (refilled only when the local time crosses
-  `nightChargeFrom` or `nightChargeTo` forward in a small step), at most 6 successful
-  `0xE20F` writes per local day, and an overridden value (panel, app) re-corrected at
-  most 2 times per window and 3 times per day (`OVERRIDDEN`).
-* Machine-state gate at the window edges. A write needs state `2`. If the unit runs
-  on battery (SBU, state `3`) at `nightChargeFrom`, the night value waits
-  (`WAITING_FOR_MAINS`) until the unit is on the line, e.g. when the output-priority
-  schedule switches `0xE204` to SUB at `daytimeStart` (the SUB write in state `3`
-  needs `gridPresentMinVoltage`) or when SoC reaches `switchToLineSoc`; the night
-  charge starts from then. Until it lands the day value stays, so the grid does not
-  charge (safe direction; only night-charge time is lost). To have the night value
-  in place at the window start, run the unit on the line at that time, e.g.
-  `daytimeStart` equal to `nightChargeFrom`. At `nightChargeTo` the unit is normally
-  on the line (SUB); if it is on battery the day value waits for the line, and while
-  on battery the mains does not charge. On the transfer to the line at
-  `switchToLineSoc` the write follows within 3 fresh state-2 reads (seconds).
-  `0xE20F` is never written in state `3`.
+  `controlEnabled=true` and the clock plausibility gate (build-time floor, 60 steady
+  cycles).
+* The two directions are gated differently, because only the night value can let the
+  grid charge:
+  ** Night value (permissive): the same gates as the output-priority schedule.
+     Machine state `2` confirmed by 3 fresh reads (a queued write is withdrawn if mains
+     is lost), no write in the first 300 cycles after activation, at most 5 failed
+     writes per window with exponential backoff (refilled only when the local time
+     crosses `nightChargeFrom` or `nightChargeTo` forward in a small step, else
+     `WRITE_FAILED` is latched), at most 6 successful writes per local day, and an
+     overridden value re-corrected at most 2 times per window and 3 times per day
+     (`OVERRIDDEN`).
+  ** Day value (safe direction, mains does not charge), like the discharge-schedule
+     disarm: also written while running on battery (state `3`, 3 fresh reads of state
+     `2` or `3`; a queued write is withdrawn in any other state), so it is in place
+     before a transfer to the line at `switchToLineSoc`. Failures and overrides never
+     latch: retries back off 60, 120, 240, then every 480 cycles (about 8 minutes).
+     Its own budget of 24 successful writes per local day protects the settings
+     memory (`DAILY_WRITE_LIMIT`). Startup hold of 30 cycles only. If the clock stays
+     unknown for 300 cycles (e.g. a reboot without NTP), the target becomes the day
+     value. A day write in state `3` has not yet been done on a live unit: do one
+     supervised write before relying on it.
+* What can still delay a value. The night value waits (`WAITING_FOR_MAINS`) while the
+  unit runs on battery (SBU, state `3`) at `nightChargeFrom`, until it is on the line:
+  when SoC reaches `switchToLineSoc`, or when the output-priority schedule switches
+  `0xE204` to SUB at `daytimeStart`. That SUB write happens in state `3` only with
+  `gridPresentMinVoltage` set; otherwise it also waits for state `2`. So
+  `daytimeStart` equal to `nightChargeFrom` brings the unit onto the line at the
+  window start only together with `gridPresentMinVoltage`. Until the night value
+  lands the day value stays (no grid charge; night-charge time is lost). Channel
+  `ChargePriorityNightLate` is `true` once the night value is still missing 10 minutes
+  into the night window, with a warning in the log.
+* Turning the schedule off, or removing the component, leaves `0xE20F` at its last
+  value; if that happens in the night window it stays at the night value. Set it by
+  hand (or turn the schedule back on) in that case.
 * `0xE20F` is read and written only while the schedule is active; default bus traffic
   is unchanged. The register mapping (`0`..`3`) is the SRNE protocol's; the first
   write on site should be supervised and read back, like `0xE204` was.
@@ -545,8 +562,10 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
   `CONFIG_INVALID`.
 
 Channels: `ChargePriority` (`0xE20F` read-back), `ChargePriorityScheduleState` (the
-`ModeScheduleState` values; `BLOCKED_SBU_PRECONDITIONS` and `MIN_DWELL` do not occur)
-and `ChargePriorityScheduleTarget` (the value the schedule wants now).
+`ModeScheduleState` values; `BLOCKED_SBU_PRECONDITIONS` and `MIN_DWELL` do not occur;
+`WAITING_FOR_MAINS` means the machine-state gate of the due direction is closed),
+`ChargePriorityScheduleTarget` (the value the schedule wants now) and
+`ChargePriorityNightLate`.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)

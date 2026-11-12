@@ -7,7 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.time.LocalTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 
 import org.junit.jupiter.api.Test;
 
@@ -153,18 +155,104 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 	}
 
 	@Test
-	public void testDayWriteWaitsForMains() throws Exception {
+	public void testDayWriteOnBattery() throws Exception {
+		// SBU on battery (state 3) by day with hybrid set: the day value goes out
+		// without waiting for the line, so a transfer at E01F finds PV only.
 		var sut = new SrneBatteryInverterImpl();
-		final var bridge = bridge(HYBRID, MachineState.SOFT_START);
-		final var test = start(sut, bridge, DAY, config().build());
-		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
+		start(sut, bridge(HYBRID, MachineState.SOFT_START), DAY, config().build());
+		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
 		assertEquals(PV_ONLY, target(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testNightWriteWaitsForMains() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(PV_ONLY, MachineState.SOFT_START);
+		final var test = start(sut, bridge, NIGHT, config().build());
+		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
+		assertEquals(HYBRID, target(sut));
 		assertFalse(sut.takeChargePriorityWriteForTest());
 
 		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
 		test.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
 		assertTrue(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testFaultBlocksBothDirections() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(HYBRID, MachineState.FAULT), DAY, config().build());
+		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testBoundariesThroughTheTaskList() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(PV_ONLY, MachineState.RUNNING_MAINS_BYPASS);
+		// 20:58Z is 23:58 Kampala.
+		final var clock = new TimeLeapClock(Instant.parse("2026-11-11T20:58:00Z"), ZoneOffset.UTC);
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(config().build()) //
+				.next(new TestCase(), START_CYCLES);
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		// 23:59:00 and 23:59:59: no write before 00:00:00.
+		clock.leap(60, ChronoUnit.SECONDS);
+		test.next(new TestCase(), CYCLES);
+		clock.leap(59, ChronoUnit.SECONDS);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(PV_ONLY, target(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+		// 00:00:00: the night value is queued in that cycle.
+		clock.leap(1, ChronoUnit.SECONDS);
+		test.next(new TestCase());
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		assertEquals(Integer.valueOf(HYBRID), sut.chargePriorityScheduleForTest().targetAt(LocalTime.MIDNIGHT));
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, HYBRID);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		// Through the night in 5-minute steps (a steady clock) to 05:59:59.
+		for (var i = 0; i < 71; i++) {
+			clock.leap(5, ChronoUnit.MINUTES);
+			test.next(new TestCase());
+		}
+		clock.leap(4 * 60 + 59, ChronoUnit.SECONDS);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(HYBRID, target(sut));
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+		// 06:00:00: the day value is queued in that cycle.
+		clock.leap(1, ChronoUnit.SECONDS);
+		test.next(new TestCase());
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		test.next(new TestCase());
+		assertEquals(PV_ONLY, target(sut));
+	}
+
+	@Test
+	public void testNightLateChannel() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = new TimeLeapClock(Instant.parse(NIGHT), ZoneOffset.UTC);
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", bridge(PV_ONLY, MachineState.SOFT_START)) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(config().build()) //
+				.next(new TestCase(), START_CYCLES);
+		Channel<Boolean> late = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_NIGHT_LATE);
+		assertEquals(Boolean.FALSE, late.value().get());
+		// Steady clock steps (a jump of more than 5 minutes would close the clock
+		// gate).
+		for (var i = 0; i < ChargePrioritySchedule.NIGHT_LATE_MINUTES; i++) {
+			clock.leap(1, ChronoUnit.MINUTES);
+			test.next(new TestCase());
+		}
+		test.next(new TestCase());
+		assertEquals(Boolean.TRUE, late.value().get());
 	}
 
 	@Test

@@ -168,7 +168,7 @@ import io.openems.edge.ess.srne.SrneConstants;
 	// night window. Night value from nightChargeFrom until nightChargeTo, day value
 	// otherwise. Writes are read-back verified and need controlEnabled and machine
 	// state 2 (mains). Off by default.
-	@AttributeDefinition(name = "Charge-priority schedule", description = "Switch E20F (charge priority) between a night and a day value every day, so the grid charges the battery only in the night window. Needs controlEnabled. Off by default.")
+	@AttributeDefinition(name = "Charge-priority schedule", description = "Switch E20F (charge priority) between a night and a day value every day, so the grid charges the battery only in the night window. Needs controlEnabled. Off by default. Turning it off (or removing the component) leaves E20F at its last value; set it by hand if needed.")
 	boolean chargePrioritySchedule() default false;
 
 	@AttributeDefinition(name = "Night charge priority", description = "E20F value from nightChargeFrom to nightChargeTo: 0 PV preferred, 1 mains preferred, 2 hybrid (mains and PV, PV preferred), 3 PV only. Must differ from the day value.", options = {
@@ -178,14 +178,14 @@ import io.openems.edge.ess.srne.SrneConstants;
 			@Option(label = "PV only", value = "3") })
 	int nightChargePriority() default 2;
 
-	@AttributeDefinition(name = "Day charge priority", description = "E20F value outside the night window; 3 = PV only (mains does not charge the battery).", options = {
+	@AttributeDefinition(name = "Day charge priority", description = "E20F value outside the night window; 3 = PV only (mains does not charge the battery). Treated as the safe direction: also written on battery (state 3), never latched, and used when the clock stays unknown.", options = {
 			@Option(label = "PV preferred", value = "0"), //
 			@Option(label = "Mains preferred", value = "1"), //
 			@Option(label = "Hybrid", value = "2"), //
 			@Option(label = "PV only", value = "3") })
 	int dayChargePriority() default 3;
 
-	@AttributeDefinition(name = "Night charge from", description = "Local time HH:MM (schedule time zone) when the night charge priority starts; should be at or before the charge window 1 start.")
+	@AttributeDefinition(name = "Night charge from", description = "Local time HH:MM (schedule time zone) when the night charge priority starts; at least 5 minutes before the charge window 1 start (e.g. 00:00 with the timer at 00:05).")
 	String nightChargeFrom() default "00:00";
 
 	@AttributeDefinition(name = "Night charge to", description = "Local time HH:MM (schedule time zone) when the day charge priority starts again; should be at or after the charge window 1 stop; must differ from nightChargeFrom.")

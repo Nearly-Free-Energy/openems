@@ -42,8 +42,8 @@ public class ChargePriorityScheduleTest {
 		return ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, "00:00", "06:00");
 	}
 
-	// A schedule past the startup hold, with mains confirmed and the device in
-	// sync by day.
+	// A schedule past the startup hold, with mains confirmed and the device in sync
+	// by day.
 	private static ChargePrioritySchedule primed() {
 		var sut = defaults();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
@@ -55,8 +55,15 @@ public class ChargePriorityScheduleTest {
 	// One cycle with one fresh machine-state read (2 mains, 3 on battery).
 	private static ChargePrioritySchedule.Step step(ChargePrioritySchedule sut, LocalDateTime now, Integer e20f,
 			boolean mains) {
-		sut.onMachineStateRead(mains ? 2 : 3);
-		return sut.step(now, e20f, true, mains, TIMEOUT, COOLDOWN);
+		return stepIn(sut, now, e20f, mains ? 2 : 3);
+	}
+
+	// One cycle with one fresh read of the given raw machine state.
+	private static ChargePrioritySchedule.Step stepIn(ChargePrioritySchedule sut, LocalDateTime now, Integer e20f,
+			int machineState) {
+		sut.onMachineStateRead(machineState);
+		return sut.step(now, e20f, true, machineState == 2, ChargePrioritySchedule.isRunningState(machineState),
+				TIMEOUT, COOLDOWN);
 	}
 
 	private static void assertStep(ChargePrioritySchedule.Step step, ModeScheduleState state, Integer target,
@@ -139,8 +146,8 @@ public class ChargePriorityScheduleTest {
 		var sut = primed();
 		for (var i = 0; i < 10; i++) {
 			sut.onMachineStateRead(2);
-			assertStep(sut.step(at(NIGHT), PV_ONLY, false, true, TIMEOUT, COOLDOWN), ModeScheduleState.DISABLED, HYBRID,
-					null);
+			assertStep(sut.step(at(NIGHT), PV_ONLY, false, true, true, TIMEOUT, COOLDOWN), ModeScheduleState.DISABLED,
+					HYBRID, null);
 		}
 		assertNull(sut.writeElement().getNextWriteValueAndReset());
 	}
@@ -220,7 +227,9 @@ public class ChargePriorityScheduleTest {
 		for (var t = six.plusSeconds(1); t.toLocalTime().isBefore(LocalTime.of(23, 0)); t = t.plusMinutes(1)) {
 			assertStep(step(sut, t, PV_ONLY, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
 		}
-		assertEquals(2, sut.writesTodayForTest(DATE.plusDays(1)));
+		// One night write and one day write: two a day.
+		assertEquals(1, sut.writesTodayForTest(DATE.plusDays(1)));
+		assertEquals(1, sut.dayWritesTodayForTest(DATE.plusDays(1)));
 		assertNull(sut.writeElement().getNextWriteValueAndReset());
 	}
 
@@ -241,19 +250,44 @@ public class ChargePriorityScheduleTest {
 	}
 
 	@Test
-	public void testMachineStateGateHoldsTheDayWriteUntilMains() {
+	public void testDayWriteGoesOutOnBattery() {
 		var sut = primed();
 		var night = LocalDateTime.of(DATE.plusDays(1), LocalTime.of(5, 59));
 		assertStep(step(sut, night, PV_ONLY, true), ModeScheduleState.WRITE_PENDING, HYBRID, HYBRID);
 		device(sut, HYBRID);
 		assertStep(step(sut, night, HYBRID, true), ModeScheduleState.IN_SYNC, HYBRID, null);
-		// 06:00 on battery: the day value waits; on battery the mains does not charge.
+		// 06:00 in SBU on battery (state 3): the day value (safe direction) is written
+		// right away, so it is in place before a later transfer to the line.
 		var six = night.plusMinutes(1);
-		assertStep(step(sut, six, HYBRID, false), ModeScheduleState.WAITING_FOR_MAINS, PV_ONLY, null);
-		// Back on the line (e.g. SoC at switchToLineSoc): written once confirmed.
-		step(sut, six.plusMinutes(1), HYBRID, true);
-		step(sut, six.plusMinutes(1), HYBRID, true);
-		assertStep(step(sut, six.plusMinutes(1), HYBRID, true), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		assertStep(step(sut, six, HYBRID, false), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		device(sut, PV_ONLY);
+		assertStep(step(sut, six, PV_ONLY, false), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+	}
+
+	@Test
+	public void testNightWriteNeverGoesOutOnBattery() {
+		var sut = primed();
+		for (var i = 0; i < 1000; i++) {
+			assertStep(step(sut, at(NIGHT), PV_ONLY, false), ModeScheduleState.WAITING_FOR_MAINS, HYBRID, null);
+		}
+		assertNull(sut.writeElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	public void testDayWriteWaitsOutsideTheRunningStates() {
+		var sut = primed();
+		// Fault (10): no write in either direction.
+		for (var i = 0; i < 100; i++) {
+			assertStep(stepIn(sut, at(DAY), HYBRID, 10), ModeScheduleState.WAITING_FOR_MAINS, PV_ONLY, null);
+		}
+		// Running on battery again: three fresh state-3 reads, then the write.
+		assertStep(stepIn(sut, at(DAY), HYBRID, 3), ModeScheduleState.WAITING_FOR_MAINS, PV_ONLY, null);
+		assertStep(stepIn(sut, at(DAY), HYBRID, 3), ModeScheduleState.WAITING_FOR_MAINS, PV_ONLY, null);
+		assertStep(stepIn(sut, at(DAY), HYBRID, 3), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		// The queued day write is withdrawn on a fault before the bridge took it.
+		var fault = stepIn(sut, at(DAY), HYBRID, 10);
+		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, fault.state());
+		assertTrue(fault.withdraw());
 	}
 
 	@Test
@@ -265,6 +299,17 @@ public class ChargePriorityScheduleTest {
 		assertTrue(lost.withdraw());
 		assertNull(sut.handlerState());
 		assertNull(sut.writeElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	public void testDayStartupHoldIsShort() {
+		var sut = defaults();
+		sut.onMachineStateRead(3);
+		sut.onMachineStateRead(3);
+		for (var i = 1; i < ChargePrioritySchedule.DAY_STARTUP_HOLD_CYCLES; i++) {
+			assertStep(stepIn(sut, at(DAY), HYBRID, 3), ModeScheduleState.STARTUP_HOLD, PV_ONLY, null);
+		}
+		assertStep(stepIn(sut, at(DAY), HYBRID, 3), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
 	}
 
 	@Test
@@ -355,14 +400,14 @@ public class ChargePriorityScheduleTest {
 	}
 
 	@Test
-	public void testDailyWriteCeiling() {
+	public void testDailyWriteCeilings() {
 		var sut = primed();
 		// Clock jumps back and forth across the window (no budget refill on a jump):
-		// each flip is a verified write until the daily ceiling holds the value.
+		// each flip is a verified write; the night value has its own ceiling.
 		var night = at(NIGHT);
 		var day = at(DAY);
 		var value = PV_ONLY;
-		for (var n = 0; n < ChargePrioritySchedule.MAX_DAILY_WRITES; n++) {
+		for (var n = 0; n < 2 * ChargePrioritySchedule.MAX_DAILY_WRITES; n++) {
 			var now = n % 2 == 0 ? night : day;
 			var target = n % 2 == 0 ? HYBRID : PV_ONLY;
 			assertStep(step(sut, now, value, true), ModeScheduleState.WRITE_PENDING, target, target);
@@ -371,9 +416,122 @@ public class ChargePriorityScheduleTest {
 			assertStep(step(sut, now, value, true), ModeScheduleState.IN_SYNC, target, null);
 		}
 		assertEquals(ChargePrioritySchedule.MAX_DAILY_WRITES, sut.writesTodayForTest(DATE));
+		assertEquals(ChargePrioritySchedule.MAX_DAILY_WRITES, sut.dayWritesTodayForTest(DATE));
 		assertStep(step(sut, night, value, true), ModeScheduleState.DAILY_WRITE_LIMIT, HYBRID, null);
 		// The next local day has a fresh ceiling.
 		assertStep(step(sut, night.plusDays(1), value, true), ModeScheduleState.WRITE_PENDING, HYBRID, HYBRID);
+	}
+
+	@Test
+	public void testDayOverridesAreCorrectedUpToTheDayBudget() {
+		var sut = primed();
+		var t = at(DAY);
+		// Someone keeps setting hybrid on the panel by day: corrected every time,
+		// beyond the night override caps, until the day budget is spent.
+		for (var n = 1; n <= ChargePrioritySchedule.MAX_DAILY_DAY_WRITES; n++) {
+			var wrote = false;
+			for (var i = 0; i <= ModeSchedule.backoffCycles(ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS, COOLDOWN)
+					&& !wrote; i++) {
+				var step = step(sut, t, HYBRID, true);
+				assertFalse(step.state() == ModeScheduleState.OVERRIDDEN);
+				wrote = step.write() != null;
+			}
+			assertTrue(wrote, "correction " + n);
+			device(sut, PV_ONLY);
+			assertStep(step(sut, t, PV_ONLY, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		}
+		assertEquals(ChargePrioritySchedule.MAX_DAILY_DAY_WRITES, sut.dayWritesTodayForTest(DATE));
+		// After the re-correction backoff, the day budget holds.
+		for (var i = 0; i < 500; i++) {
+			assertNull(step(sut, t, HYBRID, true).write());
+		}
+		for (var i = 0; i < 1000; i++) {
+			assertStep(step(sut, t, HYBRID, true), ModeScheduleState.DAILY_WRITE_LIMIT, PV_ONLY, null);
+		}
+	}
+
+	@Test
+	public void testDayFailuresNeverLatch() {
+		var sut = primed();
+		var t = at(DAY);
+		for (var attempt = 1; attempt <= ModeSchedule.MAX_ATTEMPTS + 5; attempt++) {
+			assertStep(step(sut, t, HYBRID, true), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+			device(sut, HYBRID); // read-back keeps hybrid: failed
+			var backoff = ModeSchedule.backoffCycles(Math.min(attempt, ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS),
+					COOLDOWN);
+			for (var i = 1; i < backoff; i++) {
+				assertStep(step(sut, t, HYBRID, true), ModeScheduleState.WRITE_FAILED, PV_ONLY, null);
+			}
+			assertEquals(attempt, sut.failuresInWindow());
+		}
+		// Retried at most every 480 cycles, never latched.
+		assertEquals(480, ModeSchedule.backoffCycles(ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS, COOLDOWN));
+	}
+
+	@Test
+	public void testUnknownClockFallsBackToDayValue() {
+		var sut = primed();
+		// gw-pi2 reboots with no NTP while E20F is hybrid: after the fallback period
+		// the day value is written, so the grid cannot charge at an unknown time.
+		for (var i = 1; i < ChargePrioritySchedule.UNKNOWN_CLOCK_FALLBACK_CYCLES; i++) {
+			assertStep(step(sut, null, HYBRID, true), ModeScheduleState.WAITING_FOR_DATA, null, null);
+		}
+		assertStep(step(sut, null, HYBRID, true), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		device(sut, PV_ONLY);
+		assertStep(step(sut, null, PV_ONLY, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		assertEquals(1, sut.dayWritesTodayForTest(DATE));
+		// Once the clock is known again the window decides.
+		assertStep(step(sut, at(NIGHT), PV_ONLY, true), ModeScheduleState.WRITE_PENDING, HYBRID, HYBRID);
+	}
+
+	@Test
+	public void testDayLatchAtSixNeverHappens() {
+		var sut = primed();
+		var night = LocalDateTime.of(DATE.plusDays(1), LocalTime.of(5, 59));
+		assertStep(step(sut, night, PV_ONLY, true), ModeScheduleState.WRITE_PENDING, HYBRID, HYBRID);
+		device(sut, HYBRID);
+		step(sut, night, HYBRID, true);
+		// Bus errors at 06:00: every day write fails, many more times than the night
+		// budget, and the schedule keeps retrying.
+		var t = night.plusMinutes(1);
+		var writes = 0;
+		for (var i = 0; i < 20_000; i++) {
+			var step = step(sut, t, HYBRID, true);
+			assertEquals(PV_ONLY, step.target());
+			if (step.write() != null) {
+				writes++;
+				assertNotNull(sut.writeElement().getNextWriteValueAndReset());
+				sut.onExecute(new ExecuteState.Error(new Exception("bus")));
+			}
+		}
+		assertTrue(writes > ModeSchedule.MAX_ATTEMPTS + 20, "writes " + writes);
+	}
+
+	@Test
+	public void testNightLate() {
+		var sut = primed();
+		var midnight = LocalDateTime.of(DATE.plusDays(1), LocalTime.MIDNIGHT);
+		step(sut, midnight, PV_ONLY, false);
+		assertFalse(sut.isNightLate());
+		step(sut, midnight.plusMinutes(9), PV_ONLY, false);
+		assertFalse(sut.isNightLate());
+		step(sut, midnight.plusMinutes(10), PV_ONLY, false);
+		assertTrue(sut.isNightLate());
+		// The night value arrives: no longer late.
+		step(sut, midnight.plusMinutes(11), HYBRID, true);
+		assertFalse(sut.isNightLate());
+		// Never late by day.
+		step(sut, at(DAY), PV_ONLY, true);
+		assertFalse(sut.isNightLate());
+	}
+
+	@Test
+	public void testTimerStartMargin() {
+		var sut = defaults();
+		assertFalse(sut.timerStartHasMargin(LocalTime.MIDNIGHT));
+		assertFalse(sut.timerStartHasMargin(LocalTime.of(0, 4, 59)));
+		assertTrue(sut.timerStartHasMargin(LocalTime.of(0, 5)));
+		assertTrue(sut.timerStartHasMargin(LocalTime.of(1, 0)));
 	}
 
 	@Test

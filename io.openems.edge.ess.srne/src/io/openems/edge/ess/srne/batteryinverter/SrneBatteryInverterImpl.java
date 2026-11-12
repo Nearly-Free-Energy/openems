@@ -124,6 +124,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			ChargePrioritySchedule.DEFAULT_NIGHT_PRIORITY, ChargePrioritySchedule.DEFAULT_DAY_PRIORITY, null, null);
 	private ModeScheduleState lastChargePriorityState;
 	private Integer lastChargePriorityTarget;
+	private boolean chargePriorityNightLateLogged;
 	private ZoneId scheduleZone = ZoneId.of(DEFAULT_SCHEDULE_ZONE);
 	private Integer appliedDischargeEnable;
 	private int failedCycles;
@@ -523,6 +524,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.dischargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
 		this.updateDischargeSuppression();
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+		// The two daily schedules are independent: neither relies on the other's
+		// write landing first at a shared boundary (E20F waits for its own gate).
 		this.reconcileModeSchedule();
 		this.reconcileChargePrioritySchedule();
 		if (this.config == null || !this.config.controlEnabled()) {
@@ -625,15 +628,19 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				: null;
 		final var chargePriority = active ? this.readValue(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY) : null;
 		final var mains = active && this.isMachineStateVerified();
-		var step = this.chargePrioritySchedule.step(now, chargePriority, this.config.controlEnabled(), mains,
+		final var running = active && this.isMachineStateRunning();
+		var step = this.chargePrioritySchedule.step(now, chargePriority, this.config.controlEnabled(), mains, running,
 				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES);
 		if (step.withdraw()) {
 			this.logInfo(this.log, "Charge-priority schedule: mains lost, withdrew the queued E20F write");
 		}
+		// A target with an unknown time is the day-value fallback (see
+		// ChargePrioritySchedule).
 		if (step.target() != null && !step.target().equals(this.lastChargePriorityTarget)) {
 			this.logInfo(this.log,
 					"Charge-priority schedule: target [" + step.target() + "] ("
-							+ (this.chargePrioritySchedule.isNight(now.toLocalTime()) ? "night" : "day")
+							+ (now == null ? "unknown time, fallback"
+									: this.chargePrioritySchedule.isNight(now.toLocalTime()) ? "night" : "day")
 							+ " window), E20F [" + chargePriority + "]");
 			this.lastChargePriorityTarget = step.target();
 		}
@@ -654,6 +661,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE).setNextValue(step.state());
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(step.target());
+		var nightLate = active && this.chargePrioritySchedule.isNightLate();
+		if (nightLate && !this.chargePriorityNightLateLogged) {
+			this.logWarn(this.log,
+					"Charge-priority schedule: the night value is not set " + ChargePrioritySchedule.NIGHT_LATE_MINUTES
+							+ " minutes into the night window; E20F [" + chargePriority + "], state [" + step.state()
+							+ "]");
+		}
+		this.chargePriorityNightLateLogged = nightLate;
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_NIGHT_LATE).setNextValue(active ? nightLate : null);
 	}
 
 	// Startup warnings only; the schedule itself still runs. The night-charge timer
@@ -675,6 +691,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.logWarn(this.log, "Charge window 1 [" + timerStart + "-" + timerStop
 					+ "] is not inside the charge-priority night window [" + this.chargePrioritySchedule.nightFrom()
 					+ "-" + this.chargePrioritySchedule.nightTo() + "]");
+		} else if (!this.chargePrioritySchedule.timerStartHasMargin(timerStart)) {
+			this.logWarn(this.log, "Charge window 1 starts at [" + timerStart + "], less than "
+					+ ChargePrioritySchedule.TIMER_START_MARGIN_MINUTES + " minutes after nightChargeFrom ["
+					+ this.chargePrioritySchedule.nightFrom() + "]: the timer may start before the night value is "
+					+ "written; start it at least that much later");
 		}
 	}
 
@@ -706,6 +727,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private boolean isMachineStateVerified() {
 		MachineState machineState = this.getMachineStateChannel().value().asEnum();
 		return machineState != null && machineState.isVerified();
+	}
+
+	/**
+	 * Whether the inverter is running: state 2 (mains) or
+	 * {@link ModeSchedule#ON_BATTERY_STATE} (on battery). The charge-priority
+	 * schedule writes its day value (the safe direction) in either.
+	 *
+	 * @return true if running
+	 */
+	private boolean isMachineStateRunning() {
+		MachineState machineState = this.getMachineStateChannel().value().asEnum();
+		return machineState != null && ChargePrioritySchedule.isRunningState(machineState.getValue());
 	}
 
 	/**

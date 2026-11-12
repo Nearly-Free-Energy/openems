@@ -120,6 +120,8 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("State of the daily charge-priority schedule (0xE20F)")), //
 		CHARGE_PRIORITY_SCHEDULE_TARGET(Doc.of(OpenemsType.INTEGER) //
 				.text("Charge priority the daily schedule wants now (night or day value)")), //
+		CHARGE_PRIORITY_NIGHT_LATE(Doc.of(OpenemsType.BOOLEAN) //
+				.text("Night charge priority not set 10 minutes into the night window (night charge being lost)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 

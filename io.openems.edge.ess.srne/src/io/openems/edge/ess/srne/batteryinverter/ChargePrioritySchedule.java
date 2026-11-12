@@ -1,5 +1,6 @@
 package io.openems.edge.ess.srne.batteryinverter;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -26,24 +27,37 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * Writes go through a {@link SafeWriteHandler} (one per write) and the same
  * gates as {@link ModeSchedule}:
  * <ul>
- * <li>nothing is written while E20F or the local time is unknown; the time
- * counts only once plausible ({@link ClockGate}),</li>
- * <li>a write is queued only while the machine state is verified (state 2,
- * mains), confirmed by the last {@link ModeSchedule#MAINS_CONFIRM_READS} fresh
- * reads; a write still queued when mains is lost is withdrawn if the bridge has
- * not taken it yet ({@link GuardedWordElement}),</li>
- * <li>no write in the first {@link ModeSchedule#STARTUP_HOLD_CYCLES} cycles
- * after activation,</li>
- * <li>a failed write (execute error, wrong or missing read-back) leaves the
- * device as it is; retries back off exponentially, at most
+ * <li>nothing is written while E20F is unknown, or while the local time is
+ * unknown (it counts only once plausible, {@link ClockGate}) unless the
+ * day-value fallback below applies,</li>
+ * <li>the night value is queued only while the machine state is verified (state
+ * 2, mains), confirmed by the last {@link ModeSchedule#MAINS_CONFIRM_READS}
+ * fresh reads; a write still queued when its gate closes is withdrawn if the
+ * bridge has not taken it yet ({@link GuardedWordElement}),</li>
+ * <li>no night write in the first {@link ModeSchedule#STARTUP_HOLD_CYCLES}
+ * cycles after activation,</li>
+ * <li>a failed night write (execute error, wrong or missing read-back) leaves
+ * the device as it is; retries back off exponentially, at most
  * {@link ModeSchedule#MAX_ATTEMPTS} failed writes per window, refilled only
  * when the local time crosses a boundary forward in a small step,</li>
- * <li>at most {@link #MAX_DAILY_WRITES} successful writes per local day,</li>
- * <li>an overridden value (panel, app) is re-corrected with backoff, at most
+ * <li>at most {@link #MAX_DAILY_WRITES} successful night writes per local
+ * day,</li>
+ * <li>an overridden night value is re-corrected with backoff, at most
  * {@link #MAX_OVERRIDES_PER_WINDOW} times per window and
  * {@link #MAX_OVERRIDES_PER_DAY} times per day,</li>
  * <li>an invalid configuration turns the schedule off.</li>
  * </ul>
+ *
+ * <p>
+ * The day value is the safe direction (mains does not charge), so every gate
+ * that holds it must not leave the night value on by day. Its write is
+ * asymmetric, like the discharge-schedule disarm: it is also allowed while
+ * running on battery ({@link ModeSchedule#ON_BATTERY_STATE}), so it is in place
+ * before a transfer to the line; failures and overrides never latch (retries
+ * back off up to {@link #DAY_MAX_BACKOFF_ATTEMPTS}); it has its own daily
+ * budget {@link #MAX_DAILY_DAY_WRITES} and a short startup hold
+ * {@link #DAY_STARTUP_HOLD_CYCLES}; and it becomes the target when the clock
+ * stays unknown for {@link #UNKNOWN_CLOCK_FALLBACK_CYCLES} cycles.
  *
  * <p>
  * Thread-safety: {@link #step} and {@link #plausibleTime} run on the Edge cycle
@@ -63,12 +77,38 @@ final class ChargePrioritySchedule {
 	static final String DEFAULT_NIGHT_FROM = "00:00";
 	static final String DEFAULT_NIGHT_TO = "06:00";
 
-	/** Successful E20F writes allowed per local day (two scheduled + overrides). */
+	/** Successful night-value writes allowed per local day. */
 	static final int MAX_DAILY_WRITES = 6;
-	/** Re-corrections of an overridden E20F allowed per window. */
+	/** Re-corrections of an overridden night value allowed per window. */
 	static final int MAX_OVERRIDES_PER_WINDOW = 2;
-	/** Re-corrections of an overridden E20F allowed per local day. */
+	/** Re-corrections of an overridden night value allowed per local day. */
 	static final int MAX_OVERRIDES_PER_DAY = 3;
+	/**
+	 * Successful day-value writes allowed per local day: its own, larger budget, so
+	 * overrides of the safe direction keep being corrected while the settings
+	 * memory is still protected.
+	 */
+	static final int MAX_DAILY_DAY_WRITES = 24;
+	/**
+	 * Cap on the exponent of the day-value retry backoff: with the 60-cycle base
+	 * cooldown a failed or overridden day value is retried at least every 480
+	 * cycles (about 8 minutes) and never latched.
+	 */
+	static final int DAY_MAX_BACKOFF_ATTEMPTS = 4;
+	/** Startup hold for the day-value write (about 30 seconds). */
+	static final int DAY_STARTUP_HOLD_CYCLES = 30;
+	/**
+	 * Consecutive cycles without a plausible clock after which the target becomes
+	 * the day value (about 5 minutes; the clock gate itself settles in 60 cycles).
+	 */
+	static final int UNKNOWN_CLOCK_FALLBACK_CYCLES = 300;
+	/** Minutes in the night window without the night value until it is late. */
+	static final int NIGHT_LATE_MINUTES = 10;
+	/**
+	 * Minimum margin from nightFrom to the charge-timer start, so the night value
+	 * is in place before the timer starts.
+	 */
+	static final int TIMER_START_MARGIN_MINUTES = 5;
 
 	/**
 	 * One evaluation result.
@@ -108,6 +148,13 @@ final class ChargePrioritySchedule {
 	private LocalDate overridesDate;
 	private int overridesToday;
 	private volatile int freshMainsReads;
+	private volatile int freshRunningReads;
+	private LocalDate dayWritesDate;
+	private int dayWritesToday;
+	private LocalDate lastDate = LocalDate.MIN;
+	private int unknownClockCycles;
+	private LocalDateTime nightMismatchSince;
+	private boolean nightLate;
 	private int cycles;
 	private LocalTime lastNow;
 
@@ -219,6 +266,21 @@ final class ChargePrioritySchedule {
 	}
 
 	/**
+	 * Whether a charge-timer start leaves at least
+	 * {@link #TIMER_START_MARGIN_MINUTES} after nightFrom. Whether the SRNE
+	 * re-evaluates E20F during a running timer, or only at its start, is not
+	 * live-verified; with the margin the night value is written before the timer
+	 * starts.
+	 *
+	 * @param start the timer start (local)
+	 * @return true if the margin is kept
+	 */
+	boolean timerStartHasMargin(LocalTime start) {
+		return ClockGate.forwardNanos(this.nightFrom, start) >= Duration.ofMinutes(TIMER_START_MARGIN_MINUTES)
+				.toNanos();
+	}
+
+	/**
 	 * The target E20F value at a local time.
 	 *
 	 * @param time the local time, or null if unknown
@@ -244,13 +306,29 @@ final class ChargePrioritySchedule {
 
 	/**
 	 * Called on every fresh read of the machine state, from the Modbus bridge
-	 * thread. Counts consecutive reads of state 2 (mains).
+	 * thread. Counts consecutive reads of state 2 (mains, for the night value) and
+	 * of state 2 or {@link ModeSchedule#ON_BATTERY_STATE} (running, for the day
+	 * value).
 	 *
 	 * @param state the raw machine state, or null if unreadable
 	 */
 	void onMachineStateRead(Integer state) {
+		var confirm = ModeSchedule.MAINS_CONFIRM_READS;
 		var mainsRead = state != null && state == 2;
-		this.freshMainsReads = mainsRead ? Math.min(this.freshMainsReads + 1, ModeSchedule.MAINS_CONFIRM_READS) : 0;
+		var runningRead = mainsRead || state != null && state == ModeSchedule.ON_BATTERY_STATE;
+		this.freshMainsReads = mainsRead ? Math.min(this.freshMainsReads + 1, confirm) : 0;
+		this.freshRunningReads = runningRead ? Math.min(this.freshRunningReads + 1, confirm) : 0;
+	}
+
+	/**
+	 * Whether a raw machine state allows the day-value write: state 2 (mains) or
+	 * {@link ModeSchedule#ON_BATTERY_STATE} (running on battery).
+	 *
+	 * @param state the raw machine state, or null
+	 * @return true if running
+	 */
+	static boolean isRunningState(Integer state) {
+		return state != null && (state == 2 || state == ModeSchedule.ON_BATTERY_STATE);
 	}
 
 	boolean crossedBoundaryForward(LocalTime previous, LocalTime now) {
@@ -258,19 +336,40 @@ final class ChargePrioritySchedule {
 	}
 
 	/**
+	 * Whether the night value is late: in the night window, the device has not read
+	 * the night value for at least {@link #NIGHT_LATE_MINUTES} minutes.
+	 *
+	 * @return true if the night charge is being lost
+	 */
+	boolean isNightLate() {
+		return this.nightLate;
+	}
+
+	/**
 	 * Evaluates one cycle. A write is armed on {@link #writeElement()} here; the
 	 * outcome reaches this schedule through {@link #onExecute} and {@link #verify}.
+	 *
+	 * <p>
+	 * The day value is the safe direction (mains does not charge), so its write is
+	 * asymmetric: it is also allowed on battery (state 3), it never latches on
+	 * failures or overrides (retries back off up to
+	 * {@link #DAY_MAX_BACKOFF_ATTEMPTS}), it has its own daily budget
+	 * {@link #MAX_DAILY_DAY_WRITES}, a short startup hold
+	 * {@link #DAY_STARTUP_HOLD_CYCLES}, and it becomes the target when the clock
+	 * stays unknown for {@link #UNKNOWN_CLOCK_FALLBACK_CYCLES} cycles.
 	 *
 	 * @param now             plausible local date-time, or null if unknown
 	 * @param chargePriority  E20F read-back, or null if unreadable
 	 * @param controlEnabled  the settings-write safety gate
-	 * @param mains           whether the verified machine-state gate holds now
+	 * @param mains           whether the verified machine-state gate (state 2)
+	 *                        holds now
+	 * @param running         whether the machine state is 2 or 3 now
 	 * @param readbackTimeout cycles allowed for a fresh read-back
 	 * @param cooldown        base cycles to wait after a failed or overridden write
 	 * @return the result for this cycle
 	 */
-	Step step(LocalDateTime now, Integer chargePriority, boolean controlEnabled, boolean mains, int readbackTimeout,
-			int cooldown) {
+	Step step(LocalDateTime now, Integer chargePriority, boolean controlEnabled, boolean mains, boolean running,
+			int readbackTimeout, int cooldown) {
 		if (!this.enabled) {
 			return new Step(ModeScheduleState.DISABLED, null, null);
 		}
@@ -291,23 +390,38 @@ final class ChargePrioritySchedule {
 			}
 			this.countOutcome(handlerState, now);
 		}
+		if (now != null) {
+			this.lastDate = now.toLocalDate();
+			this.unknownClockCycles = 0;
+		} else if (this.unknownClockCycles < UNKNOWN_CLOCK_FALLBACK_CYCLES) {
+			this.unknownClockCycles++;
+		}
 		var target = this.targetAt(now == null ? null : now.toLocalTime());
-		if (target != null && !target.equals(this.overrideTarget)) {
+		if (target == null && this.unknownClockCycles >= UNKNOWN_CLOCK_FALLBACK_CYCLES) {
+			// The clock stays unknown (e.g. no NTP after a reboot): fall back to the day
+			// value, so the grid cannot charge at an unknown time of day.
+			target = this.dayPriority;
+		}
+		this.updateNightLate(now, chargePriority);
+		var crossed = now != null && this.crossedBoundaryForward(this.lastNow, now.toLocalTime());
+		if (crossed || target != null && !target.equals(this.overrideTarget)) {
+			// A new window or target gets a fresh override budget; a forward crossing also
+			// refills the failure budget (a clock jump or target flip does not).
 			this.overrideTarget = target;
 			this.overrides = 0;
-		}
-		if (now != null && this.crossedBoundaryForward(this.lastNow, now.toLocalTime())) {
-			// A boundary was crossed forward: the new window gets fresh budgets.
-			this.failures = 0;
-			this.overrides = 0;
+			if (crossed) {
+				this.failures = 0;
+			}
 		}
 		this.lastNow = now == null ? null : now.toLocalTime();
 		if (!controlEnabled) {
 			return new Step(ModeScheduleState.DISABLED, target, null);
 		}
-		if (handlerState == SafeWriteHandler.State.QUEUED && !mains && this.writeElement.withdraw()) {
-			// Mains lost before the bridge took the write: withdrawn, re-queued once
-			// mains is confirmed again.
+		var queuedDay = Integer.valueOf(this.dayPriority).equals(this.handlerTarget);
+		var gateStillOpen = queuedDay ? running : mains;
+		if (handlerState == SafeWriteHandler.State.QUEUED && !gateStillOpen && this.writeElement.withdraw()) {
+			// The gate it was queued under is gone before the bridge took the write:
+			// withdrawn, re-queued once the gate is confirmed again.
 			this.handler = null;
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null, true);
 		}
@@ -324,9 +438,13 @@ final class ChargePrioritySchedule {
 		if (target == null) {
 			return new Step(ModeScheduleState.WAITING_FOR_DATA, null, null);
 		}
+		var day = target == this.dayPriority;
+		final var date = now != null ? now.toLocalDate() : this.lastDate;
 		var sameTarget = target.equals(this.handlerTarget);
+		var failureBackoff = ModeSchedule
+				.backoffCycles(day ? Math.min(this.failures, DAY_MAX_BACKOFF_ATTEMPTS) : this.failures, cooldown);
 		if (handlerState == SafeWriteHandler.State.FAILED && sameTarget && this.failures > 0
-				&& this.cyclesSinceDone < ModeSchedule.backoffCycles(this.failures, cooldown)) {
+				&& this.cyclesSinceDone < failureBackoff) {
 			return new Step(ModeScheduleState.WRITE_FAILED, target, null);
 		}
 		if (chargePriority == null) {
@@ -336,27 +454,31 @@ final class ChargePrioritySchedule {
 			// Write only on change.
 			return new Step(ModeScheduleState.IN_SYNC, target, null);
 		}
-		if (this.failures >= ModeSchedule.MAX_ATTEMPTS) {
-			// Failure budget for this window spent: latched until the next boundary.
+		if (!day && this.failures >= ModeSchedule.MAX_ATTEMPTS) {
+			// Night failure budget for this window spent: latched until the next boundary.
+			// The day value never latches.
 			return new Step(ModeScheduleState.WRITE_FAILED, target, null);
 		}
 		var reCorrection = handlerState == SafeWriteHandler.State.VERIFIED && sameTarget;
 		if (reCorrection) {
-			if (this.overrides >= MAX_OVERRIDES_PER_WINDOW
-					|| this.overridesOn(now.toLocalDate()) >= MAX_OVERRIDES_PER_DAY) {
+			if (!day && (this.overrides >= MAX_OVERRIDES_PER_WINDOW
+					|| this.overridesOn(date) >= MAX_OVERRIDES_PER_DAY)) {
 				return new Step(ModeScheduleState.OVERRIDDEN, target, null);
 			}
-			if (this.cyclesSinceDone < ModeSchedule.backoffCycles(this.overrides + 1, cooldown)) {
+			var attempts = day ? Math.min(this.overrides + 1, DAY_MAX_BACKOFF_ATTEMPTS) : this.overrides + 1;
+			if (this.cyclesSinceDone < ModeSchedule.backoffCycles(attempts, cooldown)) {
 				return new Step(ModeScheduleState.WRITE_PENDING, target, null);
 			}
 		}
-		if (this.writesOn(now.toLocalDate()) >= MAX_DAILY_WRITES) {
+		if (day ? this.dayWritesOn(date) >= MAX_DAILY_DAY_WRITES : this.writesOn(date) >= MAX_DAILY_WRITES) {
 			return new Step(ModeScheduleState.DAILY_WRITE_LIMIT, target, null);
 		}
-		if (!mains || this.freshMainsReads < ModeSchedule.MAINS_CONFIRM_READS) {
+		var gateConfirmed = day ? running && this.freshRunningReads >= ModeSchedule.MAINS_CONFIRM_READS
+				: mains && this.freshMainsReads >= ModeSchedule.MAINS_CONFIRM_READS;
+		if (!gateConfirmed) {
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null);
 		}
-		if (this.cycles < ModeSchedule.STARTUP_HOLD_CYCLES) {
+		if (this.cycles < (day ? DAY_STARTUP_HOLD_CYCLES : ModeSchedule.STARTUP_HOLD_CYCLES)) {
 			return new Step(ModeScheduleState.STARTUP_HOLD, target, null);
 		}
 		var next = new SafeWriteHandler();
@@ -367,16 +489,29 @@ final class ChargePrioritySchedule {
 		this.queuedAt = now;
 		if (reCorrection) {
 			this.overrides++;
-			this.overridesToday = this.overridesOn(now.toLocalDate()) + 1;
-			this.overridesDate = now.toLocalDate();
+			this.overridesToday = this.overridesOn(date) + 1;
+			this.overridesDate = date;
 		}
 		this.handler = next;
 		this.writeElement.arm(target);
 		return new Step(ModeScheduleState.WRITE_PENDING, target, target);
 	}
 
+	private void updateNightLate(LocalDateTime now, Integer chargePriority) {
+		if (now == null || !this.isNight(now.toLocalTime()) || chargePriority == null
+				|| chargePriority == this.nightPriority) {
+			this.nightMismatchSince = null;
+			this.nightLate = false;
+			return;
+		}
+		if (this.nightMismatchSince == null || now.isBefore(this.nightMismatchSince)) {
+			this.nightMismatchSince = now;
+		}
+		this.nightLate = !now.isBefore(this.nightMismatchSince.plusMinutes(NIGHT_LATE_MINUTES));
+	}
+
 	// Counts each write's outcome once: a failure against the window's failure
-	// budget, a success against the daily ceiling.
+	// budget, a success against the daily ceiling of its direction.
 	private void countOutcome(SafeWriteHandler.State state, LocalDateTime now) {
 		if (this.outcomeCounted) {
 			return;
@@ -386,10 +521,14 @@ final class ChargePrioritySchedule {
 			this.outcomeCounted = true;
 		} else if (state == SafeWriteHandler.State.VERIFIED) {
 			this.outcomeCounted = true;
-			// While the clock is gated, count against the time the write was queued.
+			// While the clock is gated, count against the time the write was queued, or the
+			// last known date.
 			var at = now != null ? now : this.queuedAt;
-			if (at != null) {
-				var date = at.toLocalDate();
+			var date = at != null ? at.toLocalDate() : this.lastDate;
+			if (Integer.valueOf(this.dayPriority).equals(this.handlerTarget)) {
+				this.dayWritesToday = this.dayWritesOn(date) + 1;
+				this.dayWritesDate = date;
+			} else {
 				this.writesToday = this.writesOn(date) + 1;
 				this.writesDate = date;
 			}
@@ -402,6 +541,10 @@ final class ChargePrioritySchedule {
 
 	private int writesOn(LocalDate date) {
 		return date.equals(this.writesDate) ? this.writesToday : 0;
+	}
+
+	private int dayWritesOn(LocalDate date) {
+		return date.equals(this.dayWritesDate) ? this.dayWritesToday : 0;
 	}
 
 	/**
@@ -439,5 +582,9 @@ final class ChargePrioritySchedule {
 
 	int writesTodayForTest(LocalDate date) {
 		return this.writesOn(date);
+	}
+
+	int dayWritesTodayForTest(LocalDate date) {
+		return this.dayWritesOn(date);
 	}
 }
