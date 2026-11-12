@@ -220,6 +220,43 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 	}
 
 	@Test
+	public void testRetryWaitsForANewEnableBusReadBeforeAnyWindowWrite() throws Exception {
+		// Guards the wiring the fresh-read gate relies on: only a bus read of E02C may
+		// release a retried sequence, never the cached channel value.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge();
+		final var test = start(sut, bridge, clock(), config().build()) //
+				.next(new TestCase(), CYCLES);
+		var window = sut.chargeWindowForTest();
+
+		// Disarm verified (the channel now caches enable=0), window write queued, and
+		// then the window write fails.
+		window.onEnableExecute(ExecuteState.OK);
+		bridge.withRegisters(0xE02C, 0);
+		assertTrue(cyclesUntil(test, sut, State.WINDOW_QUEUED, CYCLES) > 0);
+		window.onStartExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertEquals(State.FAILED, window.getState());
+
+		// The device is re-armed, but no bus read follows: only the component's cycle
+		// handler runs, through the retry cooldown and well past it.
+		bridge.withRegisters(0xE02C, 1);
+		var cycle = new Event(EdgeEventConstants.TOPIC_CYCLE_AFTER_PROCESS_IMAGE, Map.of());
+		for (var i = 0; i < 3 * SrneBatteryInverterImpl.chargeRetryCooldownCycles(0); i++) {
+			sut.handleEvent(cycle);
+			assertNull(window.startWriteElement().getNextWriteValueAndReset(), "window start written, cycle " + i);
+			assertNull(window.stopWriteElement().getNextWriteValueAndReset(), "window stop written, cycle " + i);
+		}
+		// Retried, but held: the cached enable=0 predates the retry.
+		assertEquals(1, sut.chargeRetriesTodayForTest());
+		assertEquals(State.IDLE, window.getState());
+
+		// A bus read of E02C=1 releases it, and the retry disarms first.
+		assertTrue(cyclesUntil(test, sut, State.DISABLE_QUEUED, CYCLES + 2) > 0);
+		assertEquals(0, window.queuedEnable());
+		assertNull(window.startWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
 	public void testConfigRejectionIsNeverRetried() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		// Cross-midnight window (start >= stop) is a configuration rejection.
