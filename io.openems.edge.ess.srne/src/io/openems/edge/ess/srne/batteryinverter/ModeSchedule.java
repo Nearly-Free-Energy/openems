@@ -108,22 +108,15 @@ final class ModeSchedule {
 	static final String DEFAULT_EVENING_RESERVE_FROM = "14:00";
 	/** Cycles after activation without any schedule write (about 5 minutes). */
 	static final int STARTUP_HOLD_CYCLES = 300;
+	/** Earliest plausible wall-clock time, see {@link ClockGate}. */
+	static final Instant MIN_PLAUSIBLE_TIME = ClockGate.MIN_PLAUSIBLE_TIME;
 	/**
-	 * Earliest plausible wall-clock time (build-time floor). gw-pi2 has no RTC: a
-	 * time before this is an unset clock.
+	 * Steady clock cycles needed before the time is used, see {@link ClockGate}.
 	 */
-	static final Instant MIN_PLAUSIBLE_TIME = Instant.parse("2026-11-01T00:00:00Z");
-	/**
-	 * Cycles the clock must run steadily (no backward step, no forward jump of more
-	 * than {@link DischargeGuard#CLOCK_STEP_MINUTES} minutes) after start or after
-	 * a step before its time is used. An NTP correction after a reboot is such a
-	 * step and restarts the count.
-	 */
-	static final int CLOCK_SETTLE_CYCLES = 60;
+	static final int CLOCK_SETTLE_CYCLES = ClockGate.CLOCK_SETTLE_CYCLES;
 
 	private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm")
 			.withResolverStyle(ResolverStyle.STRICT);
-	private static final Duration MAX_CLOCK_STEP = Duration.ofMinutes(DischargeGuard.CLOCK_STEP_MINUTES);
 
 	/**
 	 * One evaluation result.
@@ -181,8 +174,7 @@ final class ModeSchedule {
 	private volatile int gridAboveL3;
 	private int cycles;
 	private LocalTime lastNow;
-	private Instant lastInstant;
-	private int steadyClockCycles;
+	private final ClockGate clockGate = new ClockGate();
 
 	private ModeSchedule(boolean enabled, String invalidReason, int daytimePriority, int eveningPriority,
 			LocalTime eveningStart, LocalTime daytimeStart, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
@@ -494,25 +486,7 @@ final class ModeSchedule {
 	 * @return true on a forward boundary crossing
 	 */
 	boolean crossedBoundaryForward(LocalTime previous, LocalTime now) {
-		if (previous == null) {
-			return false;
-		}
-		var step = forwardNanos(previous, now);
-		if (step == 0 || step > MAX_CLOCK_STEP.toNanos()) {
-			return false;
-		}
-		for (var boundary : new LocalTime[] { this.eveningStart, this.daytimeStart }) {
-			var toBoundary = forwardNanos(previous, boundary);
-			if (toBoundary > 0 && toBoundary <= step) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private static long forwardNanos(LocalTime from, LocalTime to) {
-		var day = Duration.ofDays(1).toNanos();
-		return ((to.toNanoOfDay() - from.toNanoOfDay()) % day + day) % day;
+		return ClockGate.crossedForward(previous, now, this.eveningStart, this.daytimeStart);
 	}
 
 	/**
@@ -525,24 +499,7 @@ final class ModeSchedule {
 	 * @return the plausible local date-time, or null
 	 */
 	LocalDateTime plausibleTime(Instant instant, ZoneId zone) {
-		if (instant == null || instant.isBefore(MIN_PLAUSIBLE_TIME)) {
-			this.lastInstant = null;
-			this.steadyClockCycles = 0;
-			return null;
-		}
-		if (this.lastInstant != null) {
-			var delta = Duration.between(this.lastInstant, instant);
-			if (delta.isNegative() || delta.compareTo(MAX_CLOCK_STEP) > 0) {
-				this.steadyClockCycles = 0;
-			} else if (this.steadyClockCycles < CLOCK_SETTLE_CYCLES) {
-				this.steadyClockCycles++;
-			}
-		}
-		this.lastInstant = instant;
-		if (this.steadyClockCycles < CLOCK_SETTLE_CYCLES) {
-			return null;
-		}
-		return LocalDateTime.ofInstant(instant, zone);
+		return this.clockGate.plausibleTime(instant, zone);
 	}
 
 	/**
