@@ -672,9 +672,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		var safeMissing = managed && this.chargePrioritySchedule.isSafeValueMissing();
 		if (safeMissing && !this.chargePrioritySafeMissingLogged) {
 			this.logWarn(this.log,
-					"Charge-priority schedule: E20F reads [" + chargePriority + "] instead of [" + step.target()
-							+ "] for 10 minutes outside the night window; the grid may charge the battery. " + "State ["
-							+ step.state() + "]");
+					"Charge-priority schedule: " + this.chargePrioritySchedule.safeValueMissingReason() + "; E20F ["
+							+ chargePriority + "], safe value [" + step.target()
+							+ "]; the grid may charge the battery. State [" + step.state() + "]");
 		}
 		this.chargePrioritySafeMissingLogged = safeMissing;
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING).setNextValue(safeMissing);

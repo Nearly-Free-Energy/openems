@@ -506,8 +506,8 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
 
 * The night value (`nightChargePriority`, default `2`) applies from `nightChargeFrom`
   (inclusive, default `00:00`) to `nightChargeTo` (exclusive, default `06:00`),
-  crossing midnight when needed; the day value (`dayChargePriority`, default `3`) the
-  rest of the day. The target switches exactly at the window start and stop. The night
+  crossing midnight when needed; the day value (`dayChargePriority`, must be `3`, PV
+  only) the rest of the day. The target switches exactly at the window start and stop. The night
   value is never written before `nightChargeFrom`: it needs state `2` (on the line),
   where hybrid would charge immediately.
 * Night-charge timer (charge window 1, `0xE026`/`0xE027` with `chargeScheduleEnable`
@@ -557,21 +557,23 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
   (or the held value below) has been due but missing on the device for 600 cycles
   (about 10 minutes), e.g. while writes keep failing or in a fault state, or once it
   has been re-corrected 3 times on the same local day (a persistent override; then
-  for the rest of that day while it is due). The grid may then charge the battery. A
-  warning is logged. WARNING, not FAULT, so the alarm never drives an ESS state
+  for the rest of that day while it is due; further re-corrections then wait at least
+  1800 cycles, about 30 minutes, to spare the settings memory). The grid may then
+  charge the battery. A warning names which of the two reasons holds. WARNING, not FAULT, so the alarm never drives an ESS state
   machine into its error state.
 * Turning it off and invalid configuration. `0xE20F` is a persistent setting, so a
   schedule that stops must not leave the night value behind:
-  ** Invalid configuration (a value outside `0..3`, equal night and day values, a time
-     that is not `HH:MM`, equal times): the schedule is off, reports `CONFIG_INVALID`,
-     and holds `0xE20F` at `3` (PV only) through the day-value path.
-  ** `chargePrioritySchedule=false` with `chargePriorityRestoreWhenOff=true`: holds
-     `0xE20F` at `dayChargePriority` (or `3` if that is out of range) through the
-     day-value path; the state shows `DISABLED`. Set both together in the gateway
-     config, so turning the schedule off later restores the day value.
-  ** `chargePriorityRestoreWhenOff=false` (default): with the schedule off `0xE20F` is
-     neither read nor written (default bus traffic unchanged) and keeps its last value.
-     Removing the component always leaves the last value.
+  ** Invalid configuration (a night value outside `0..3`, a day value other than `3`,
+     equal values, a time that is not `HH:MM`, equal times, or
+     `chargePriorityRestoreWhenOff=false` while the schedule is enabled): the schedule
+     is off, reports `CONFIG_INVALID`, and holds `0xE20F` at `3` (PV only) through the
+     day-value path.
+  ** The schedule therefore needs `chargePriorityRestoreWhenOff=true`, enforced in
+     code. With that pairing a later `chargePrioritySchedule=false` holds `0xE20F` at
+     `3` through the day-value path; the state shows `DISABLED`.
+  ** `chargePriorityRestoreWhenOff=false` with the schedule off (the default for units
+     that never use the feature): `0xE20F` is neither read nor written (default bus
+     traffic unchanged). Removing the component always leaves the last value.
 * Charge-timer check: at activation the configured charge window 1, and once read the
   window on the device (also when it is not managed by this component, `-1`), are
   checked against the night window and the 5-minute start margin; a mismatch is
@@ -611,7 +613,7 @@ Channels: `ChargePriority` (`0xE20F` read-back), `ChargePriorityScheduleState` (
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
 * Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`), `eveningReserveSoc` (int %, default `-1` = off), `eveningReserveFrom` (String `HH:MM`, default `14:00`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
-* Charge-priority schedule: `chargePrioritySchedule` (boolean, default `false`), `nightChargePriority` (int `0..3`, default `2` = hybrid), `dayChargePriority` (int `0..3`, default `3` = PV only, must differ from `nightChargePriority`), `nightChargeFrom` (String `HH:MM`, default `00:00`), `nightChargeTo` (String `HH:MM`, default `06:00`, must differ from `nightChargeFrom`), evaluated in `scheduleTimeZone`, `chargePriorityRestoreWhenOff` (boolean, default `false`; hold the day value while the schedule is off). Needs `controlEnabled=true`; see "Daily charge-priority schedule" above.
+* Charge-priority schedule: `chargePrioritySchedule` (boolean, default `false`), `nightChargePriority` (int `0..3`, default `2` = hybrid), `dayChargePriority` (int, default `3` = PV only; must be `3`), `nightChargeFrom` (String `HH:MM`, default `00:00`), `nightChargeTo` (String `HH:MM`, default `06:00`, must differ from `nightChargeFrom`), evaluated in `scheduleTimeZone`, `chargePriorityRestoreWhenOff` (boolean, default `false`; must be `true` while the schedule is enabled; holds `0xE20F` at `3` while the schedule is off). Needs `controlEnabled=true`; see "Daily charge-priority schedule" above.
 * TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]

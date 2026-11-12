@@ -115,7 +115,17 @@ public class ChargePriorityScheduleTest {
 			assertNotNull(ChargePrioritySchedule.fromConfig(true, bad, PV_ONLY, "00:00", "06:00").getInvalidReason());
 			assertNotNull(ChargePrioritySchedule.fromConfig(true, HYBRID, bad, "00:00", "06:00").getInvalidReason());
 		}
-		assertNull(ChargePrioritySchedule.fromConfig(true, 1, 0, "00:00", "06:00").getInvalidReason());
+		assertNull(ChargePrioritySchedule.fromConfig(true, 1, PV_ONLY, "00:00", "06:00").getInvalidReason());
+		// The day value must be PV only: it gets the safe-direction write path.
+		for (var notSafe : new int[] { 0, 1, 2 }) {
+			assertNotNull(
+					ChargePrioritySchedule.fromConfig(true, PV_ONLY, notSafe, "00:00", "06:00").getInvalidReason(),
+					"day " + notSafe);
+		}
+		// Enabled without restore-when-off: invalid, so the pairing is enforced.
+		var unpaired = ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, "00:00", "06:00", false);
+		assertNotNull(unpaired.getInvalidReason());
+		assertEquals(Integer.valueOf(PV_ONLY), unpaired.holdValue());
 		assertNotNull(ChargePrioritySchedule.fromConfig(true, HYBRID, HYBRID, "00:00", "06:00").getInvalidReason());
 		for (var bad : new String[] { null, "", "0:00", "24:00", "06:60", "06-00", "night" }) {
 			assertNotNull(ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, bad, "06:00").getInvalidReason(),
@@ -167,6 +177,16 @@ public class ChargePriorityScheduleTest {
 		var plain = ChargePrioritySchedule.fromConfig(false, HYBRID, PV_ONLY, "00:00", "06:00", false);
 		assertFalse(plain.managesRegister());
 		assertNull(plain.holdValue());
+	}
+
+	@Test
+	public void testSafeValueMissingReasons() {
+		var sut = primed();
+		assertNull(sut.safeValueMissingReason());
+		for (var i = 0; i < ChargePrioritySchedule.SAFE_MISMATCH_ALARM_CYCLES; i++) {
+			stepIn(sut, at(DAY), HYBRID, 10);
+		}
+		assertTrue(sut.safeValueMissingReason().contains("has not read"));
 	}
 
 	@Test
@@ -232,7 +252,7 @@ public class ChargePriorityScheduleTest {
 	@Test
 	public void testDisabledByDefault() {
 		// Disabled: never invalid, never active, never writes, whatever is configured.
-		var sut = ChargePrioritySchedule.fromConfig(false, HYBRID, HYBRID, "bad", null);
+		var sut = ChargePrioritySchedule.fromConfig(false, HYBRID, HYBRID, "bad", null, false);
 		assertFalse(sut.isEnabled());
 		assertFalse(sut.isActive());
 		assertNull(sut.getInvalidReason());
@@ -533,14 +553,19 @@ public class ChargePriorityScheduleTest {
 		// beyond the night override caps and the former day cap of 24 writes.
 		for (var n = 1; n <= 30; n++) {
 			var wrote = false;
-			for (var i = 0; i <= ModeSchedule.backoffCycles(ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS, COOLDOWN)
-					&& !wrote; i++) {
+			var cycles = 0;
+			for (var i = 0; i <= ChargePrioritySchedule.DAY_ALARM_BACKOFF_CYCLES && !wrote; i++) {
 				var step = step(sut, t, HYBRID, true);
+				cycles++;
 				assertNotEquals(ModeScheduleState.OVERRIDDEN, step.state());
 				assertNotEquals(ModeScheduleState.DAILY_WRITE_LIMIT, step.state());
 				wrote = step.write() != null;
 			}
 			assertTrue(wrote, "correction " + n);
+			if (n - 1 > ChargePrioritySchedule.SAFE_OVERRIDE_ALARM) {
+				// Alarm raised: re-corrected at the slower cadence (settings memory).
+				assertTrue(cycles >= ChargePrioritySchedule.DAY_ALARM_BACKOFF_CYCLES - 1, "cycles " + cycles);
+			}
 			device(sut, PV_ONLY);
 			assertStep(step(sut, t, PV_ONLY, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
 			// The first write is not an override. The alarm holds from the

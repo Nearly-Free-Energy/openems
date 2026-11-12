@@ -92,6 +92,12 @@ final class ChargePrioritySchedule {
 	 */
 	static final int SAFE_OVERRIDE_ALARM = 3;
 	/**
+	 * Minimum backoff between day-value re-corrections once
+	 * {@link #SAFE_OVERRIDE_ALARM} is reached (about 30 minutes, at most about 48
+	 * writes a day under a persistent override).
+	 */
+	static final int DAY_ALARM_BACKOFF_CYCLES = 1800;
+	/**
 	 * Cap on the exponent of the day-value retry backoff: with the 60-cycle base
 	 * cooldown a failed or overridden day value is retried at least every 480
 	 * cycles (about 8 minutes) and never latched.
@@ -184,8 +190,8 @@ final class ChargePrioritySchedule {
 	}
 
 	/**
-	 * Builds and validates a schedule from configuration values, without the
-	 * restore-when-off option.
+	 * Builds and validates a schedule from configuration values, with
+	 * restore-when-off set (the required pairing).
 	 *
 	 * @param enabled       chargePrioritySchedule
 	 * @param nightPriority E20F value in the night window (0..3)
@@ -196,7 +202,7 @@ final class ChargePrioritySchedule {
 	 */
 	static ChargePrioritySchedule fromConfig(boolean enabled, int nightPriority, int dayPriority, String nightFrom,
 			String nightTo) {
-		return fromConfig(enabled, nightPriority, dayPriority, nightFrom, nightTo, false);
+		return fromConfig(enabled, nightPriority, dayPriority, nightFrom, nightTo, true);
 	}
 
 	/**
@@ -206,13 +212,15 @@ final class ChargePrioritySchedule {
 	 * E20F is a persistent setting, so a schedule that stops running must not leave
 	 * the night value behind. An enabled but invalid schedule therefore holds E20F
 	 * at {@link #PV_ONLY}, and a disabled one with {@code restoreWhenOff} holds it
-	 * at the day value (or {@link #PV_ONLY} if that is out of range), through the
-	 * day-value write path. A disabled schedule without {@code restoreWhenOff} does
-	 * not touch E20F (the default).
+	 * at {@link #PV_ONLY} too, through the day-value write path. An enabled
+	 * schedule requires {@code restoreWhenOff} (otherwise it is invalid and holds
+	 * {@link #PV_ONLY}), so turning it off later can never leave the night value
+	 * behind. A disabled schedule without {@code restoreWhenOff} does not touch
+	 * E20F (the default: no E20F reads or writes).
 	 *
 	 * @param enabled        chargePrioritySchedule
 	 * @param nightPriority  E20F value in the night window (0..3)
-	 * @param dayPriority    E20F value outside it (0..3, not the night value)
+	 * @param dayPriority    E20F value outside it (must be 3, PV only)
 	 * @param nightFrom      "HH:MM" local start of the night window
 	 * @param nightTo        "HH:MM" local end of the night window
 	 * @param restoreWhenOff chargePriorityRestoreWhenOff
@@ -223,16 +231,23 @@ final class ChargePrioritySchedule {
 		if (!enabled) {
 			Integer hold = null;
 			if (restoreWhenOff) {
-				hold = isValidPriority(dayPriority) ? dayPriority : PV_ONLY;
+				hold = PV_ONLY;
 			}
 			return new ChargePrioritySchedule(false, null, nightPriority, dayPriority, null, null, hold);
 		}
 		var from = ModeSchedule.parseTime(nightFrom);
 		var to = ModeSchedule.parseTime(nightTo);
 		String reason = null;
-		if (!isValidPriority(nightPriority) || !isValidPriority(dayPriority)) {
-			reason = "nightChargePriority [" + nightPriority + "] and dayChargePriority [" + dayPriority
-					+ "] must be 0..3";
+		if (!restoreWhenOff) {
+			// Enforced pairing: a later chargePrioritySchedule=false alone then falls
+			// into the hold path instead of leaving the night value behind.
+			reason = "chargePriorityRestoreWhenOff must be true while the schedule is enabled";
+		} else if (!isValidPriority(nightPriority)) {
+			reason = "nightChargePriority [" + nightPriority + "] must be 0..3";
+		} else if (dayPriority != PV_ONLY) {
+			// The day value gets the asymmetric, safe-direction write path, so it must
+			// be the value with which mains never charges.
+			reason = "dayChargePriority [" + dayPriority + "] must be 3 (PV only)";
 		} else if (nightPriority == dayPriority) {
 			reason = "nightChargePriority and dayChargePriority must differ [" + nightPriority + "]";
 		} else if (from == null || to == null) {
@@ -287,8 +302,23 @@ final class ChargePrioritySchedule {
 	 * @return true while the alarm holds
 	 */
 	boolean isSafeValueMissing() {
-		return this.safeMismatchCycles >= SAFE_MISMATCH_ALARM_CYCLES
-				|| this.safeDue && this.safeOverridesOn(this.lastDate) >= SAFE_OVERRIDE_ALARM;
+		return this.safeValueMissingReason() != null;
+	}
+
+	/**
+	 * Why {@link #isSafeValueMissing()} holds.
+	 *
+	 * @return a short reason, or null if the alarm does not hold
+	 */
+	String safeValueMissingReason() {
+		if (this.safeMismatchCycles >= SAFE_MISMATCH_ALARM_CYCLES) {
+			return "E20F has not read the safe value for " + SAFE_MISMATCH_ALARM_CYCLES + " cycles";
+		}
+		if (this.safeDue && this.safeOverridesOn(this.lastDate) >= SAFE_OVERRIDE_ALARM) {
+			return "E20F was overridden and re-corrected " + this.safeOverridesOn(this.lastDate)
+					+ " times today (persistent override)";
+		}
+		return null;
 	}
 
 	String getInvalidReason() {
@@ -543,7 +573,13 @@ final class ChargePrioritySchedule {
 				return new Step(ModeScheduleState.OVERRIDDEN, target, null);
 			}
 			var attempts = day ? Math.min(this.overrides + 1, DAY_MAX_BACKOFF_ATTEMPTS) : this.overrides + 1;
-			if (this.cyclesSinceDone < ModeSchedule.backoffCycles(attempts, cooldown)) {
+			var backoff = ModeSchedule.backoffCycles(attempts, cooldown);
+			if (day && this.safeOverridesOn(date) >= SAFE_OVERRIDE_ALARM) {
+				// Persistent override, alarm raised: correct it at a slower cadence to
+				// spare the settings memory, but never stop.
+				backoff = Math.max(backoff, DAY_ALARM_BACKOFF_CYCLES);
+			}
+			if (this.cyclesSinceDone < backoff) {
 				return new Step(ModeScheduleState.WRITE_PENDING, target, null);
 			}
 		}
@@ -633,7 +669,7 @@ final class ChargePrioritySchedule {
 			// last known date.
 			var at = now != null ? now : this.queuedAt;
 			var date = at != null ? at.toLocalDate() : this.lastDate;
-			if (Integer.valueOf(this.dayPriority).equals(this.handlerTarget)) {
+			if (this.isSafeValue(this.handlerTarget)) {
 				this.dayWritesToday = this.dayWritesOn(date) + 1;
 				this.dayWritesDate = date;
 			} else {

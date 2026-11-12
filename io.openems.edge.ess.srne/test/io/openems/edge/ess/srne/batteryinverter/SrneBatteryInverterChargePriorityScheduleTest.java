@@ -3,6 +3,7 @@ package io.openems.edge.ess.srne.batteryinverter;
 import static io.openems.edge.ess.srne.SrneConstants.DEFAULT_UNIT_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -52,7 +53,8 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 				.setModbusUnitId(DEFAULT_UNIT_ID) //
 				.setMaxApparentPower(12_000) //
 				.setControlEnabled(true) //
-				.setChargePrioritySchedule(true);
+				.setChargePrioritySchedule(true) //
+				.setChargePriorityRestoreWhenOff(true);
 	}
 
 	private static ComponentTest start(SrneBatteryInverterImpl sut, DummyModbusBridge bridge, String utc,
@@ -89,7 +91,7 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 		var sut = new SrneBatteryInverterImpl();
 		new ComponentTest(sut) //
 				.addReference("setModbus", bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS)) //
-				.activate(config().setChargePrioritySchedule(false).build()) //
+				.activate(config().setChargePrioritySchedule(false).setChargePriorityRestoreWhenOff(false).build()) //
 				.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.DISABLED, state(sut));
 		assertNull(target(sut));
@@ -117,12 +119,59 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 
 	@Test
 	public void testDisabledWithRestoreHoldsDayValue() throws Exception {
+		// Turned off in the night window with hybrid on the device.
 		var sut = new SrneBatteryInverterImpl();
-		start(sut, bridge(HYBRID, MachineState.SOFT_START), DAY,
+		final var bridge = bridge(HYBRID, MachineState.SOFT_START);
+		final var test = start(sut, bridge, NIGHT,
 				config().setChargePrioritySchedule(false).setChargePriorityRestoreWhenOff(true).build());
 		assertTrue(hasTask(sut, false, 0xE20F));
 		assertEquals(PV_ONLY, target(sut));
 		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, PV_ONLY);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.chargePriorityScheduleForTest().handlerState());
+		assertEquals(ModeScheduleState.DISABLED, state(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testEnabledWithoutRestoreIsInvalidAndHoldsPvOnly() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, NIGHT, config().setChargePriorityRestoreWhenOff(false).build());
+		assertNotNull(sut.chargePriorityScheduleForTest().getInvalidReason());
+		assertEquals(PV_ONLY, target(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, PV_ONLY);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
+	}
+
+	@Test
+	public void testPersistentOverrideReachesTheAlarmChannel() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(PV_ONLY, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, DAY, config().build());
+		final Channel<Boolean> missing = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING);
+		// First write (not an override), then overrides on the panel, each corrected.
+		bridge.withRegister(0xE20F, HYBRID);
+		for (var n = 0; n <= ChargePrioritySchedule.SAFE_OVERRIDE_ALARM; n++) {
+			var taken = false;
+			for (var i = 0; i < 600 && !taken; i++) {
+				test.next(new TestCase());
+				taken = sut.takeChargePriorityWriteForTest();
+			}
+			assertTrue(taken, "write " + n);
+			sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+			bridge.withRegister(0xE20F, PV_ONLY);
+			test.next(new TestCase(), CYCLES);
+			bridge.withRegister(0xE20F, HYBRID);
+		}
+		bridge.withRegister(0xE20F, PV_ONLY);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(Boolean.TRUE, missing.value().get());
 	}
 
 	@Test

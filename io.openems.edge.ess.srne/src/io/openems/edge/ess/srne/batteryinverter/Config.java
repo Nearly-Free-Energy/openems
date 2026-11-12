@@ -169,10 +169,10 @@ import io.openems.edge.ess.srne.SrneConstants;
 	// otherwise. Writes are read-back verified and need controlEnabled; the night
 	// value needs machine state 2 (mains), the day value also goes out on battery
 	// (state 3). Off by default.
-	@AttributeDefinition(name = "Charge-priority schedule", description = "Switch E20F (charge priority) between a night and a day value every day, so the grid charges the battery only in the night window. Needs controlEnabled. Off by default. An invalid configuration holds E20F at 3 (PV only). Turning it off leaves E20F at its last value unless chargePriorityRestoreWhenOff is set; removing the component always does.")
+	@AttributeDefinition(name = "Charge-priority schedule", description = "Switch E20F (charge priority) between a night and a day value every day, so the grid charges the battery only in the night window. Needs controlEnabled. Off by default. Needs chargePriorityRestoreWhenOff=true. An invalid configuration holds E20F at 3 (PV only); turning the schedule off holds it at 3 too; removing the component leaves the last value.")
 	boolean chargePrioritySchedule() default false;
 
-	@AttributeDefinition(name = "Charge-priority restore when off", description = "While chargePrioritySchedule is false, hold E20F at dayChargePriority (the safe value), so turning the schedule off in the night window cannot leave the night value. Off by default (E20F then is neither read nor written); set it together with chargePrioritySchedule in the gateway config.")
+	@AttributeDefinition(name = "Charge-priority restore when off", description = "Required true while chargePrioritySchedule is true (otherwise the schedule is CONFIG_INVALID and holds E20F at 3). While the schedule is false, hold E20F at 3 (PV only), so turning the schedule off in the night window cannot leave the night value. False with the schedule off (the default) neither reads nor writes E20F.")
 	boolean chargePriorityRestoreWhenOff() default false;
 
 	@AttributeDefinition(name = "Night charge priority", description = "E20F value from nightChargeFrom to nightChargeTo: 0 PV preferred, 1 mains preferred, 2 hybrid (mains and PV, PV preferred), 3 PV only. Must differ from the day value.", options = {
@@ -182,7 +182,7 @@ import io.openems.edge.ess.srne.SrneConstants;
 			@Option(label = "PV only", value = "3") })
 	int nightChargePriority() default 2;
 
-	@AttributeDefinition(name = "Day charge priority", description = "E20F value outside the night window; 3 = PV only (mains does not charge the battery). Treated as the safe direction: also written on battery (state 3), never latched, and used when the clock stays unknown.", options = {
+	@AttributeDefinition(name = "Day charge priority", description = "E20F value outside the night window; must be 3 = PV only (mains does not charge the battery), otherwise the schedule is CONFIG_INVALID. Written as the safe direction: also on battery (state 3), never latched, and used when the clock stays unknown.", options = {
 			@Option(label = "PV preferred", value = "0"), //
 			@Option(label = "Mains preferred", value = "1"), //
 			@Option(label = "Hybrid", value = "2"), //
