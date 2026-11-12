@@ -44,6 +44,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int eveningReserveSoc = -1;
 		private String eveningReserveFrom = "14:00";
 		private boolean chargePrioritySchedule = false;
+		private boolean chargePriorityRestoreWhenOff = false;
 		private int nightChargePriority = 2;
 		private int dayChargePriority = 3;
 		private String nightChargeFrom = "00:00";
@@ -217,6 +218,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setChargePrioritySchedule(boolean value) {
 			this.chargePrioritySchedule = value;
+			return this;
+		}
+
+		public Builder setChargePriorityRestoreWhenOff(boolean value) {
+			this.chargePriorityRestoreWhenOff = value;
 			return this;
 		}
 
@@ -447,6 +453,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public boolean chargePrioritySchedule() {
 		return this.builder.chargePrioritySchedule;
+	}
+
+	@Override
+	public boolean chargePriorityRestoreWhenOff() {
+		return this.builder.chargePriorityRestoreWhenOff;
 	}
 
 	@Override

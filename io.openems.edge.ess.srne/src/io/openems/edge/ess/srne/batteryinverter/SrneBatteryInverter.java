@@ -1,5 +1,6 @@
 package io.openems.edge.ess.srne.batteryinverter;
 
+import io.openems.common.channel.Level;
 import io.openems.common.channel.Unit;
 import io.openems.common.types.OpenemsType;
 import io.openems.edge.batteryinverter.api.OffGridBatteryInverter;
@@ -120,6 +121,9 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("State of the daily charge-priority schedule (0xE20F)")), //
 		CHARGE_PRIORITY_SCHEDULE_TARGET(Doc.of(OpenemsType.INTEGER) //
 				.text("Charge priority the daily schedule wants now (night or day value)")), //
+		CHARGE_PRIORITY_SAFE_VALUE_MISSING(Doc.of(Level.WARNING) //
+				.text("E20F is not at the day (safe) value for 10 minutes outside the night window: "
+						+ "the grid may charge the battery")), //
 		CHARGE_PRIORITY_NIGHT_LATE(Doc.of(OpenemsType.BOOLEAN) //
 				.text("Night charge priority not set 10 minutes into the night window (night charge being lost)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //

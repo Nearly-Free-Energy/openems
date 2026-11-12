@@ -101,13 +101,28 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 	}
 
 	@Test
-	public void testInvalidConfigStaysOff() throws Exception {
+	public void testInvalidConfigHoldsPvOnly() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		start(sut, bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS), NIGHT,
-				config().setDayChargePriority(HYBRID).build());
+		final var bridge = bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, NIGHT, config().setDayChargePriority(HYBRID).build());
+		assertTrue(hasTask(sut, true, 0xE20F));
+		assertEquals(PV_ONLY, target(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, PV_ONLY);
+		test.next(new TestCase(), CYCLES);
 		assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
-		assertFalse(hasTask(sut, true, 0xE20F));
 		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testDisabledWithRestoreHoldsDayValue() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(HYBRID, MachineState.SOFT_START), DAY,
+				config().setChargePrioritySchedule(false).setChargePriorityRestoreWhenOff(true).build());
+		assertTrue(hasTask(sut, false, 0xE20F));
+		assertEquals(PV_ONLY, target(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
 	}
 
 	@Test
@@ -158,6 +173,8 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 	public void testDayWriteOnBattery() throws Exception {
 		// SBU on battery (state 3) by day with hybrid set: the day value goes out
 		// without waiting for the line, so a transfer at E01F finds PV only.
+		// SOFT_START is the raw state 3 that the unit reports on battery.
+		assertEquals(ModeSchedule.ON_BATTERY_STATE, MachineState.SOFT_START.getValue());
 		var sut = new SrneBatteryInverterImpl();
 		start(sut, bridge(HYBRID, MachineState.SOFT_START), DAY, config().build());
 		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
@@ -183,9 +200,13 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 	@Test
 	public void testFaultBlocksBothDirections() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
-		start(sut, bridge(HYBRID, MachineState.FAULT), DAY, config().build());
+		final var test = start(sut, bridge(HYBRID, MachineState.FAULT), DAY, config().build());
 		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
 		assertFalse(sut.takeChargePriorityWriteForTest());
+		// Hybrid stays by day: the safe-value alarm is raised after 10 minutes.
+		test.next(new TestCase(), ChargePrioritySchedule.SAFE_MISMATCH_ALARM_CYCLES);
+		Channel<Boolean> missing = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING);
+		assertEquals(Boolean.TRUE, missing.value().get());
 	}
 
 	@Test

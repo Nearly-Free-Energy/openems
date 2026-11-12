@@ -125,7 +125,107 @@ public class ChargePriorityScheduleTest {
 		assertNotNull(ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, "06:00", "06:00").getInvalidReason());
 		var invalid = ChargePrioritySchedule.fromConfig(true, HYBRID, HYBRID, "00:00", "06:00");
 		assertFalse(invalid.isActive());
-		assertStep(step(invalid, at(NIGHT), PV_ONLY, true), ModeScheduleState.CONFIG_INVALID, null, null);
+		assertTrue(invalid.managesRegister());
+		assertEquals(Integer.valueOf(PV_ONLY), invalid.holdValue());
+		assertStep(step(invalid, at(NIGHT), PV_ONLY, true), ModeScheduleState.CONFIG_INVALID, PV_ONLY, null);
+	}
+
+	@Test
+	public void testInvalidConfigHoldsPvOnly() {
+		// A typo at runtime while E20F is hybrid: the safe value is written, at any
+		// time of day and on battery, and the state keeps showing CONFIG_INVALID.
+		var sut = ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, "00:00", "6:00");
+		assertNotNull(sut.getInvalidReason());
+		for (var i = 1; i < ChargePrioritySchedule.DAY_STARTUP_HOLD_CYCLES; i++) {
+			assertNull(step(sut, at(NIGHT), HYBRID, false).write());
+		}
+		assertStep(step(sut, at(NIGHT), HYBRID, false), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		device(sut, PV_ONLY);
+		assertStep(step(sut, at(NIGHT), PV_ONLY, false), ModeScheduleState.CONFIG_INVALID, PV_ONLY, null);
+		// Even with an unknown clock.
+		assertStep(step(sut, null, PV_ONLY, false), ModeScheduleState.CONFIG_INVALID, PV_ONLY, null);
+		assertFalse(sut.isNightLate());
+	}
+
+	@Test
+	public void testDisabledWithRestoreHoldsDayValue() {
+		var sut = ChargePrioritySchedule.fromConfig(false, HYBRID, PV_ONLY, "00:00", "06:00", true);
+		assertFalse(sut.isActive());
+		assertTrue(sut.managesRegister());
+		for (var i = 1; i < ChargePrioritySchedule.DAY_STARTUP_HOLD_CYCLES; i++) {
+			assertNull(step(sut, at(NIGHT), HYBRID, true).write());
+		}
+		// Turned off in the night window with hybrid on the device: back to PV only.
+		assertStep(step(sut, at(NIGHT), HYBRID, true), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		device(sut, PV_ONLY);
+		assertStep(step(sut, at(NIGHT), PV_ONLY, true), ModeScheduleState.DISABLED, PV_ONLY, null);
+		// An out-of-range day value restores PV only.
+		assertEquals(Integer.valueOf(PV_ONLY),
+				ChargePrioritySchedule.fromConfig(false, HYBRID, 7, "00:00", "06:00", true).holdValue());
+		// Without restore: E20F is not managed at all.
+		var plain = ChargePrioritySchedule.fromConfig(false, HYBRID, PV_ONLY, "00:00", "06:00", false);
+		assertFalse(plain.managesRegister());
+		assertNull(plain.holdValue());
+	}
+
+	@Test
+	public void testSafeValueMissingAlarm() {
+		var sut = primed();
+		// Fault state by day with hybrid on the device: no write is possible.
+		for (var i = 1; i < ChargePrioritySchedule.SAFE_MISMATCH_ALARM_CYCLES; i++) {
+			stepIn(sut, at(DAY), HYBRID, 10);
+			assertFalse(sut.isSafeValueMissing());
+		}
+		stepIn(sut, at(DAY), HYBRID, 10);
+		assertTrue(sut.isSafeValueMissing());
+		// In sync again: cleared.
+		stepIn(sut, at(DAY), PV_ONLY, 10);
+		assertFalse(sut.isSafeValueMissing());
+	}
+
+	@Test
+	public void testUnknownClockFallbackOnBattery() {
+		var sut = primed();
+		for (var i = 1; i < ChargePrioritySchedule.UNKNOWN_CLOCK_FALLBACK_CYCLES; i++) {
+			assertStep(step(sut, null, HYBRID, false), ModeScheduleState.WAITING_FOR_DATA, null, null);
+		}
+		assertStep(step(sut, null, HYBRID, false), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+	}
+
+	@Test
+	public void testUnknownClockFallbackAfterNightLatch() {
+		var sut = primed();
+		var t = at(NIGHT);
+		// Latch the night failure budget.
+		for (var attempt = 1; attempt <= ModeSchedule.MAX_ATTEMPTS; attempt++) {
+			var wrote = false;
+			for (var i = 0; i <= ModeSchedule.backoffCycles(attempt, COOLDOWN) && !wrote; i++) {
+				wrote = step(sut, t, PV_ONLY, true).write() != null;
+			}
+			assertTrue(wrote);
+			device(sut, PV_ONLY);
+		}
+		for (var i = 0; i < 2000; i++) {
+			assertNull(step(sut, t, HYBRID, true).write());
+		}
+		assertEquals(ModeSchedule.MAX_ATTEMPTS, sut.failuresInWindow());
+		// The clock is lost (no forward crossing, so the failures carry over): the
+		// day-value fallback is not held back by the night latch.
+		var wrote = false;
+		for (var i = 0; i < ChargePrioritySchedule.UNKNOWN_CLOCK_FALLBACK_CYCLES + 500 && !wrote; i++) {
+			wrote = step(sut, null, HYBRID, true).write() != null;
+		}
+		assertTrue(wrote);
+	}
+
+	@Test
+	public void testQueuedDayWriteWithdrawnOnFlipToNight() {
+		var sut = primed();
+		var before = LocalDateTime.of(DATE, LocalTime.of(23, 59, 59));
+		assertStep(step(sut, before, HYBRID, true), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		// 00:00 arrives before the bridge took it; the device already has hybrid.
+		assertStep(step(sut, before.plusSeconds(1), HYBRID, true), ModeScheduleState.IN_SYNC, HYBRID, null);
+		assertNull(sut.writeElement().getNextWriteValueAndReset());
 	}
 
 	@Test
@@ -271,6 +371,8 @@ public class ChargePriorityScheduleTest {
 			assertStep(step(sut, at(NIGHT), PV_ONLY, false), ModeScheduleState.WAITING_FOR_MAINS, HYBRID, null);
 		}
 		assertNull(sut.writeElement().getNextWriteValueAndReset());
+		// A missing night value is not the safe-value alarm (it shows as night-late).
+		assertFalse(sut.isSafeValueMissing());
 	}
 
 	@Test
@@ -448,6 +550,8 @@ public class ChargePriorityScheduleTest {
 		for (var i = 0; i < 1000; i++) {
 			assertStep(step(sut, t, HYBRID, true), ModeScheduleState.DAILY_WRITE_LIMIT, PV_ONLY, null);
 		}
+		// Not silent: the safe-value alarm holds.
+		assertTrue(sut.isSafeValueMissing());
 	}
 
 	@Test

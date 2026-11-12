@@ -125,6 +125,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private ModeScheduleState lastChargePriorityState;
 	private Integer lastChargePriorityTarget;
 	private boolean chargePriorityNightLateLogged;
+	private boolean chargePrioritySafeMissingLogged;
+	private boolean deviceChargeTimerChecked;
 	private ZoneId scheduleZone = ZoneId.of(DEFAULT_SCHEDULE_ZONE);
 	private Integer appliedDischargeEnable;
 	private int failedCycles;
@@ -181,10 +183,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		this.chargePrioritySchedule = ChargePrioritySchedule.fromConfig(config.chargePrioritySchedule(),
 				config.nightChargePriority(), config.dayChargePriority(), config.nightChargeFrom(),
-				config.nightChargeTo());
+				config.nightChargeTo(), config.chargePriorityRestoreWhenOff());
 		if (this.chargePrioritySchedule.getInvalidReason() != null) {
-			this.logError(this.log, "Invalid charge-priority schedule: "
-					+ this.chargePrioritySchedule.getInvalidReason() + "; the schedule stays off");
+			this.logError(this.log,
+					"Invalid charge-priority schedule: " + this.chargePrioritySchedule.getInvalidReason()
+							+ "; the schedule stays off and holds E20F at [" + this.chargePrioritySchedule.holdValue()
+							+ "] (PV only)");
 		}
 		/*
 		 * There is intentionally no @Modified method. A settings configuration update
@@ -194,7 +198,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		 * same activation.
 		 */
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
-		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive() || this.chargePrioritySchedule.isActive()) {
+		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive()
+				|| this.chargePrioritySchedule.managesRegister()) {
 			this.scheduleZone = this.parseScheduleZone(config.scheduleTimeZone());
 		}
 		if (this.dischargeGuard.isActive()) {
@@ -205,6 +210,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		if (this.chargePrioritySchedule.isActive()) {
 			this.warnIfChargePriorityScheduleMismatched(config);
+		} else if (this.chargePrioritySchedule.managesRegister() && !this.chargePrioritySchedule.isEnabled()) {
+			this.logInfo(this.log, "Charge-priority schedule is off; holding E20F at ["
+					+ this.chargePrioritySchedule.holdValue() + "] (chargePriorityRestoreWhenOff)");
 		}
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
@@ -480,8 +488,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					new FC16WriteRegistersTask(this.modeSchedule::onExecute, 0xE204, this.modeSchedule.writeElement()));
 		}
 		// Charge priority (E20F): read and written only while the charge-priority
-		// schedule is active, so the default task list is unchanged.
-		if (this.chargePrioritySchedule.isActive()) {
+		// schedule is active, or holds the safe value because it is invalid or off
+		// with chargePriorityRestoreWhenOff, so the default task list is unchanged.
+		if (this.chargePrioritySchedule.managesRegister()) {
 			protocol.addTask(new FC3ReadRegistersTask(0xE20F, Priority.LOW, //
 					m(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY, new UnsignedWordElement(0xE20F))));
 			protocol.addTask(new FC16WriteRegistersTask(this.chargePrioritySchedule::onExecute, 0xE20F,
@@ -614,36 +623,34 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	/**
 	 * Daily charge-priority schedule (E20F, decision D138). Runs every cycle so its
-	 * state channel stays current; a write is queued only with controlEnabled,
-	 * readable E20F and clock, and machine state 2 (mains), confirmed by fresh
-	 * reads.
+	 * state channel stays current. A write is queued only with controlEnabled and a
+	 * readable E20F: the night value needs a plausible clock and machine state 2
+	 * (mains); the day value (or the value held while the schedule is off or
+	 * invalid) also goes out on battery (state 3). See ChargePrioritySchedule.
 	 */
 	private void reconcileChargePrioritySchedule() {
 		if (this.config == null) {
 			return;
 		}
-		final var active = this.chargePrioritySchedule.isActive();
-		final LocalDateTime now = active
+		final var managed = this.chargePrioritySchedule.managesRegister();
+		final LocalDateTime now = managed
 				? this.chargePrioritySchedule.plausibleTime(this.instantOrNull(), this.scheduleZone)
 				: null;
-		final var chargePriority = active ? this.readValue(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY) : null;
-		final var mains = active && this.isMachineStateVerified();
-		final var running = active && this.isMachineStateRunning();
+		final var chargePriority = managed ? this.readValue(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY) : null;
+		final var mains = managed && this.isMachineStateVerified();
+		final var running = managed && this.isMachineStateRunning();
 		var step = this.chargePrioritySchedule.step(now, chargePriority, this.config.controlEnabled(), mains, running,
 				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES);
 		if (step.withdraw()) {
-			this.logInfo(this.log, "Charge-priority schedule: mains lost, withdrew the queued E20F write");
-		}
-		// A target with an unknown time is the day-value fallback (see
-		// ChargePrioritySchedule).
-		if (step.target() != null && !step.target().equals(this.lastChargePriorityTarget)) {
 			this.logInfo(this.log,
-					"Charge-priority schedule: target [" + step.target() + "] ("
-							+ (now == null ? "unknown time, fallback"
-									: this.chargePrioritySchedule.isNight(now.toLocalTime()) ? "night" : "day")
-							+ " window), E20F [" + chargePriority + "]");
+					"Charge-priority schedule: machine-state gate closed, withdrew the queued E20F write");
+		}
+		if (step.target() != null && !step.target().equals(this.lastChargePriorityTarget)) {
+			this.logInfo(this.log, "Charge-priority schedule: target [" + step.target() + "] ("
+					+ this.describeChargePriorityTarget(now) + "), E20F [" + chargePriority + "]");
 			this.lastChargePriorityTarget = step.target();
 		}
+		this.checkDeviceChargeTimer();
 		if (step.write() != null) {
 			this.logInfo(this.log, "Charge-priority schedule: queued E20F write from [" + chargePriority + "] to ["
 					+ step.write() + "]");
@@ -652,7 +659,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			var message = "Charge-priority schedule state [" + step.state() + "], target [" + step.target()
 					+ "], E20F [" + chargePriority + "]";
 			if (step.state() == ModeScheduleState.WRITE_FAILED || step.state() == ModeScheduleState.CONFIG_INVALID
-					|| step.state() == ModeScheduleState.OVERRIDDEN) {
+					|| step.state() == ModeScheduleState.OVERRIDDEN
+					|| step.state() == ModeScheduleState.DAILY_WRITE_LIMIT) {
 				this.logWarn(this.log, message);
 			} else {
 				this.logInfo(this.log, message);
@@ -661,6 +669,16 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE).setNextValue(step.state());
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(step.target());
+		var safeMissing = managed && this.chargePrioritySchedule.isSafeValueMissing();
+		if (safeMissing && !this.chargePrioritySafeMissingLogged) {
+			this.logWarn(this.log,
+					"Charge-priority schedule: E20F reads [" + chargePriority + "] instead of [" + step.target()
+							+ "] for 10 minutes outside the night window; the grid may charge the battery. " + "State ["
+							+ step.state() + "]");
+		}
+		this.chargePrioritySafeMissingLogged = safeMissing;
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING).setNextValue(safeMissing);
+		var active = this.chargePrioritySchedule.isActive();
 		var nightLate = active && this.chargePrioritySchedule.isNightLate();
 		if (nightLate && !this.chargePriorityNightLateLogged) {
 			this.logWarn(this.log,
@@ -672,6 +690,34 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_NIGHT_LATE).setNextValue(active ? nightLate : null);
 	}
 
+	private String describeChargePriorityTarget(LocalDateTime now) {
+		if (!this.chargePrioritySchedule.isActive()) {
+			return this.chargePrioritySchedule.isEnabled() ? "invalid configuration, held" : "schedule off, held";
+		}
+		if (now == null) {
+			return "unknown time, fallback";
+		}
+		return this.chargePrioritySchedule.isNight(now.toLocalTime()) ? "night window" : "day window";
+	}
+
+	// Once per activation, the charge window 1 the device actually has (it may be
+	// left unmanaged in the config, -1) is checked against the night window.
+	private void checkDeviceChargeTimer() {
+		if (this.deviceChargeTimerChecked || !this.chargePrioritySchedule.isActive()) {
+			return;
+		}
+		var start = this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START);
+		var stop = this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP);
+		if (start == null || stop == null) {
+			return;
+		}
+		this.deviceChargeTimerChecked = true;
+		var problem = this.chargeTimerProblem(start, stop);
+		if (problem != null) {
+			this.logWarn(this.log, "Device " + problem);
+		}
+	}
+
 	// Startup warnings only; the schedule itself still runs. The night-charge timer
 	// (charge window 1) needs the night value while it runs; a timer outside the
 	// night window would not get it.
@@ -681,22 +727,33 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		var start = config.chargeWindow1Start();
 		var stop = config.chargeWindow1Stop();
-		if (start < 0 || stop < 0 || !ScheduleWindow.isValidEncodedTime(start)
-				|| !ScheduleWindow.isValidEncodedTime(stop)) {
+		if (start < 0 || stop < 0) {
 			return;
+		}
+		var problem = this.chargeTimerProblem(start, stop);
+		if (problem != null) {
+			this.logWarn(this.log, "Configured " + problem);
+		}
+	}
+
+	private String chargeTimerProblem(int start, int stop) {
+		if (!ScheduleWindow.isValidEncodedTime(start) || !ScheduleWindow.isValidEncodedTime(stop)) {
+			return null;
 		}
 		var timerStart = LocalTime.of(start / 256, start % 256);
 		var timerStop = LocalTime.of(stop / 256, stop % 256);
+		var night = "[" + this.chargePrioritySchedule.nightFrom() + "-" + this.chargePrioritySchedule.nightTo() + "]";
 		if (!this.chargePrioritySchedule.coversTimer(timerStart, timerStop)) {
-			this.logWarn(this.log, "Charge window 1 [" + timerStart + "-" + timerStop
-					+ "] is not inside the charge-priority night window [" + this.chargePrioritySchedule.nightFrom()
-					+ "-" + this.chargePrioritySchedule.nightTo() + "]");
-		} else if (!this.chargePrioritySchedule.timerStartHasMargin(timerStart)) {
-			this.logWarn(this.log, "Charge window 1 starts at [" + timerStart + "], less than "
+			return "charge window 1 [" + timerStart + "-" + timerStop
+					+ "] is not inside the charge-priority night window " + night;
+		}
+		if (!this.chargePrioritySchedule.timerStartHasMargin(timerStart)) {
+			return "charge window 1 starts at [" + timerStart + "], less than "
 					+ ChargePrioritySchedule.TIMER_START_MARGIN_MINUTES + " minutes after nightChargeFrom ["
 					+ this.chargePrioritySchedule.nightFrom() + "]: the timer may start before the night value is "
-					+ "written; start it at least that much later");
+					+ "written; start it at least that much later";
 		}
+		return null;
 	}
 
 	// Package-private for tests: the dummy bridge does not execute writes.

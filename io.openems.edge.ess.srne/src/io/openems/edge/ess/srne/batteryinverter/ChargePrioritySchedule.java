@@ -102,6 +102,11 @@ final class ChargePrioritySchedule {
 	 * the day value (about 5 minutes; the clock gate itself settles in 60 cycles).
 	 */
 	static final int UNKNOWN_CLOCK_FALLBACK_CYCLES = 300;
+	/**
+	 * Cycles the safe value may be due but missing on the device before
+	 * {@link #isSafeValueMissing()} raises its alarm (about 10 minutes).
+	 */
+	static final int SAFE_MISMATCH_ALARM_CYCLES = 600;
 	/** Minutes in the night window without the night value until it is late. */
 	static final int NIGHT_LATE_MINUTES = 10;
 	/**
@@ -132,6 +137,9 @@ final class ChargePrioritySchedule {
 	private final int dayPriority;
 	private final LocalTime nightFrom;
 	private final LocalTime nightTo;
+	// The safe value held while the schedule is off (restoreWhenOff) or invalid;
+	// null if this schedule leaves E20F alone.
+	private final Integer holdValue;
 
 	private final GuardedWordElement writeElement = new GuardedWordElement(0xE20F);
 	private final ClockGate clockGate = new ClockGate();
@@ -155,11 +163,13 @@ final class ChargePrioritySchedule {
 	private int unknownClockCycles;
 	private LocalDateTime nightMismatchSince;
 	private boolean nightLate;
+	private int safeMismatchCycles;
 	private int cycles;
 	private LocalTime lastNow;
 
 	private ChargePrioritySchedule(boolean enabled, String invalidReason, int nightPriority, int dayPriority,
-			LocalTime nightFrom, LocalTime nightTo) {
+			LocalTime nightFrom, LocalTime nightTo, Integer holdValue) {
+		this.holdValue = holdValue;
 		this.enabled = enabled;
 		this.invalidReason = invalidReason;
 		this.nightPriority = nightPriority;
@@ -169,7 +179,8 @@ final class ChargePrioritySchedule {
 	}
 
 	/**
-	 * Builds and validates a schedule from configuration values.
+	 * Builds and validates a schedule from configuration values, without the
+	 * restore-when-off option.
 	 *
 	 * @param enabled       chargePrioritySchedule
 	 * @param nightPriority E20F value in the night window (0..3)
@@ -180,8 +191,36 @@ final class ChargePrioritySchedule {
 	 */
 	static ChargePrioritySchedule fromConfig(boolean enabled, int nightPriority, int dayPriority, String nightFrom,
 			String nightTo) {
+		return fromConfig(enabled, nightPriority, dayPriority, nightFrom, nightTo, false);
+	}
+
+	/**
+	 * Builds and validates a schedule from configuration values.
+	 *
+	 * <p>
+	 * E20F is a persistent setting, so a schedule that stops running must not leave
+	 * the night value behind. An enabled but invalid schedule therefore holds E20F
+	 * at {@link #PV_ONLY}, and a disabled one with {@code restoreWhenOff} holds it
+	 * at the day value (or {@link #PV_ONLY} if that is out of range), through the
+	 * day-value write path. A disabled schedule without {@code restoreWhenOff} does
+	 * not touch E20F (the default).
+	 *
+	 * @param enabled        chargePrioritySchedule
+	 * @param nightPriority  E20F value in the night window (0..3)
+	 * @param dayPriority    E20F value outside it (0..3, not the night value)
+	 * @param nightFrom      "HH:MM" local start of the night window
+	 * @param nightTo        "HH:MM" local end of the night window
+	 * @param restoreWhenOff chargePriorityRestoreWhenOff
+	 * @return the schedule; check {@link #getInvalidReason()}
+	 */
+	static ChargePrioritySchedule fromConfig(boolean enabled, int nightPriority, int dayPriority, String nightFrom,
+			String nightTo, boolean restoreWhenOff) {
 		if (!enabled) {
-			return new ChargePrioritySchedule(false, null, nightPriority, dayPriority, null, null);
+			Integer hold = null;
+			if (restoreWhenOff) {
+				hold = isValidPriority(dayPriority) ? dayPriority : PV_ONLY;
+			}
+			return new ChargePrioritySchedule(false, null, nightPriority, dayPriority, null, null, hold);
 		}
 		var from = ModeSchedule.parseTime(nightFrom);
 		var to = ModeSchedule.parseTime(nightTo);
@@ -196,7 +235,10 @@ final class ChargePrioritySchedule {
 		} else if (from.equals(to)) {
 			reason = "nightChargeFrom and nightChargeTo must differ";
 		}
-		return new ChargePrioritySchedule(true, reason, nightPriority, dayPriority, from, to);
+		if (reason != null) {
+			return new ChargePrioritySchedule(true, reason, nightPriority, PV_ONLY, null, null, PV_ONLY);
+		}
+		return new ChargePrioritySchedule(true, null, nightPriority, dayPriority, from, to, null);
 	}
 
 	private static boolean isValidPriority(int priority) {
@@ -209,6 +251,37 @@ final class ChargePrioritySchedule {
 
 	boolean isEnabled() {
 		return this.enabled;
+	}
+
+	/**
+	 * Whether this schedule reads and writes E20F: while active, and while holding
+	 * the safe value because it is off (restoreWhenOff) or invalid.
+	 *
+	 * @return true if E20F is managed
+	 */
+	boolean managesRegister() {
+		return this.isActive() || this.holdValue != null;
+	}
+
+	/**
+	 * The safe value held while the schedule is off or invalid.
+	 *
+	 * @return the value, or null if E20F is not held
+	 */
+	Integer holdValue() {
+		return this.holdValue;
+	}
+
+	/**
+	 * Whether the safe value (the day value, or the held value) is due but the
+	 * device has not read it for {@link #SAFE_MISMATCH_ALARM_CYCLES} cycles, e.g.
+	 * because the daily budget is spent or the write keeps failing: the grid may
+	 * charge outside the night window.
+	 *
+	 * @return true while the alarm holds
+	 */
+	boolean isSafeValueMissing() {
+		return this.safeMismatchCycles >= SAFE_MISMATCH_ALARM_CYCLES;
 	}
 
 	String getInvalidReason() {
@@ -370,11 +443,8 @@ final class ChargePrioritySchedule {
 	 */
 	Step step(LocalDateTime now, Integer chargePriority, boolean controlEnabled, boolean mains, boolean running,
 			int readbackTimeout, int cooldown) {
-		if (!this.enabled) {
+		if (!this.managesRegister()) {
 			return new Step(ModeScheduleState.DISABLED, null, null);
-		}
-		if (this.invalidReason != null) {
-			return new Step(ModeScheduleState.CONFIG_INVALID, null, null);
 		}
 		if (this.cycles < ModeSchedule.STARTUP_HOLD_CYCLES) {
 			this.cycles++;
@@ -396,14 +466,15 @@ final class ChargePrioritySchedule {
 		} else if (this.unknownClockCycles < UNKNOWN_CLOCK_FALLBACK_CYCLES) {
 			this.unknownClockCycles++;
 		}
-		var target = this.targetAt(now == null ? null : now.toLocalTime());
+		var target = this.holdValue != null ? this.holdValue : this.targetAt(now == null ? null : now.toLocalTime());
 		if (target == null && this.unknownClockCycles >= UNKNOWN_CLOCK_FALLBACK_CYCLES) {
 			// The clock stays unknown (e.g. no NTP after a reboot): fall back to the day
 			// value, so the grid cannot charge at an unknown time of day.
 			target = this.dayPriority;
 		}
 		this.updateNightLate(now, chargePriority);
-		var crossed = now != null && this.crossedBoundaryForward(this.lastNow, now.toLocalTime());
+		this.updateSafeMismatch(target, chargePriority);
+		var crossed = this.isActive() && now != null && this.crossedBoundaryForward(this.lastNow, now.toLocalTime());
 		if (crossed || target != null && !target.equals(this.overrideTarget)) {
 			// A new window or target gets a fresh override budget; a forward crossing also
 			// refills the failure budget (a clock jump or target flip does not).
@@ -417,7 +488,7 @@ final class ChargePrioritySchedule {
 		if (!controlEnabled) {
 			return new Step(ModeScheduleState.DISABLED, target, null);
 		}
-		var queuedDay = Integer.valueOf(this.dayPriority).equals(this.handlerTarget);
+		var queuedDay = this.isSafeValue(this.handlerTarget);
 		var gateStillOpen = queuedDay ? running : mains;
 		if (handlerState == SafeWriteHandler.State.QUEUED && !gateStillOpen && this.writeElement.withdraw()) {
 			// The gate it was queued under is gone before the bridge took the write:
@@ -438,7 +509,7 @@ final class ChargePrioritySchedule {
 		if (target == null) {
 			return new Step(ModeScheduleState.WAITING_FOR_DATA, null, null);
 		}
-		var day = target == this.dayPriority;
+		var day = this.isSafeValue(target);
 		final var date = now != null ? now.toLocalDate() : this.lastDate;
 		var sameTarget = target.equals(this.handlerTarget);
 		var failureBackoff = ModeSchedule
@@ -451,8 +522,8 @@ final class ChargePrioritySchedule {
 			return new Step(ModeScheduleState.WAITING_FOR_DATA, target, null);
 		}
 		if (chargePriority.intValue() == target.intValue()) {
-			// Write only on change.
-			return new Step(ModeScheduleState.IN_SYNC, target, null);
+			// Write only on change. While holding, the state keeps showing why.
+			return new Step(this.restingState(), target, null);
 		}
 		if (!day && this.failures >= ModeSchedule.MAX_ATTEMPTS) {
 			// Night failure budget for this window spent: latched until the next boundary.
@@ -489,16 +560,41 @@ final class ChargePrioritySchedule {
 		this.queuedAt = now;
 		if (reCorrection) {
 			this.overrides++;
-			this.overridesToday = this.overridesOn(date) + 1;
-			this.overridesDate = date;
+			if (!day) {
+				// Only the night value has a daily override cap.
+				this.overridesToday = this.overridesOn(date) + 1;
+				this.overridesDate = date;
+			}
 		}
 		this.handler = next;
 		this.writeElement.arm(target);
 		return new Step(ModeScheduleState.WRITE_PENDING, target, target);
 	}
 
+	// The safe value: the day value, or the value held while off or invalid.
+	private boolean isSafeValue(Integer value) {
+		return value != null && value == (this.holdValue != null ? this.holdValue : this.dayPriority);
+	}
+
+	private ModeScheduleState restingState() {
+		if (this.holdValue == null) {
+			return ModeScheduleState.IN_SYNC;
+		}
+		return this.enabled ? ModeScheduleState.CONFIG_INVALID : ModeScheduleState.DISABLED;
+	}
+
+	private void updateSafeMismatch(Integer target, Integer chargePriority) {
+		if (this.isSafeValue(target) && chargePriority != null && chargePriority.intValue() != target.intValue()) {
+			if (this.safeMismatchCycles < SAFE_MISMATCH_ALARM_CYCLES) {
+				this.safeMismatchCycles++;
+			}
+		} else {
+			this.safeMismatchCycles = 0;
+		}
+	}
+
 	private void updateNightLate(LocalDateTime now, Integer chargePriority) {
-		if (now == null || !this.isNight(now.toLocalTime()) || chargePriority == null
+		if (!this.isActive() || now == null || !this.isNight(now.toLocalTime()) || chargePriority == null
 				|| chargePriority == this.nightPriority) {
 			this.nightMismatchSince = null;
 			this.nightLate = false;

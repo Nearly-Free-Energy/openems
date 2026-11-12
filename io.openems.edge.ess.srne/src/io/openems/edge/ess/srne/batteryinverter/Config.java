@@ -166,10 +166,14 @@ import io.openems.edge.ess.srne.SrneConstants;
 	// Charge-priority schedule (E20F: 0 PV preferred, 1 mains preferred, 2 hybrid,
 	// 3 PV only). Decision D138: the grid may charge the battery only inside the
 	// night window. Night value from nightChargeFrom until nightChargeTo, day value
-	// otherwise. Writes are read-back verified and need controlEnabled and machine
-	// state 2 (mains). Off by default.
-	@AttributeDefinition(name = "Charge-priority schedule", description = "Switch E20F (charge priority) between a night and a day value every day, so the grid charges the battery only in the night window. Needs controlEnabled. Off by default. Turning it off (or removing the component) leaves E20F at its last value; set it by hand if needed.")
+	// otherwise. Writes are read-back verified and need controlEnabled; the night
+	// value needs machine state 2 (mains), the day value also goes out on battery
+	// (state 3). Off by default.
+	@AttributeDefinition(name = "Charge-priority schedule", description = "Switch E20F (charge priority) between a night and a day value every day, so the grid charges the battery only in the night window. Needs controlEnabled. Off by default. An invalid configuration holds E20F at 3 (PV only). Turning it off leaves E20F at its last value unless chargePriorityRestoreWhenOff is set; removing the component always does.")
 	boolean chargePrioritySchedule() default false;
+
+	@AttributeDefinition(name = "Charge-priority restore when off", description = "While chargePrioritySchedule is false, hold E20F at dayChargePriority (the safe value), so turning the schedule off in the night window cannot leave the night value. Off by default (E20F then is neither read nor written); set it together with chargePrioritySchedule in the gateway config.")
+	boolean chargePriorityRestoreWhenOff() default false;
 
 	@AttributeDefinition(name = "Night charge priority", description = "E20F value from nightChargeFrom to nightChargeTo: 0 PV preferred, 1 mains preferred, 2 hybrid (mains and PV, PV preferred), 3 PV only. Must differ from the day value.", options = {
 			@Option(label = "PV preferred", value = "0"), //

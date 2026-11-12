@@ -537,7 +537,7 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
      before a transfer to the line at `switchToLineSoc`. Failures and overrides never
      latch: retries back off 60, 120, 240, then every 480 cycles (about 8 minutes).
      Its own budget of 24 successful writes per local day protects the settings
-     memory (`DAILY_WRITE_LIMIT`). Startup hold of 30 cycles only. If the clock stays
+     memory (`DAILY_WRITE_LIMIT`, logged as a warning). Startup hold of 30 cycles only. If the clock stays
      unknown for 300 cycles (e.g. a reboot without NTP), the target becomes the day
      value. A day write in state `3` has not yet been done on a live unit: do one
      supervised write before relying on it.
@@ -550,22 +550,48 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
   window start only together with `gridPresentMinVoltage`. Until the night value
   lands the day value stays (no grid charge; night-charge time is lost). Channel
   `ChargePriorityNightLate` is `true` once the night value is still missing 10 minutes
-  into the night window, with a warning in the log.
-* Turning the schedule off, or removing the component, leaves `0xE20F` at its last
-  value; if that happens in the night window it stays at the night value. Set it by
-  hand (or turn the schedule back on) in that case.
-* `0xE20F` is read and written only while the schedule is active; default bus traffic
-  is unchanged. The register mapping (`0`..`3`) is the SRNE protocol's; the first
-  write on site should be supervised and read back, like `0xE204` was.
-* Invalid configuration (a value outside `0..3`, equal night and day values, a time
-  that is not `HH:MM`, equal times) turns the schedule off and reports
-  `CONFIG_INVALID`.
+  into the night window, with a warning in the log. If the SRNE only reads `0xE20F`
+  when the timer starts, a night value that lands after the timer start (e.g. hours
+  late in state `3`) loses that whole night charge.
+* Alarm: `ChargePrioritySafeValueMissing` (level WARNING) is `true` once the day value
+  (or the held value below) has been due but missing on the device for 600 cycles
+  (about 10 minutes), e.g. after the day budget is spent, while writes keep failing,
+  or in a fault state; the grid may then charge the battery. A warning is logged.
+* Turning it off and invalid configuration. `0xE20F` is a persistent setting, so a
+  schedule that stops must not leave the night value behind:
+  ** Invalid configuration (a value outside `0..3`, equal night and day values, a time
+     that is not `HH:MM`, equal times): the schedule is off, reports `CONFIG_INVALID`,
+     and holds `0xE20F` at `3` (PV only) through the day-value path.
+  ** `chargePrioritySchedule=false` with `chargePriorityRestoreWhenOff=true`: holds
+     `0xE20F` at `dayChargePriority` (or `3` if that is out of range) through the
+     day-value path; the state shows `DISABLED`. Set both together in the gateway
+     config, so turning the schedule off later restores the day value.
+  ** `chargePriorityRestoreWhenOff=false` (default): with the schedule off `0xE20F` is
+     neither read nor written (default bus traffic unchanged) and keeps its last value.
+     Removing the component always leaves the last value.
+* Charge-timer check: at activation the configured charge window 1, and once read the
+  window on the device (also when it is not managed by this component, `-1`), are
+  checked against the night window and the 5-minute start margin; a mismatch is
+  logged as a warning.
+* `0xE20F` is read and written only while the schedule is active or holds a value
+  (above); otherwise default bus traffic is unchanged. The register mapping (`0`..`3`)
+  is the SRNE protocol's; the first write on site should be supervised and read back,
+  like `0xE204` was.
+* Residual risks:
+  ** A gateway outage across `nightChargeTo` (Pi down or crashed while the inverter
+     keeps running) leaves the night value set until the gateway is back; nothing on
+     the inverter side undoes it. A day-time AC charge-current limit on the inverter
+     would bound it.
+  ** The clock gate cannot tell a stale but plausible time (fake-hwclock after a power
+     cut, NTP unreachable) from a correct one, as for the output-priority schedule.
+     Here a wrong time can write the night value in the evening if the unit is on the
+     line. Check that NTP syncs on the gateway before enabling.
 
 Channels: `ChargePriority` (`0xE20F` read-back), `ChargePriorityScheduleState` (the
 `ModeScheduleState` values; `BLOCKED_SBU_PRECONDITIONS` and `MIN_DWELL` do not occur;
 `WAITING_FOR_MAINS` means the machine-state gate of the due direction is closed),
-`ChargePriorityScheduleTarget` (the value the schedule wants now) and
-`ChargePriorityNightLate`.
+`ChargePriorityScheduleTarget` (the value the schedule wants now),
+`ChargePriorityNightLate` and `ChargePrioritySafeValueMissing`.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)
@@ -582,7 +608,7 @@ Channels: `ChargePriority` (`0xE20F` read-back), `ChargePriorityScheduleState` (
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
 * Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`), `eveningReserveSoc` (int %, default `-1` = off), `eveningReserveFrom` (String `HH:MM`, default `14:00`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
-* Charge-priority schedule: `chargePrioritySchedule` (boolean, default `false`), `nightChargePriority` (int `0..3`, default `2` = hybrid), `dayChargePriority` (int `0..3`, default `3` = PV only, must differ from `nightChargePriority`), `nightChargeFrom` (String `HH:MM`, default `00:00`), `nightChargeTo` (String `HH:MM`, default `06:00`, must differ from `nightChargeFrom`), evaluated in `scheduleTimeZone`. Needs `controlEnabled=true`; see "Daily charge-priority schedule" above.
+* Charge-priority schedule: `chargePrioritySchedule` (boolean, default `false`), `nightChargePriority` (int `0..3`, default `2` = hybrid), `dayChargePriority` (int `0..3`, default `3` = PV only, must differ from `nightChargePriority`), `nightChargeFrom` (String `HH:MM`, default `00:00`), `nightChargeTo` (String `HH:MM`, default `06:00`, must differ from `nightChargeFrom`), evaluated in `scheduleTimeZone`, `chargePriorityRestoreWhenOff` (boolean, default `false`; hold the day value while the schedule is off). Needs `controlEnabled=true`; see "Daily charge-priority schedule" above.
 * TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
