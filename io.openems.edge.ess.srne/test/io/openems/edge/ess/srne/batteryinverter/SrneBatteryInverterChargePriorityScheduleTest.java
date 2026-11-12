@@ -1,0 +1,178 @@
+package io.openems.edge.ess.srne.batteryinverter;
+
+import static io.openems.edge.ess.srne.SrneConstants.DEFAULT_UNIT_ID;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.time.Instant;
+import java.time.ZoneOffset;
+
+import org.junit.jupiter.api.Test;
+
+import io.openems.common.test.TimeLeapClock;
+import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
+import io.openems.edge.bridge.modbus.api.task.WriteTask;
+import io.openems.edge.bridge.modbus.test.DummyModbusBridge;
+import io.openems.edge.common.channel.Channel;
+import io.openems.edge.common.test.AbstractComponentTest.TestCase;
+import io.openems.edge.common.test.ComponentTest;
+import io.openems.edge.common.test.DummyComponentManager;
+import io.openems.edge.ess.srne.common.enums.MachineState;
+
+/**
+ * Charge-priority schedule (E20F) through the real component. Africa/Kampala is
+ * UTC+3: 23:00Z is 02:00 local (night window, hybrid) and 07:00Z is 10:00 local
+ * (day, PV only). The dummy bridge does not execute writes, so a test plays the
+ * device through the write task's execute callback and the register read-back.
+ */
+public class SrneBatteryInverterChargePriorityScheduleTest {
+
+	private static final int HYBRID = 2;
+	private static final int PV_ONLY = 3;
+	private static final int CYCLES = 16; // >= number of LOW read tasks
+	private static final int START_CYCLES = ModeSchedule.STARTUP_HOLD_CYCLES + CYCLES;
+	private static final String DAY = "2026-11-11T07:00:00Z";
+	private static final String NIGHT = "2026-11-11T23:00:00Z";
+
+	private static DummyModbusBridge bridge(int chargePriority, MachineState state) {
+		return new DummyModbusBridge("modbus0") //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0xE20F, chargePriority) //
+				.withRegister(0x0210, state.getValue());
+	}
+
+	private static MyConfig.Builder config() {
+		return MyConfig.create() //
+				.setId("batteryInverter0") //
+				.setModbusId("modbus0") //
+				.setModbusUnitId(DEFAULT_UNIT_ID) //
+				.setMaxApparentPower(12_000) //
+				.setControlEnabled(true) //
+				.setChargePrioritySchedule(true);
+	}
+
+	private static ComponentTest start(SrneBatteryInverterImpl sut, DummyModbusBridge bridge, String utc,
+			MyConfig config) throws Exception {
+		return new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager",
+						new DummyComponentManager(new TimeLeapClock(Instant.parse(utc), ZoneOffset.UTC))) //
+				.activate(config) //
+				.next(new TestCase(), START_CYCLES);
+	}
+
+	private static ModeScheduleState state(SrneBatteryInverterImpl sut) {
+		Channel<ModeScheduleState> channel = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE);
+		return channel.value().asEnum();
+	}
+
+	private static Integer target(SrneBatteryInverterImpl sut) {
+		Channel<Integer> channel = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET);
+		return channel.value().get();
+	}
+
+	private static boolean hasTask(SrneBatteryInverterImpl sut, boolean write, int address) {
+		for (var task : sut.defineModbusProtocol().getTaskManager().getTasks()) {
+			if (task instanceof WriteTask == write && task.getStartAddress() == address) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	@Test
+	public void testDefaultIsOffAndDoesNotTouchE20f() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		new ComponentTest(sut) //
+				.addReference("setModbus", bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS)) //
+				.activate(config().setChargePrioritySchedule(false).build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(ModeScheduleState.DISABLED, state(sut));
+		assertNull(target(sut));
+		assertFalse(sut.chargePriorityScheduleForTest().isActive());
+		assertFalse(sut.takeChargePriorityWriteForTest());
+		// Default bus traffic unchanged: E20F is neither read nor written.
+		assertFalse(hasTask(sut, false, 0xE20F));
+		assertFalse(hasTask(sut, true, 0xE20F));
+	}
+
+	@Test
+	public void testInvalidConfigStaysOff() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS), NIGHT,
+				config().setDayChargePriority(HYBRID).build());
+		assertEquals(ModeScheduleState.CONFIG_INVALID, state(sut));
+		assertFalse(hasTask(sut, true, 0xE20F));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testNightWriteQueuedAndVerified() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(PV_ONLY, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, NIGHT, config().build());
+		assertTrue(hasTask(sut, false, 0xE20F));
+		assertTrue(hasTask(sut, true, 0xE20F));
+		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
+		assertEquals(HYBRID, target(sut));
+
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, HYBRID);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.chargePriorityScheduleForTest().handlerState());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testReadbackMismatchFails() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(PV_ONLY, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, NIGHT, config().build());
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		// The device keeps PV only: the write fails and backs off.
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState());
+		assertEquals(ModeScheduleState.WRITE_FAILED, state(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testDayInSyncNeverWrites() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(PV_ONLY, MachineState.RUNNING_MAINS_BYPASS), DAY, config().build()) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(PV_ONLY, target(sut));
+		assertNull(sut.chargePriorityScheduleForTest().handlerState());
+		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testDayWriteWaitsForMains() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(HYBRID, MachineState.SOFT_START);
+		final var test = start(sut, bridge, DAY, config().build());
+		assertEquals(ModeScheduleState.WAITING_FOR_MAINS, state(sut));
+		assertEquals(PV_ONLY, target(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		test.next(new TestCase(), CYCLES);
+		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+	}
+
+	@Test
+	public void testControlDisabledNeverWrites() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(PV_ONLY, MachineState.RUNNING_MAINS_BYPASS), NIGHT,
+				config().setControlEnabled(false).build());
+		assertEquals(ModeScheduleState.DISABLED, state(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+	}
+}
