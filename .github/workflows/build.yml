@@ -108,6 +108,9 @@ jobs:
           - image: openems-backend
             dockerfile: tools/docker/backend/Dockerfile
             platforms: linux/amd64
+          - image: openems-backend-edge
+            dockerfile: tools/docker/backend-edge/Dockerfile
+            platforms: linux/amd64
           - image: openems-ui-backend
             dockerfile: tools/docker/ui/Dockerfile.backend
             platforms: linux/amd64

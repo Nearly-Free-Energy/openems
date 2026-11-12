@@ -142,6 +142,9 @@ jobs:
           - image: openems-backend
             dockerfile: tools/docker/backend/Dockerfile
             platforms: linux/amd64
+          - image: openems-backend-edge
+            dockerfile: tools/docker/backend-edge/Dockerfile
+            platforms: linux/amd64
           - image: openems-ui-backend
             dockerfile: tools/docker/ui/Dockerfile.backend
             platforms: linux/amd64
@@ -258,7 +261,7 @@ jobs:
           {
             echo "## NFE image release complete"
             echo
-            echo "All four images published for \`$RELEASE_TAG\` from \`$SOURCE_SHA\`."
+            echo "All five images published for \`$RELEASE_TAG\` from \`$SOURCE_SHA\`."
             if [[ -n "$UPSTREAM_TAG" ]]; then
               echo "Upstream OpenEMS release: \`$UPSTREAM_TAG\`."
             fi
