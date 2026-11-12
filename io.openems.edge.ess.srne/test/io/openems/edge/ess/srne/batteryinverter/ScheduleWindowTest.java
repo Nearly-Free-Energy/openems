@@ -143,8 +143,8 @@ public class ScheduleWindowTest {
 
 	@Test
 	void queuedWritesNeverTimeOutWithoutTheQueuedTimeout() {
-		// Charge window and rules-off discharge window: a write queued while the link is
-		// down must still execute when it returns, however long that takes.
+		// Charge window and rules-off discharge window: a write queued while the link
+		// is down must still execute when it returns, however long that takes.
 		var window = newDischargeWindow();
 		window.reconcile(0, 0, 0, 4608, 5947, 1);
 		for (var i = 0; i < 1000; i++) {
@@ -353,8 +353,9 @@ public class ScheduleWindowTest {
 		assertEquals(ScheduleWindow.State.DONE, sut.getState());
 	}
 
-	// JUSTIFICATION-A3: new invariant-robustness test (re-review advisory) proving the
-	// window is never written if the device enable flaps back to 1 mid-sequence.
+	// JUSTIFICATION-A3: new invariant-robustness test (re-review advisory) proving
+	// the window is never written if the device enable flaps back to 1
+	// mid-sequence.
 	@Test
 	void flappedEnableAtDisableVerifiedReDisarmsNeverWritesWindow() {
 		var sut = newDischargeWindow();
@@ -378,9 +379,9 @@ public class ScheduleWindowTest {
 	@Test
 	void changedWindowOnArmedDeviceWithUnmanagedEnableRestoresArmed() {
 		var sut = newDischargeWindow();
-		// Device is ARMED (enable=1); operator changes only the window and leaves enable
-		// at -1. Must disarm, rewrite, then RESTORE the captured armed state - never
-		// mutate a live enabled window, and never silently leave it disabled.
+		// Device is ARMED (enable=1); operator changes only the window and leaves
+		// enable at -1. Must disarm, rewrite, then RESTORE the captured armed state -
+		// never mutate a live enabled window, and never silently leave it disabled.
 		sut.reconcile(0, 0, 1, 4608, 5947, -1);
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
 		assertEquals(Integer.valueOf(1), sut.desiredEnable()); // captured original armed state
@@ -516,7 +517,8 @@ public class ScheduleWindowTest {
 	}
 
 	// Recovery from that left-over state after a fresh activation: the device reads
-	// (5947, 0) disabled; the handler rewrites both registers (never arms: enable=0).
+	// (5947, 0) disabled; the handler rewrites both registers (never arms:
+	// enable=0).
 	@Test
 	void freshActivationRewritesLeftoverMisplacedWindow() {
 		var sut = newDischargeWindow();
@@ -604,7 +606,8 @@ public class ScheduleWindowTest {
 	@Test
 	void desiredEnableFollowsTheTargetWhileASequenceIsInProgress() {
 		var sut = newDischargeWindow();
-		// Armed device with a different window; the target is armed when the sequence starts.
+		// Armed device with a different window; the target is armed when the sequence
+		// starts.
 		sut.reconcile(0, 0, 1, 4608, 5947, 1);
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
 		assertEquals(Integer.valueOf(1), sut.desiredEnable());
@@ -767,7 +770,8 @@ public class ScheduleWindowTest {
 		sut.reconcile(4608, 5947, 1, 4608, 5947, 0);
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
 
-		// Neither the stale callback nor the disarm's arrives: the queued wait times out.
+		// Neither the stale callback nor the disarm's arrives: the queued wait times
+		// out.
 		for (var i = 0; i < 5; i++) {
 			sut.onCycle(5);
 		}
@@ -779,5 +783,42 @@ public class ScheduleWindowTest {
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
 		sut.onEnableExecute(ExecuteState.OK);
 		assertEquals(ScheduleWindow.State.DISABLE_AWAITING_READBACK, sut.getState());
+	}
+
+	@Test
+	void retryWaitsForAFreshEnableReadBeforeTheNextStep() {
+		var sut = newDischargeWindow();
+		// Disarmed device with a stale window: the window write fails.
+		sut.reconcile(0, 0, 0, 4608, 5947, 1);
+		assertEquals(ScheduleWindow.State.WINDOW_QUEUED, sut.getState());
+		sut.onStartExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertTrue(sut.isRetryableFailure());
+
+		assertTrue(sut.retry());
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+		// The cached enable (0) predates the retry: nothing is written.
+		assertNull(sut.reconcile(0, 0, 0, 4608, 5947, 1));
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		// A fresh read says the device is armed; the stale 0 still must not pass.
+		sut.verifyEnable(1);
+		assertNull(sut.reconcile(0, 0, 0, 4608, 5947, 1));
+		assertEquals(ScheduleWindow.State.IDLE, sut.getState());
+		// Once the cycle sees the fresh 1, the retry disarms first.
+		assertNotNull(sut.reconcile(0, 0, 1, 4608, 5947, 1));
+		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
+		assertEquals(Integer.valueOf(0), sut.queuedEnable());
+		assertNull(sut.startWriteElement().getNextWriteValueAndReset());
+		assertNull(sut.stopWriteElement().getNextWriteValueAndReset());
+	}
+
+	@Test
+	void retryIsRefusedForARejectionAndOutsideFailed() {
+		var sut = newDischargeWindow();
+		assertFalse(sut.retry());
+		sut.reconcile(0, 0, 0, 5947, 4608, 1);
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
+		assertFalse(sut.isRetryableFailure());
+		assertFalse(sut.retry());
+		assertEquals(ScheduleWindow.State.FAILED, sut.getState());
 	}
 }
