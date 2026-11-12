@@ -2,6 +2,7 @@ package io.openems.edge.ess.srne.batteryinverter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -525,33 +526,37 @@ public class ChargePriorityScheduleTest {
 	}
 
 	@Test
-	public void testDayOverridesAreCorrectedUpToTheDayBudget() {
+	public void testDayOverridesHaveNoCapAndRaiseTheAlarm() {
 		var sut = primed();
 		var t = at(DAY);
 		// Someone keeps setting hybrid on the panel by day: corrected every time,
-		// beyond the night override caps, until the day budget is spent.
-		for (var n = 1; n <= ChargePrioritySchedule.MAX_DAILY_DAY_WRITES; n++) {
+		// beyond the night override caps and the former day cap of 24 writes.
+		for (var n = 1; n <= 30; n++) {
 			var wrote = false;
 			for (var i = 0; i <= ModeSchedule.backoffCycles(ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS, COOLDOWN)
 					&& !wrote; i++) {
 				var step = step(sut, t, HYBRID, true);
-				assertFalse(step.state() == ModeScheduleState.OVERRIDDEN);
+				assertNotEquals(ModeScheduleState.OVERRIDDEN, step.state());
+				assertNotEquals(ModeScheduleState.DAILY_WRITE_LIMIT, step.state());
 				wrote = step.write() != null;
 			}
 			assertTrue(wrote, "correction " + n);
 			device(sut, PV_ONLY);
 			assertStep(step(sut, t, PV_ONLY, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+			// The first write is not an override. The alarm holds from the
+			// SAFE_OVERRIDE_ALARM-th re-correction on, even while in sync: the
+			// override is persistent and the grid charges between corrections.
+			assertEquals(n - 1 >= ChargePrioritySchedule.SAFE_OVERRIDE_ALARM, sut.isSafeValueMissing(),
+					"correction " + n);
 		}
-		assertEquals(ChargePrioritySchedule.MAX_DAILY_DAY_WRITES, sut.dayWritesTodayForTest(DATE));
-		// After the re-correction backoff, the day budget holds.
-		for (var i = 0; i < 500; i++) {
-			assertNull(step(sut, t, HYBRID, true).write());
-		}
-		for (var i = 0; i < 1000; i++) {
-			assertStep(step(sut, t, HYBRID, true), ModeScheduleState.DAILY_WRITE_LIMIT, PV_ONLY, null);
-		}
-		// Not silent: the safe-value alarm holds.
-		assertTrue(sut.isSafeValueMissing());
+		assertEquals(30, sut.dayWritesTodayForTest(DATE));
+		// Night window: the night value is due, no alarm; its budget is untouched.
+		assertStep(step(sut, at(NIGHT), PV_ONLY, true), ModeScheduleState.WRITE_PENDING, HYBRID, HYBRID);
+		assertFalse(sut.isSafeValueMissing());
+		// The next local day starts without the alarm.
+		device(sut, HYBRID);
+		assertStep(step(sut, at(DAY).plusDays(1), PV_ONLY, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		assertFalse(sut.isSafeValueMissing());
 	}
 
 	@Test

@@ -54,10 +54,10 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * asymmetric, like the discharge-schedule disarm: it is also allowed while
  * running on battery ({@link ModeSchedule#ON_BATTERY_STATE}), so it is in place
  * before a transfer to the line; failures and overrides never latch (retries
- * back off up to {@link #DAY_MAX_BACKOFF_ATTEMPTS}); it has its own daily
- * budget {@link #MAX_DAILY_DAY_WRITES} and a short startup hold
- * {@link #DAY_STARTUP_HOLD_CYCLES}; and it becomes the target when the clock
- * stays unknown for {@link #UNKNOWN_CLOCK_FALLBACK_CYCLES} cycles.
+ * back off up to {@link #DAY_MAX_BACKOFF_ATTEMPTS}); it has no daily cap (the
+ * backoff bounds it) and a short startup hold {@link #DAY_STARTUP_HOLD_CYCLES};
+ * and it becomes the target when the clock stays unknown for
+ * {@link #UNKNOWN_CLOCK_FALLBACK_CYCLES} cycles.
  *
  * <p>
  * Thread-safety: {@link #step} and {@link #plausibleTime} run on the Edge cycle
@@ -84,11 +84,13 @@ final class ChargePrioritySchedule {
 	/** Re-corrections of an overridden night value allowed per local day. */
 	static final int MAX_OVERRIDES_PER_DAY = 3;
 	/**
-	 * Successful day-value writes allowed per local day: its own, larger budget, so
-	 * overrides of the safe direction keep being corrected while the settings
-	 * memory is still protected.
+	 * Day-value re-corrections per local day from which
+	 * {@link #isSafeValueMissing()} holds for the rest of the day: a persistent
+	 * override that is corrected every time never stays missing for
+	 * {@link #SAFE_MISMATCH_ALARM_CYCLES} in a row, but still lets the grid charge
+	 * between corrections.
 	 */
-	static final int MAX_DAILY_DAY_WRITES = 24;
+	static final int SAFE_OVERRIDE_ALARM = 3;
 	/**
 	 * Cap on the exponent of the day-value retry backoff: with the 60-cycle base
 	 * cooldown a failed or overridden day value is retried at least every 480
@@ -159,6 +161,9 @@ final class ChargePrioritySchedule {
 	private volatile int freshRunningReads;
 	private LocalDate dayWritesDate;
 	private int dayWritesToday;
+	private LocalDate safeOverridesDate;
+	private int safeOverridesToday;
+	private boolean safeDue;
 	private LocalDate lastDate = LocalDate.MIN;
 	private int unknownClockCycles;
 	private LocalDateTime nightMismatchSince;
@@ -274,14 +279,16 @@ final class ChargePrioritySchedule {
 
 	/**
 	 * Whether the safe value (the day value, or the held value) is due but the
-	 * device has not read it for {@link #SAFE_MISMATCH_ALARM_CYCLES} cycles, e.g.
-	 * because the daily budget is spent or the write keeps failing: the grid may
-	 * charge outside the night window.
+	 * device has not read it for {@link #SAFE_MISMATCH_ALARM_CYCLES} cycles (e.g.
+	 * the write keeps failing or a fault state blocks it), or it has been
+	 * re-corrected {@link #SAFE_OVERRIDE_ALARM} times today (a persistent
+	 * override): the grid may charge outside the night window.
 	 *
 	 * @return true while the alarm holds
 	 */
 	boolean isSafeValueMissing() {
-		return this.safeMismatchCycles >= SAFE_MISMATCH_ALARM_CYCLES;
+		return this.safeMismatchCycles >= SAFE_MISMATCH_ALARM_CYCLES
+				|| this.safeDue && this.safeOverridesOn(this.lastDate) >= SAFE_OVERRIDE_ALARM;
 	}
 
 	String getInvalidReason() {
@@ -426,8 +433,7 @@ final class ChargePrioritySchedule {
 	 * The day value is the safe direction (mains does not charge), so its write is
 	 * asymmetric: it is also allowed on battery (state 3), it never latches on
 	 * failures or overrides (retries back off up to
-	 * {@link #DAY_MAX_BACKOFF_ATTEMPTS}), it has its own daily budget
-	 * {@link #MAX_DAILY_DAY_WRITES}, a short startup hold
+	 * {@link #DAY_MAX_BACKOFF_ATTEMPTS}), it has no daily cap, a short startup hold
 	 * {@link #DAY_STARTUP_HOLD_CYCLES}, and it becomes the target when the clock
 	 * stays unknown for {@link #UNKNOWN_CLOCK_FALLBACK_CYCLES} cycles.
 	 *
@@ -541,7 +547,9 @@ final class ChargePrioritySchedule {
 				return new Step(ModeScheduleState.WRITE_PENDING, target, null);
 			}
 		}
-		if (day ? this.dayWritesOn(date) >= MAX_DAILY_DAY_WRITES : this.writesOn(date) >= MAX_DAILY_WRITES) {
+		// Only the night value has a daily ceiling. The safe value is bounded by its
+		// backoff (about 180 writes a day at most) and alarmed by isSafeValueMissing().
+		if (!day && this.writesOn(date) >= MAX_DAILY_WRITES) {
 			return new Step(ModeScheduleState.DAILY_WRITE_LIMIT, target, null);
 		}
 		var gateConfirmed = day ? running && this.freshRunningReads >= ModeSchedule.MAINS_CONFIRM_READS
@@ -560,7 +568,10 @@ final class ChargePrioritySchedule {
 		this.queuedAt = now;
 		if (reCorrection) {
 			this.overrides++;
-			if (!day) {
+			if (day) {
+				this.safeOverridesToday = this.safeOverridesOn(date) + 1;
+				this.safeOverridesDate = date;
+			} else {
 				// Only the night value has a daily override cap.
 				this.overridesToday = this.overridesOn(date) + 1;
 				this.overridesDate = date;
@@ -584,6 +595,7 @@ final class ChargePrioritySchedule {
 	}
 
 	private void updateSafeMismatch(Integer target, Integer chargePriority) {
+		this.safeDue = this.isSafeValue(target);
 		if (this.isSafeValue(target) && chargePriority != null && chargePriority.intValue() != target.intValue()) {
 			if (this.safeMismatchCycles < SAFE_MISMATCH_ALARM_CYCLES) {
 				this.safeMismatchCycles++;
@@ -637,6 +649,10 @@ final class ChargePrioritySchedule {
 
 	private int writesOn(LocalDate date) {
 		return date.equals(this.writesDate) ? this.writesToday : 0;
+	}
+
+	private int safeOverridesOn(LocalDate date) {
+		return date.equals(this.safeOverridesDate) ? this.safeOverridesToday : 0;
 	}
 
 	private int dayWritesOn(LocalDate date) {

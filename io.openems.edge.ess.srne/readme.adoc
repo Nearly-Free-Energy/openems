@@ -536,8 +536,8 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
      `2` or `3`; a queued write is withdrawn in any other state), so it is in place
      before a transfer to the line at `switchToLineSoc`. Failures and overrides never
      latch: retries back off 60, 120, 240, then every 480 cycles (about 8 minutes).
-     Its own budget of 24 successful writes per local day protects the settings
-     memory (`DAILY_WRITE_LIMIT`, logged as a warning). Startup hold of 30 cycles only. If the clock stays
+     No daily cap: the backoff alone bounds it to about 180 writes a day, so a
+     persistent override keeps being corrected all day. Startup hold of 30 cycles only. If the clock stays
      unknown for 300 cycles (e.g. a reboot without NTP), the target becomes the day
      value. A day write in state `3` has not yet been done on a live unit: do one
      supervised write before relying on it.
@@ -555,8 +555,11 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
   late in state `3`) loses that whole night charge.
 * Alarm: `ChargePrioritySafeValueMissing` (level WARNING) is `true` once the day value
   (or the held value below) has been due but missing on the device for 600 cycles
-  (about 10 minutes), e.g. after the day budget is spent, while writes keep failing,
-  or in a fault state; the grid may then charge the battery. A warning is logged.
+  (about 10 minutes), e.g. while writes keep failing or in a fault state, or once it
+  has been re-corrected 3 times on the same local day (a persistent override; then
+  for the rest of that day while it is due). The grid may then charge the battery. A
+  warning is logged. WARNING, not FAULT, so the alarm never drives an ESS state
+  machine into its error state.
 * Turning it off and invalid configuration. `0xE20F` is a persistent setting, so a
   schedule that stops must not leave the night value behind:
   ** Invalid configuration (a value outside `0..3`, equal night and day values, a time
