@@ -22,6 +22,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int maxChargeCurrentLimit = -1;
 		private int chargeWindow1Start = -1;
 		private int chargeWindow1Stop = -1;
+		private int chargeWindow1StopSoc = -1;
 		private int dischargeWindow1Start = -1;
 		private int dischargeWindow1Stop = -1;
 		private int chargeScheduleEnable = -1;
@@ -31,6 +32,17 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int dischargeStartMinSoc = -1;
 		private int dischargeFloorSoc = -1;
 		private String scheduleTimeZone = "Africa/Kampala";
+		private boolean modeScheduleEnabled = false;
+		private int daytimePriority = 3;
+		private int eveningPriority = 2;
+		private String eveningStart = "18:00";
+		private String daytimeStart = "00:30";
+		private int daytimeSbuAboveSoc = -1;
+		private int daytimeSbuBelowSoc = -1;
+		private int minDwellMinutes = 10;
+		private int gridPresentMinVoltage = -1;
+		private int eveningReserveSoc = -1;
+		private String eveningReserveFrom = "14:00";
 
 		private Builder() {
 		}
@@ -67,6 +79,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setLowSocAlarm(int value) {
 			this.lowSocAlarm = value;
+			return this;
+		}
+
+		public Builder setChargeWindow1StopSoc(int value) {
+			this.chargeWindow1StopSoc = value;
 			return this;
 		}
 
@@ -138,6 +155,61 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 			return this;
 		}
 
+		public Builder setModeScheduleEnabled(boolean value) {
+			this.modeScheduleEnabled = value;
+			return this;
+		}
+
+		public Builder setDaytimePriority(int value) {
+			this.daytimePriority = value;
+			return this;
+		}
+
+		public Builder setEveningPriority(int value) {
+			this.eveningPriority = value;
+			return this;
+		}
+
+		public Builder setEveningStart(String value) {
+			this.eveningStart = value;
+			return this;
+		}
+
+		public Builder setDaytimeStart(String value) {
+			this.daytimeStart = value;
+			return this;
+		}
+
+		public Builder setDaytimeSbuAboveSoc(int value) {
+			this.daytimeSbuAboveSoc = value;
+			return this;
+		}
+
+		public Builder setDaytimeSbuBelowSoc(int value) {
+			this.daytimeSbuBelowSoc = value;
+			return this;
+		}
+
+		public Builder setMinDwellMinutes(int value) {
+			this.minDwellMinutes = value;
+			return this;
+		}
+
+		public Builder setGridPresentMinVoltage(int value) {
+			this.gridPresentMinVoltage = value;
+			return this;
+		}
+
+		public Builder setEveningReserveSoc(int value) {
+			this.eveningReserveSoc = value;
+			return this;
+		}
+
+		public Builder setEveningReserveFrom(String value) {
+			this.eveningReserveFrom = value;
+			return this;
+		}
+
 		public MyConfig build() {
 			return new MyConfig(this);
 		}
@@ -197,6 +269,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int stopChargeSoc() {
 		return this.builder.stopChargeSoc;
+	}
+
+	@Override
+	public int chargeWindow1StopSoc() {
+		return this.builder.chargeWindow1StopSoc;
 	}
 
 	@Override
@@ -280,5 +357,60 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int bmsCommunication() {
 		return this.builder.bmsCommunication;
+	}
+
+	@Override
+	public boolean modeScheduleEnabled() {
+		return this.builder.modeScheduleEnabled;
+	}
+
+	@Override
+	public int daytimePriority() {
+		return this.builder.daytimePriority;
+	}
+
+	@Override
+	public int eveningPriority() {
+		return this.builder.eveningPriority;
+	}
+
+	@Override
+	public String eveningStart() {
+		return this.builder.eveningStart;
+	}
+
+	@Override
+	public String daytimeStart() {
+		return this.builder.daytimeStart;
+	}
+
+	@Override
+	public int daytimeSbuAboveSoc() {
+		return this.builder.daytimeSbuAboveSoc;
+	}
+
+	@Override
+	public int daytimeSbuBelowSoc() {
+		return this.builder.daytimeSbuBelowSoc;
+	}
+
+	@Override
+	public int minDwellMinutes() {
+		return this.builder.minDwellMinutes;
+	}
+
+	@Override
+	public int gridPresentMinVoltage() {
+		return this.builder.gridPresentMinVoltage;
+	}
+
+	@Override
+	public int eveningReserveSoc() {
+		return this.builder.eveningReserveSoc;
+	}
+
+	@Override
+	public String eveningReserveFrom() {
+		return this.builder.eveningReserveFrom;
 	}
 }

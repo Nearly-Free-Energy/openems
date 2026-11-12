@@ -30,8 +30,8 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		SWITCH_TO_BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT)), //
 		AC_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
 		MAX_CHARGE_CURRENT_LIMIT(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIAMPERE)), //
-		// Output priority = source transfer (SBU/SUB/SOL/UTI). The value->mode enum is
-		// confirmed on the unit at commissioning; not the same as charge priority.
+		// Output priority = source transfer: 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual,
+		// confirmed on gw-pi2 v29). Not the same as charge priority.
 		OUTPUT_PRIORITY(Doc.of(OpenemsType.INTEGER) //
 				.text("Output source priority mode (0xE204)")), //
 		BMS_COMMUNICATION(Doc.of(OpenemsType.INTEGER) //
@@ -42,6 +42,11 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Charge window 1 start, encoded hour*256+min (0xE026)")), //
 		CHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
 				.text("Charge window 1 stop, encoded hour*256+min (0xE027)")), //
+		// Raw register, no unit: the device reports 4096 until the value has been set
+		// (protocol default marker), which would show as 4096 %. Read only when
+		// chargeWindow1StopSoc is configured.
+		CHARGE_WINDOW_1_STOP_SOC(Doc.of(OpenemsType.INTEGER) //
+				.text("Charge window 1 stop SoC in percent (0xE03B); 4096 = never set")), //
 		DISCHARGE_WINDOW_1_START(Doc.of(OpenemsType.INTEGER) //
 				.text("Discharge window 1 start, encoded hour*256+min (0xE02D)")), //
 		DISCHARGE_WINDOW_1_STOP(Doc.of(OpenemsType.INTEGER) //
@@ -88,11 +93,25 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		OVER_DISCHARGE_DELAY(Doc.of(OpenemsType.INTEGER).unit(Unit.SECONDS) //
 				.text("Over-discharge delay (0xE010)")), //
 		BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
-				.text("Battery state of charge (0x0100); read only when a discharge SoC rule is configured")), //
+				.text("Battery state of charge (0x0100); read only when a discharge SoC rule or the mode schedule is configured")), //
 		DISCHARGE_SUPPRESSED(Doc.of(OpenemsType.BOOLEAN) //
 				.text("Discharge schedule held disabled by the start-threshold or floor rule")), //
 		DISCHARGE_SUPPRESSION_REASON(Doc.of(DischargeSuppressionReason.values()) //
 				.text("Why the discharge schedule is held disabled")), //
+		MODE_SCHEDULE_STATE(Doc.of(ModeScheduleState.values()) //
+				.text("State of the daily output-priority schedule (0xE204)")), //
+		MODE_SCHEDULE_TARGET_PRIORITY(Doc.of(OpenemsType.INTEGER) //
+				.text("Output priority the daily schedule wants now (2 SBU, 3 SUB)")), //
+		// Grid-input voltages (0x0213 L1, 0x022A L2, 0x022B L3, 0.1 V), read only when
+		// the mode schedule's SUB-on-battery path is enabled.
+		GRID_VOLTAGE_L1(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Grid-input voltage L1 (0x0213), for the mode schedule's grid-present check")), //
+		GRID_VOLTAGE_L2(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Grid-input voltage L2 (0x022A), for the mode schedule's grid-present check")), //
+		GRID_VOLTAGE_L3(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
+				.text("Grid-input voltage L3 (0x022B), for the mode schedule's grid-present check")), //
+		MODE_SCHEDULE_REASON(Doc.of(ModeScheduleReason.values()) //
+				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC or LOW_SOC")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 

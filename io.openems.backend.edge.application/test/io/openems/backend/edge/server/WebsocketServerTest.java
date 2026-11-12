@@ -10,7 +10,6 @@ import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 import org.java_websocket.WebSocket;
@@ -19,6 +18,8 @@ import org.java_websocket.framing.CloseFrame;
 import org.java_websocket.handshake.HandshakeImpl1Client;
 import org.junit.jupiter.api.Test;
 
+import io.openems.backend.edge.application.BackendEdgeServerApp;
+import io.openems.backend.edge.application.Cache;
 import io.openems.backend.edge.application.CyclicTask;
 import io.openems.backend.edge.client.WebsocketClient;
 
@@ -31,14 +32,12 @@ public class WebsocketServerTest {
 	}
 
 	private static WebsocketServer createServer(Consumer<String> handshakeAccepted) {
-		return new WebsocketServer("test", 0, 1, //
-				(edgeId, request) -> CompletableFuture.failedFuture(new UnsupportedOperationException()), //
-				(edgeId, notification) -> {
-				}, //
-				apikey -> "valid-key".equals(apikey) ? "edge0" : null, //
-				handshakeAccepted, //
-				() -> {
-				});
+		final var cache = mock(Cache.class);
+		when(cache.authenticateApikey("valid-key")).thenReturn("edge0");
+		final var app = mock(BackendEdgeServerApp.class);
+		when(app.getCache()).thenReturn(cache);
+		return new WebsocketServer("test", 0, 1, app, handshakeAccepted, () -> {
+		});
 	}
 
 	private static HandshakeImpl1Client handshake(String apikey, String id) {

@@ -13,13 +13,16 @@ import org.java_websocket.handshake.ClientHandshake;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.openems.common.jsonrpc.base.JsonrpcMessage;
 import io.openems.common.websocket.AbstractWebsocketClient;
 import io.openems.common.websocket.ClientReconnectorWorker;
 import io.openems.common.websocket.CommonHttpHeader;
 import io.openems.common.websocket.OnClose;
+import io.openems.common.websocket.OnNotification;
 import io.openems.common.websocket.WebsocketUtils;
 import io.openems.common.websocket.WsData;
 import io.openems.edge.common.channel.ChannelUtils;
+import io.openems.edge.controller.api.backend.api.BackendEvent;
 import io.openems.edge.controller.api.backend.api.ControllerApiBackend;
 
 public class WebsocketClient extends AbstractWebsocketClient<WsData> {
@@ -28,7 +31,7 @@ public class WebsocketClient extends AbstractWebsocketClient<WsData> {
 
 	private final ControllerApiBackendImpl parent;
 	private final OnOpen onOpen;
-	private final OnNotification onNotification;
+	private final io.openems.common.websocket.OnNotification onNotification;
 	private final OnError onError;
 	private final OnClose onClose;
 
@@ -38,7 +41,6 @@ public class WebsocketClient extends AbstractWebsocketClient<WsData> {
 				ClientReconnectorWorker.DEFAULT_CONFIG.withEventHandler(e -> onReconnectEvent(parent, e)));
 		this.parent = parent;
 		this.onOpen = new OnOpen(parent);
-		this.onNotification = new OnNotification(parent);
 		this.onError = new OnError(parent);
 		this.onClose = (ws, code, reason, remote) -> {
 			final var serverUriStr = serverUri.toString();
@@ -53,6 +55,9 @@ public class WebsocketClient extends AbstractWebsocketClient<WsData> {
 			}
 
 			this.parent.getUnableToSendChannel().setNextValue(true);
+		};
+		this.onNotification = (websocket, notification) -> {
+			parent.getEventHandler().emit(new BackendEvent.Notification(notification));
 		};
 	}
 
@@ -114,6 +119,20 @@ public class WebsocketClient extends AbstractWebsocketClient<WsData> {
 	@Override
 	protected void logError(Logger log, String message) {
 		this.parent.logError(log, message);
+	}
+
+	/**
+	 * Sends a {@link JsonrpcMessage} to the Backend. Every notification is wrapped
+	 * in an {@link io.openems.common.jsonrpc.notification.EdgeRpcNotification}
+	 * here, once, when an Edge-ID is configured, so that every sender (including
+	 * ones added by upstream) works with the Backend Edge.Manager protocol.
+	 *
+	 * @param message the {@link JsonrpcMessage}
+	 * @return true if sending was successful
+	 */
+	@Override
+	public boolean sendMessage(JsonrpcMessage message) {
+		return super.sendMessage(this.parent.wrap(message));
 	}
 
 	public boolean isConnected() {

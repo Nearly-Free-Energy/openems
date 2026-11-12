@@ -7,6 +7,7 @@ import static org.osgi.service.component.annotations.ReferencePolicyOption.GREED
 
 import java.time.Clock;
 import java.time.DateTimeException;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.concurrent.atomic.AtomicReference;
@@ -90,14 +91,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final UnsignedWordElement maxChargeCurrentLimitWrite = new UnsignedWordElement(0xE20A);
 	// JUSTIFICATION-A3: output priority (E204, source transfer) + BMS-comms enable
 	// (E215) added to the guarded write allow-list (#71) so SBU mode + BMS-SoC switching
-	// are settable from OpenEMS. Same scalar guarded path as the SoC/current settings;
-	// the exact value->mode enum is unverified in the manuals and is confirmed on the
-	// unit at commissioning, so the ranges here are bounded only.
+	// are settable from OpenEMS. Same scalar guarded path as the SoC/current settings.
+	// E204 mapping (SRNE manual, confirmed on gw-pi2 v29, microgrid-gateway #97,
+	// 4 Nov 2026): 0 SOL, 1 UTI, 2 SBU, 3 SUB.
 	private final UnsignedWordElement outputPriorityWrite = new UnsignedWordElement(0xE204);
 	private final UnsignedWordElement bmsCommunicationWrite = new UnsignedWordElement(0xE215);
+	// Timed-charge stop SoC of charge window 1 (E03B). Its read and write tasks are
+	// added only when chargeWindow1StopSoc is configured, so default traffic is unchanged.
+	private final UnsignedWordElement chargeWindow1StopSocWrite = new UnsignedWordElement(0xE03B);
 	private final SafeWriteHandler[] writeHandlers = { new SafeWriteHandler(), new SafeWriteHandler(),
 			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
-			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler() };
+			new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(), new SafeWriteHandler(),
+			new SafeWriteHandler() };
 	/*
 	 * TOU schedule windows for arbitrage. Each window is a coherent (start, stop,
 	 * enable) unit: the contiguous start/stop pair (charge 0xE026/0xE027, discharge
@@ -110,6 +115,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final ScheduleWindow dischargeWindow = new ScheduleWindow(0xE02D, 0xE033, "DISCHARGE");
 	private Config config;
 	private DischargeGuard dischargeGuard = new DischargeGuard(-1, -1);
+	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null,
+			null, -1);
+	private ModeScheduleState lastModeScheduleState;
 	private ZoneId scheduleZone = ZoneId.of(DEFAULT_SCHEDULE_ZONE);
 	private Integer appliedDischargeEnable;
 	private int failedCycles;
@@ -155,6 +163,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private void activate(ComponentContext context, Config config) throws OpenemsException {
 		this.config = config;
 		this.dischargeGuard = this.createDischargeGuard(config);
+		this.modeSchedule = ModeSchedule.fromConfig(config.modeScheduleEnabled(), config.daytimePriority(),
+				config.eveningPriority(), config.eveningStart(), config.daytimeStart(), config.outputPriority(),
+				config.daytimeSbuAboveSoc(), config.daytimeSbuBelowSoc(), config.minDwellMinutes(),
+				config.gridPresentMinVoltage(), config.eveningReserveSoc(), config.eveningReserveFrom());
+		if (this.modeSchedule.getInvalidReason() != null) {
+			this.logError(this.log, "Invalid mode schedule: " + this.modeSchedule.getInvalidReason()
+					+ "; the schedule stays off");
+		}
 		/*
 		 * There is intentionally no @Modified method. A settings configuration update
 		 * causes DS to replace this component instance, giving every setting a fresh
@@ -163,12 +179,27 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		 * same activation.
 		 */
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
-		if (this.dischargeGuard.isActive()) {
+		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive()) {
 			this.scheduleZone = this.parseScheduleZone(config.scheduleTimeZone());
+		}
+		if (this.dischargeGuard.isActive()) {
 			this.warnIfRulesInert(config);
+		}
+		if (this.modeSchedule.isActive() && !config.controlEnabled()) {
+			this.logWarn(this.log, "Mode schedule is enabled but inert: it needs controlEnabled=true");
 		}
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
+		// Fresh machine-state reads for the mode schedule's mains confirmation.
+		this.getMachineStateChannel().onSetNextValue(ignore -> {
+			MachineState read = this.getMachineStateChannel().getNextValue().asEnum();
+			this.modeSchedule.onMachineStateRead(
+					read == null || read == MachineState.UNDEFINED ? null : Integer.valueOf(read.getValue()));
+		});
+		// Fresh grid-input voltage reads for the on-battery SUB path.
+		this.registerGridVoltage(1, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L1);
+		this.registerGridVoltage(2, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L2);
+		this.registerGridVoltage(3, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L3);
 
 		/*
 		 * Validated on the ASP48120SH3: SRNE battery current is positive while
@@ -197,6 +228,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.registerReadback(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT);
 		this.registerReadback(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY);
 		this.registerReadback(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION);
+		this.registerReadback(10, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC);
+		((IntegerReadChannel) this.channel(SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY))
+				.onSetNextValue(value -> this.modeSchedule.verify(value.get()));
 		this.registerWindowReadback(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
@@ -205,6 +239,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
+	}
+
+	private void registerGridVoltage(int phase, SrneBatteryInverter.ChannelId channelId) {
+		((IntegerReadChannel) this.channel(channelId))
+				.onSetNextValue(value -> this.modeSchedule.onGridVoltageRead(phase, value.get()));
 	}
 
 	private void registerReadback(int index, SrneBatteryInverter.ChannelId channelId) {
@@ -389,12 +428,42 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.dischargeWindow.stopWriteElement()), //
 				new FC16WriteRegistersTask(this.dischargeWindow::onEnableExecute, 0xE033,
 						this.dischargeWindow.enableWriteElement()));
-		// SoC for the discharge rules: the same register 0x0100 that SrneEss maps to
-		// SymmetricEss.SOC. Only read when a rule is configured, so the default bus
-		// traffic is unchanged.
-		if (this.dischargeGuard.isActive()) {
+		// SoC for the discharge rules and the mode schedule: the same register 0x0100
+		// that SrneEss maps to SymmetricEss.SOC. Only read when one of them is
+		// configured, so the default bus traffic is unchanged.
+		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive()) {
 			protocol.addTask(new FC3ReadRegistersTask(0x0100, Priority.HIGH, //
 					m(SrneBatteryInverter.ChannelId.BATTERY_SOC, new UnsignedWordElement(0x0100))));
+		}
+		// Charge window 1 stop SoC (E03B): read and written only when configured. A read
+		// the device rejects marks the whole component defective, so unmanaged edges
+		// never touch this register.
+		if (this.isChargeWindow1StopSocManaged()) {
+			protocol.addTask(new FC3ReadRegistersTask(0xE03B, Priority.LOW, //
+					m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC, new UnsignedWordElement(0xE03B))));
+			protocol.addTask(new FC16WriteRegistersTask(this.writeHandlers[10]::onExecute, 0xE03B,
+					this.chargeWindow1StopSocWrite));
+		}
+		// The mode schedule's own E204 write task exists only while the schedule is
+		// active, so the default task list is unchanged.
+		// Grid-input voltages for the mode schedule's SUB write on battery: the SRNE's
+		// own AC-input sense (the same registers Srne.Grid-Meter reads, validated by a
+		// live grid-off/grid-on test). Read only while that path is enabled.
+		if (this.modeSchedule.isActive() && this.modeSchedule.isGridPresentPathEnabled()) {
+			protocol.addTask(new FC3ReadRegistersTask(0x0213, Priority.HIGH, //
+					m(SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L1, new UnsignedWordElement(0x0213),
+							SCALE_FACTOR_2)));
+			protocol.addTask(new FC3ReadRegistersTask(0x022A, Priority.HIGH, //
+					m(SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L2, new UnsignedWordElement(0x022A),
+							SCALE_FACTOR_2), //
+					m(SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L3, new UnsignedWordElement(0x022B),
+							SCALE_FACTOR_2)));
+		}
+		if (this.modeSchedule.isActive()) {
+			// Its own E204 element and task, so its one-shot handlers never touch the
+			// static outputPriority handler (index 8); only one of the two can own E204.
+			protocol.addTask(new FC16WriteRegistersTask(this.modeSchedule::onExecute, 0xE204,
+					this.modeSchedule.writeElement()));
 		}
 		return protocol;
 	}
@@ -433,11 +502,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.dischargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
 		this.updateDischargeSuppression();
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+		this.reconcileModeSchedule();
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
 		}
-		MachineState machineState = this.getMachineStateChannel().value().asEnum();
-		if (machineState == null || !machineState.isVerified()) {
+		if (!this.isMachineStateVerified()) {
 			this.reconcileDisarmUnverified();
 			return;
 		}
@@ -450,6 +519,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.stopChargeSoc(), 0, 100, 1, this.stopChargeSocWrite);
 		this.reconcile(3, SrneBatteryInverter.ChannelId.LOW_SOC_ALARM,
 				this.config.lowSocAlarm(), 0, 100, 1, this.lowSocAlarmWrite);
+		// An unset device reads 4096, which differs from every valid target, so a
+		// configured target queues exactly one write and 4096 never verifies.
+		this.reconcile(10, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC,
+				this.config.chargeWindow1StopSoc(), 10, 100, 1, this.chargeWindow1StopSocWrite);
 		this.reconcile(6, SrneBatteryInverter.ChannelId.AC_CHARGE_CURRENT_LIMIT,
 				this.config.acChargeCurrentLimit(), 0, MAX_BATTERY_CURRENT_A, 10, this.acChargeCurrentLimitWrite);
 		this.reconcile(7, SrneBatteryInverter.ChannelId.MAX_CHARGE_CURRENT_LIMIT,
@@ -469,6 +542,98 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.dischargeWindow1Start(), this.config.dischargeWindow1Stop(),
 				this.effectiveDischargeEnable());
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+	}
+
+	/**
+	 * Daily output-priority schedule. Runs every cycle so its state channel stays
+	 * current; a write is queued only with controlEnabled, readable SoC/E204/clock
+	 * and machine state 2 (mains), i.e. the same gate as every settings write.
+	 */
+	private void reconcileModeSchedule() {
+		if (this.config == null) {
+			return;
+		}
+		// Inputs are read only while the schedule is active; otherwise step() returns
+		// DISABLED or CONFIG_INVALID without looking at them.
+		final var active = this.modeSchedule.isActive();
+		final LocalDateTime now = active
+				? this.modeSchedule.plausibleTime(this.instantOrNull(), this.scheduleZone)
+				: null;
+		final var soc = active ? this.readValue(SrneBatteryInverter.ChannelId.BATTERY_SOC) : null;
+		final var outputPriority = active ? this.readValue(SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY) : null;
+		final var mains = active && this.isMachineStateVerified();
+		final var sbuAllowed = active && this.sbuPreconditionsMet();
+		var step = this.modeSchedule.step(now, soc, outputPriority, this.config.controlEnabled(), mains, sbuAllowed,
+				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES);
+		if (step.withdraw()) {
+			this.logInfo(this.log, "Mode schedule: mains lost, withdrew the queued E204 write");
+		}
+		if (step.write() != null) {
+			this.logInfo(this.log,
+					"Mode schedule: queued E204 write from [" + outputPriority + "] to [" + step.write() + "]");
+		}
+		if (step.state() != this.lastModeScheduleState) {
+			var message = "Mode schedule state [" + step.state() + "], target [" + step.target() + "], E204 ["
+					+ outputPriority + "]";
+			if (step.state() == ModeScheduleState.WRITE_FAILED || step.state() == ModeScheduleState.CONFIG_INVALID) {
+				this.logWarn(this.log, message);
+			} else {
+				this.logInfo(this.log, message);
+			}
+			this.lastModeScheduleState = step.state();
+		}
+		this.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_STATE).setNextValue(step.state());
+		this.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_TARGET_PRIORITY).setNextValue(step.target());
+		this.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_REASON)
+				.setNextValue(active ? this.modeSchedule.reason() : null);
+	}
+
+	// The plausibility of the time is judged by ModeSchedule.plausibleTime; this
+	// only guards a missing component manager.
+	private Instant instantOrNull() {
+		try {
+			return this.clock().instant();
+		} catch (RuntimeException e) {
+			return null;
+		}
+	}
+
+	/**
+	 * The verified machine-state gate shared by every settings write: state 2
+	 * (mains/bypass), the only live-validated state.
+	 *
+	 * @return true if the machine state is verified
+	 */
+	private boolean isMachineStateVerified() {
+		MachineState machineState = this.getMachineStateChannel().value().asEnum();
+		return machineState != null && machineState.isVerified();
+	}
+
+	/**
+	 * The SBU preconditions of a static outputPriority arm, applied to the
+	 * schedule's SBU write: the reserve band and BMS mode are configured, valid and
+	 * coherent, and each is settled on the device.
+	 *
+	 * @return true if SBU may be written
+	 */
+	private boolean sbuPreconditionsMet() {
+		var line = this.config.switchToLineSoc();
+		var battery = this.config.switchToBatterySoc();
+		var bms = this.config.bmsCommunication();
+		return sourceTransferArmProblem(ModeSchedule.SBU, line, battery, bms) == null
+				&& this.sourceTransferPrerequisitesSettled(line, battery, bms);
+	}
+
+	// Package-private for tests: the dummy bridge does not execute writes, so tests
+	// play the device through the same execute callback the write task uses.
+	ModeSchedule modeScheduleForTest() {
+		return this.modeSchedule;
+	}
+
+	// Package-private for tests: takes the queued write exactly as the bridge does
+	// (the dummy bridge never consumes writes) and returns whether one was pending.
+	boolean takeModeScheduleWriteForTest() {
+		return this.modeSchedule.writeElement().getNextWriteValueAndReset() != null;
 	}
 
 	// Only the disarm of the discharge schedule bypasses the verified machine-state
@@ -727,22 +892,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			return;
 		}
 		// Arming: validate the whole set up front and write NOTHING on failure.
-		if (arm > 3) {
-			this.rejectOutputPriority("output priority [" + arm + "] out of range 0..3");
-			return;
-		}
-		if (line < 0 || battery < 0 || bms < 0) {
-			this.rejectOutputPriority(
-					"requires switchToLineSoc, switchToBatterySoc and bmsCommunication to all be configured");
-			return;
-		}
-		if (line > 100 || battery > 100 || bms > 2) {
-			this.rejectOutputPriority("reserve band / BMS out of range (SoC 0..100, BMS 0..2)");
-			return;
-		}
-		if (line >= battery) {
-			this.rejectOutputPriority("reserve band invalid: switchToLineSoc [" + line
-					+ "] must be below switchToBatterySoc [" + battery + "]");
+		var problem = sourceTransferArmProblem(arm, line, battery, bms);
+		if (problem != null) {
+			this.rejectOutputPriority(problem);
 			return;
 		}
 		// Whole set valid: reconcile the band + BMS, then arm once all three are settled.
@@ -751,13 +903,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.reconcile(5, SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC, battery, 0, 100, 1,
 				this.switchToBatterySocWrite);
 		this.reconcile(9, SrneBatteryInverter.ChannelId.BMS_COMMUNICATION, bms, 0, 2, 1, this.bmsCommunicationWrite);
-		var prerequisitesSettled = isPrerequisiteSettled(line, this.writeHandlers[4].getState(),
-				this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC))
-				&& isPrerequisiteSettled(battery, this.writeHandlers[5].getState(),
-						this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC))
-				&& isPrerequisiteSettled(bms, this.writeHandlers[9].getState(),
-						this.readValue(SrneBatteryInverter.ChannelId.BMS_COMMUNICATION));
-		if (!prerequisitesSettled) {
+		if (!this.sourceTransferPrerequisitesSettled(line, battery, bms)) {
 			if (!this.outputPriorityHeldLogged) {
 				this.logInfo(this.log, "Output-priority (SBU) write held pending its SoC-band / BMS prerequisites");
 				this.outputPriorityHeldLogged = true;
@@ -765,6 +911,56 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			return;
 		}
 		this.reconcile(8, SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY, arm, 0, 3, 1, this.outputPriorityWrite);
+	}
+
+	/**
+	 * Validates the source-transfer set for an output-priority arm before anything
+	 * is written: the arm in range, the reserve band and BMS mode all configured,
+	 * in range, and the band coherent. Shared by the static arm and the mode
+	 * schedule's SBU write.
+	 *
+	 * @param arm     the output-priority target (&gt;= 0)
+	 * @param line    switchToLineSoc
+	 * @param battery switchToBatterySoc
+	 * @param bms     bmsCommunication
+	 * @return null if valid, otherwise the reason
+	 */
+	static String sourceTransferArmProblem(int arm, int line, int battery, int bms) {
+		if (arm > 3) {
+			return "output priority [" + arm + "] out of range 0..3";
+		}
+		if (line < 0 || battery < 0 || bms < 0) {
+			return "requires switchToLineSoc, switchToBatterySoc and bmsCommunication to all be configured";
+		}
+		if (line > 100 || battery > 100 || bms > 2) {
+			return "reserve band / BMS out of range (SoC 0..100, BMS 0..2)";
+		}
+		if (line >= battery) {
+			return "reserve band invalid: switchToLineSoc [" + line + "] must be below switchToBatterySoc [" + battery
+					+ "]";
+		}
+		return null;
+	}
+
+	private boolean sourceTransferPrerequisitesSettled(int line, int battery, int bms) {
+		return isPrerequisiteSettled(line, this.writeHandlers[4].getState(),
+				this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_LINE_SOC))
+				&& isPrerequisiteSettled(battery, this.writeHandlers[5].getState(),
+						this.readValue(SrneBatteryInverter.ChannelId.SWITCH_TO_BATTERY_SOC))
+				&& isPrerequisiteSettled(bms, this.writeHandlers[9].getState(),
+						this.readValue(SrneBatteryInverter.ChannelId.BMS_COMMUNICATION));
+	}
+
+	private boolean isChargeWindow1StopSocManaged() {
+		return this.config != null && this.config.chargeWindow1StopSoc() >= 0;
+	}
+
+	UnsignedWordElement chargeWindow1StopSocWriteForTest() {
+		return this.chargeWindow1StopSocWrite;
+	}
+
+	SafeWriteHandler chargeWindow1StopSocHandlerForTest() {
+		return this.writeHandlers[10];
 	}
 
 	// Package-private for tests: lets a test assert that a reserve-band / BMS write did

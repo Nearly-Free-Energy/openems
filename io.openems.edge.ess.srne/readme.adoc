@@ -135,6 +135,25 @@ discharge" result without the positive control proves nothing, because the
 mode itself might suppress scheduled discharge. Nothing in this driver enforces
 that gate; it is a commissioning rule.
 
+*Night charge stop SoC (`0xE03B`)*: `chargeWindow1StopSoc` sets the timed-charge
+stop SoC of charge window 1 (`TimedChg1StopSOC`, protocol V1.94+, unit %, valid
+`10..100` here). Intended use: a wide off-peak window `00:00-06:00`
+(`chargeWindow1Start=0`, `chargeWindow1Stop=1536`, `chargeScheduleEnable=1`) with
+a stop SoC of `50`. The inverter charges from the grid whenever the grid is present
+in that window and stops at 50%, so a grid cut during a short fixed slot no longer
+skips the night charge. It is independent of `stopChargeSoc` (`0xE01D`), which is
+global and would also cap solar charging. The write uses the same guarded path as
+the scalar settings: `controlEnabled` and machine state 2 (mains) only, one
+single-register FC16, read-back verify, one-shot, no automatic retry. With the
+default `-1` the register is neither read nor written, so default bus traffic is
+unchanged. An unset device reads `4096` (the protocol's default marker); that
+differs from every valid target, so it queues one write and never counts as
+verified. Commission the first live write under supervision: with the grid up, set
+`50`, check the read-back is `50` and `SafeWriteState` is VERIFIED, then check the
+next night charge stops near 50%. If the state is FAILED but `ChargeWindow1StopSoc`
+then reads `50` (a stale pre-write read-back), the value is applied; reactivate the
+component to clear the state.
+
 *Automatic discharge start threshold and SoC floor*: two optional rules keep the
 discharge schedule (`0xE033`) in step with the battery without a manual
 disarm/re-arm deploy. They apply only when `dischargeScheduleEnable` is `1` and a
@@ -370,6 +389,107 @@ back), there is no second write path. SoC source: register `0x0100`, the same on
 configured. Channels: `DischargeSuppressed` (boolean), `DischargeSuppressionReason`
 (`NONE` / `LOW_START` / `FLOOR_REACHED`) and `BatterySoc`.
 
+.*Daily output-priority schedule (ModeSchedule)*
+
+Optional, off by default (`modeScheduleEnabled=false`). Switches the output priority
+`0xE204` (`0` SOL, `1` UTI, `2` SBU, `3` SUB; SRNE manual, confirmed on gw-pi2 v29)
+between a daytime and an evening value every day, against the edge clock in
+`scheduleTimeZone`. The evening value applies from `eveningStart` (inclusive) to
+`daytimeStart` (exclusive), crossing midnight; the daytime value the rest of the day.
+Defaults: SUB `00:30`-`18:00`, SBU `18:00`-`00:30`. Reason: in SBU the inverter stays on
+battery after a grid cut until the battery is nearly empty, so by day the unit runs SUB
+(grid first, battery kept for the evening) and only in the evening runs SBU. The night
+charge window is not touched.
+
+* Each cycle, if `0xE204` reads differently from the target, one write is queued
+  through a `SafeWriteHandler` and read-back verified. It needs `controlEnabled=true`
+  and the same verified machine-state gate as every settings write (state `2`, mains),
+  and the last 3 fresh reads of `0x0210` must all be state `2` (counted on each read,
+  not each cycle), so a state-2 blip on one poll cannot trigger a write. During a grid
+  cut the write waits until mains returns (intended). A write still queued when mains
+  is lost is withdrawn if the bridge has not taken it yet; the take and the withdraw
+  are decided under one lock (`GuardedWordElement`), so a withdrawn value never builds
+  a frame. If the bridge already took it, the write is in flight and counts.
+* No schedule write in the first 300 cycles (about 5 minutes) after activation, so a
+  crash/restart loop cannot spend the write budget (`STARTUP_HOLD`).
+* Which machine state each write direction is allowed in:
+  ** SBU (E204=2, onto the battery): only in state `2` (mains), confirmed by 3 fresh
+     state-2 reads.
+  ** SUB (E204=3, back to the grid): in state `2` as above, and also in state `3`
+     (running on battery after leaving the line at `switchToBatterySoc`; gw-pi2 field
+     data shows `3` there although the protocol labels it "soft start") when the
+     grid-input voltage (`0x0213` L1, `0x022A` L2, `0x022B` L3, the SRNE's own AC-input
+     sense, the same registers `Srne.Grid-Meter` reads) is above
+     `gridPresentMinVoltage` (e.g. 180 V) on all three phases, confirmed by 3 fresh
+     state-3 reads and 3 fresh reads per phase. Without this the daytime SoC rule could
+     never switch back from SBU, and the battery would drain to `switchToLineSoc`.
+     **Off by default** (`gridPresentMinVoltage=-1`: SUB only in state `2`, no
+     grid-voltage reads, behaviour as before). gw-pi2 enables it explicitly in its
+     gateway config only after one supervised live state-3 SUB write.
+  ** A SUB write in state `3` has not yet been done on a live unit: it needs one
+     supervised live validation (write in state 3 with the grid up, read back) before
+     it is relied on, like the state-2 writes had.
+  ** A queued write is withdrawn if its gate closes before the bridge takes it.
+* SBU preconditions: SBU is written only when the same checks as a static
+  `outputPriority` arm pass (point (1) above): `switchToLineSoc`, `switchToBatterySoc`
+  and `bmsCommunication` configured, in range, `switchToLineSoc` below
+  `switchToBatterySoc`, and each settled on the device. Otherwise the state is
+  `BLOCKED_SBU_PRECONDITIONS` and nothing is written. SUB needs no preconditions.
+* Nothing is written while the SoC (`0x0100`) or `0xE204` is unreadable, or while the
+  clock is not plausible. gw-pi2 has no RTC, so after a reboot the time can be wrong
+  until NTP syncs. The time counts only once it is at or after a build-time floor
+  (2026-11-01) and has run steadily for 60 cycles (no backward step, no forward jump of
+  more than 5 minutes); an NTP correction is such a jump and restarts the count.
+  Limitation: a stale but steadily running time (fake-hwclock after a power-cut
+  reboot, with NTP unreachable) cannot be told apart from a correct one. Cross-checking
+  against the inverter RTC is not possible on this unit: `0xE034-036` read `0` on gw-pi2
+  (the registers appear to be write-only time setup).
+* Daytime SoC rule (optional, `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc`, both `-1` =
+  off): field finding 10 Nov 2026 on gw-pi2: in SUB, with PV below the load, PV only
+  charges the battery, and once the battery is nearly full (SoC 94 %) the inverter
+  switched PV off while buying ~700 W from the grid; SBU brought PV straight back. So in
+  the daytime window the target becomes the evening priority (SBU) once SoC is at or
+  above `daytimeSbuAboveSoc`, and the daytime priority (SUB) again once SoC is below
+  `daytimeSbuBelowSoc` (hysteresis; each day starts in the daytime priority). Both
+  10..100, below < above, and `eveningPriority` must be SBU. An unreadable SoC keeps the
+  current target and writes nothing. The SBU preconditions apply to these writes too.
+  A SoC-driven switch waits `minDwellMinutes` (default 10) after the last verified
+  switch (`MIN_DWELL`); the window switches at the boundaries do not wait. The evening
+  window is unchanged. Channel `ModeScheduleReason`: `WINDOW` / `HIGH_SOC` / `LOW_SOC` / `EVENING_RESERVE`.
+* Evening reserve (optional, `eveningReserveSoc`, default `-1` = off; valid 20..100;
+  `eveningReserveFrom`, `HH:MM` local, default `14:00`, must lie in the daytime window):
+  from `eveningReserveFrom` until `eveningStart`, while SoC is below
+  `eveningReserveSoc` the target is the daytime priority (SUB), overriding the daytime
+  SoC rule, so the sun charges the battery for the peak instead of the houses draining
+  it. Once SoC is at or above `eveningReserveSoc` the normal daytime SoC rule applies
+  again, and it has to reach `daytimeSbuAboveSoc` before it switches to SBU. An
+  unreadable SoC keeps the reserve decision. The reserve uses the same write gates
+  (SUB in state `2`, or in state `3` when `gridPresentMinVoltage` is set and the grid is
+  present), dwell, budgets, ceiling and override handling; it is a SoC-driven switch,
+  so the dwell applies, while the 18:00 evening switch still goes out on time. Reason
+  `EVENING_RESERVE`.
+* A failed write (error, wrong or missing read-back) leaves the device as it is.
+  Retries back off exponentially (60, 120, 240, 480 cycles) and at most 5 failed writes
+  are allowed per window (successful writes do not count); then `WRITE_FAILED` is
+  latched, to spare the inverter's settings memory. Separately, at most 12 successful
+  `0xE204` writes per local day; when reached the mode is held (`DAILY_WRITE_LIMIT`). The budget is refilled only when the local time crosses `eveningStart` or
+  `daytimeStart` forward in a small step (at most 5 minutes); a clock jump or a target
+  flip does not refill it. A verified value that is
+  overridden later (panel, app, firmware) is re-corrected with exponential backoff (60,
+  120, 240 cycles), at most 3 times per window and 6 times per local day, so overrides
+  cannot spend the daily ceiling; then `OVERRIDDEN` is held until the next boundary or
+  a SoC-driven target change.
+* One owner of `0xE204`: with the schedule enabled, `outputPriority` must be `-1`.
+* Invalid configuration (a priority other than `2`/`3`, equal priorities, a time that
+  is not `HH:MM`, equal times, or `outputPriority` set) turns the schedule off and
+  reports `CONFIG_INVALID`.
+
+Channels: `ModeScheduleState` (`DISABLED` / `IN_SYNC` / `WRITE_PENDING` /
+`WAITING_FOR_MAINS` / `WRITE_FAILED` / `CONFIG_INVALID` / `WAITING_FOR_DATA` /
+`BLOCKED_SBU_PRECONDITIONS` / `STARTUP_HOLD` / `DAILY_WRITE_LIMIT` / `MIN_DWELL` /
+`OVERRIDDEN`) and `ModeScheduleTargetPriority` (the value the schedule
+wants now).
+
 .*Configuration*:
 * `id` (String): Unique component ID (default: `batteryInverter0`)
 * `alias` (String): Human-readable component name
@@ -380,9 +500,11 @@ configured. Channels: `DischargeSuppressed` (boolean), `DischargeSuppressionReas
 * `maxApparentPower` (int): Maximum inverter apparent power in VA (default: `12000`)
 * `controlEnabled` (boolean): Safety gate for FC16 settings/schedule writes (default: `false`)
 * settings targets (int, `-1` = leave unchanged): `dischargeCutoffSoc`, `stopChargeCurrent`, `stopChargeSoc`, `lowSocAlarm`, `switchToLineSoc`, `switchToBatterySoc`, `acChargeCurrentLimit`, `maxChargeCurrentLimit`
-* source-transfer targets (int, `-1` = leave unchanged): `outputPriority` (E204, source-priority mode e.g. SBU; range `0..3`) and `bmsCommunication` (E215, BMS-comms enable; range `0..2`). These enable "switch to battery at a SoC" (SBU + BMS-SoC) fully from OpenEMS. `outputPriority` is the output/source priority, distinct from charge priority. Two safety points: (1) `outputPriority` = SBU transfers the load onto the battery, so it is reconciled together with its reserve band (`switchToLineSoc`/`switchToBatterySoc`) and BMS mode (`bmsCommunication`) as ONE coherent, validated operation. When an arm is requested the whole set is validated - all three present, individually in range, and the band coherent (`switchToLineSoc` below `switchToBatterySoc`) - BEFORE any of them is written; on failure NOTHING is written (not the band, not BMS, not `E204`) and the operation reports terminal FAILED, so a rejected arm can never leave a bad reserve band on a unit already in SBU mode. Once the set is valid, `E204` arms only after each prerequisite is settled: its handler at rest (IDLE = already correct, or VERIFIED) AND the device currently reads the configured value - a queued, awaiting or failed write, or a post-verify drift, never counts as settled. When no arm is requested, BMS remains an independent setting; the reserve band is still refused if both thresholds are configured but inverted (`switchToLineSoc` at or above `switchToBatterySoc`), because a bad band is dangerous whenever the unit is in SBU (its normal backup posture, settable from the panel) - so an incoherent band is never written regardless of whether OpenEMS armed it. (2) The exact value-to-mode mapping (which number is SBU, etc.) is NOT verified in the SRNE manuals and MUST be captured on the unit at commissioning; the ranges here are bounded only, read-back verify guards a mis-accepted value, and a wrong-but-in-range value is prevented only by keeping targets `-1` until the enum is confirmed.
+* source-transfer targets (int, `-1` = leave unchanged): `outputPriority` (E204, source-priority mode e.g. SBU; range `0..3`) and `bmsCommunication` (E215, BMS-comms enable; range `0..2`). These enable "switch to battery at a SoC" (SBU + BMS-SoC) fully from OpenEMS. `outputPriority` is the output/source priority, distinct from charge priority. Two safety points: (1) `outputPriority` = SBU transfers the load onto the battery, so it is reconciled together with its reserve band (`switchToLineSoc`/`switchToBatterySoc`) and BMS mode (`bmsCommunication`) as ONE coherent, validated operation. When an arm is requested the whole set is validated - all three present, individually in range, and the band coherent (`switchToLineSoc` below `switchToBatterySoc`) - BEFORE any of them is written; on failure NOTHING is written (not the band, not BMS, not `E204`) and the operation reports terminal FAILED, so a rejected arm can never leave a bad reserve band on a unit already in SBU mode. Once the set is valid, `E204` arms only after each prerequisite is settled: its handler at rest (IDLE = already correct, or VERIFIED) AND the device currently reads the configured value - a queued, awaiting or failed write, or a post-verify drift, never counts as settled. When no arm is requested, BMS remains an independent setting; the reserve band is still refused if both thresholds are configured but inverted (`switchToLineSoc` at or above `switchToBatterySoc`), because a bad band is dangerous whenever the unit is in SBU (its normal backup posture, settable from the panel) - so an incoherent band is never written regardless of whether OpenEMS armed it. (2) The value-to-mode mapping is `0` SOL, `1` UTI, `2` SBU, `3` SUB: it is the SRNE manual's mapping and was confirmed on site (gw-pi2 v29, microgrid-gateway PR #97, 4 Nov 2026: E204=2 written, the unit ran SBU). Read-back verify still guards a mis-accepted value.
+* `chargeWindow1StopSoc` (int %, `-1` = leave unchanged and do not read; range `10..100`): target for `0xE03B`, the timed-charge stop SoC of charge window 1. Use with a `00:00-06:00` charge window and `50` so the night charge runs whenever the grid is present and stops at 50%. See "Night charge stop SoC" above.
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
+* Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`), `eveningReserveSoc` (int %, default `-1` = off), `eveningReserveFrom` (String `HH:MM`, default `14:00`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
 * TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
@@ -431,6 +553,51 @@ metered-consumption meter.
 
 .*Configuration*:
 * `id` (String): Unique component ID (default: `meter2`)
+* `alias` (String): Human-readable component name
+* `enabled` (boolean): Enables the component (default: `true`)
+* `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)
+* `modbusUnitId` (int): Device Unit-ID (default: `1`)
+
+https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]
+
+[[_srne_charger]]
+
+=== SRNE PV-Charger
+
+*Name*: SRNE PV-Charger
+
+*Factory-PID*: `Srne.Charger`
+
+.Implemented Natures/Interfaces
+* EssDcCharger
+* ModbusComponent
+
+*Description*: Reads the PV (MPPT) input, read-only. `_sum` adds it to
+`ProductionDcActualPower` and `ProductionActivePower`. Production energy stays
+empty (`ActualEnergy` is not read yet); for daily kWh use `charger0/PvEnergyToday`.
+It is a separate Modbus component on the same device and Unit-ID, so a rejected
+PV address backs off only this component and not the battery reads.
+
+[cols="1,1,1,2"]
+|===
+| Register | Scale | Channel | Note
+
+| `0x0107` / `0x0108` / `0x0109` | 0.1 V / 0.1 A / 1 W | `Pv1Voltage` (mV), `Pv1Current` (mA), `Pv1Power` (W) | live-read on gw-pi2, 27 Oct 2026
+| `0x010F` / `0x0110` / `0x0111` | 0.1 V / 0.1 A / 1 W | `Pv2Voltage` (mV), `Pv2Current` (mA), `Pv2Power` (W) | answers 0 (PV2 not connected)
+| `0xF02F` | 0.1 kWh | `PvEnergyToday` (Wh) | inverter counter, resets at the inverter's midnight; own single-register LOW task
+|===
+
+`ActualPower` = `Pv1Power` + `Pv2Power`, `Current` = PV1 + PV2 current and
+`Voltage` = PV1 voltage. A register reading `0xFFFF` gives no value, and a
+missing MPPT value gives no `ActualPower` rather than 0 W. `ActualEnergy` is left
+unset (null), so `_sum` production energy stays empty until the inverter's
+accumulated counter (`0xF038`-`0xF039`) is validated live; power is not
+integrated. The bridge backs off per component, so a rejected `0xF02F` would also
+pause this component's PV power reads (never the ESS). The ESS `ActivePower` is
+unchanged (battery only).
+
+.*Configuration*:
+* `id` (String): Unique component ID (default: `charger0`)
 * `alias` (String): Human-readable component name
 * `enabled` (boolean): Enables the component (default: `true`)
 * `modbus_id` (String): Modbus bridge component ID (default: `modbus0`)

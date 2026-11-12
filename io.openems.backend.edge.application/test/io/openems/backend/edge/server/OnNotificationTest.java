@@ -2,6 +2,8 @@ package io.openems.backend.edge.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -9,8 +11,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.java_websocket.WebSocket;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import io.openems.backend.edge.application.BackendEdgeServerApp;
 import io.openems.common.exceptions.OpenemsError.OpenemsNamedException;
 import io.openems.common.jsonrpc.base.GenericJsonrpcNotification;
 import io.openems.common.jsonrpc.base.JsonrpcNotification;
@@ -23,8 +27,14 @@ public class OnNotificationTest {
 	}
 
 	private final List<Forwarded> forwarded = new ArrayList<>();
-	private final OnNotification sut = new OnNotification("test",
-			(edgeId, notification) -> this.forwarded.add(new Forwarded(edgeId, notification)));
+	private final BackendEdgeServerApp app = mock(BackendEdgeServerApp.class);
+	private final OnNotification sut = new OnNotification("test", this.app);
+
+	@BeforeEach
+	public void recordForwardedNotifications() {
+		doAnswer(invocation -> this.forwarded.add(new Forwarded(invocation.getArgument(0), invocation.getArgument(1))))
+				.when(this.app).sendNotificationToEdgeManager(any(), any());
+	}
 
 	private static WebSocket connectionOf(String edgeId) {
 		final var ws = mock(WebSocket.class);
