@@ -144,8 +144,7 @@ public class ScheduleWindowTest {
 	@Test
 	void queuedWritesNeverTimeOutWithoutTheQueuedTimeout() {
 		// Charge window and rules-off discharge window: a write queued while the link
-		// is
-		// down must still execute when it returns, however long that takes.
+		// is down must still execute when it returns, however long that takes.
 		var window = newDischargeWindow();
 		window.reconcile(0, 0, 0, 4608, 5947, 1);
 		for (var i = 0; i < 1000; i++) {
@@ -355,8 +354,8 @@ public class ScheduleWindowTest {
 	}
 
 	// JUSTIFICATION-A3: new invariant-robustness test (re-review advisory) proving
-	// the
-	// window is never written if the device enable flaps back to 1 mid-sequence.
+	// the window is never written if the device enable flaps back to 1
+	// mid-sequence.
 	@Test
 	void flappedEnableAtDisableVerifiedReDisarmsNeverWritesWindow() {
 		var sut = newDischargeWindow();
@@ -381,9 +380,8 @@ public class ScheduleWindowTest {
 	void changedWindowOnArmedDeviceWithUnmanagedEnableRestoresArmed() {
 		var sut = newDischargeWindow();
 		// Device is ARMED (enable=1); operator changes only the window and leaves
-		// enable
-		// at -1. Must disarm, rewrite, then RESTORE the captured armed state - never
-		// mutate a live enabled window, and never silently leave it disabled.
+		// enable at -1. Must disarm, rewrite, then RESTORE the captured armed state -
+		// never mutate a live enabled window, and never silently leave it disabled.
 		sut.reconcile(0, 0, 1, 4608, 5947, -1);
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.getState());
 		assertEquals(Integer.valueOf(1), sut.desiredEnable()); // captured original armed state

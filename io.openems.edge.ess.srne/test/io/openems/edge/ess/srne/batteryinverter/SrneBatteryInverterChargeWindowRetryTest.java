@@ -5,16 +5,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.osgi.service.event.Event;
 
 import io.openems.common.test.TimeLeapClock;
 import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 import io.openems.edge.bridge.modbus.test.DummyModbusBridge;
 import io.openems.edge.common.channel.Channel;
+import io.openems.edge.common.event.EdgeEventConstants;
 import io.openems.edge.common.test.AbstractComponentTest.TestCase;
 import io.openems.edge.common.test.ComponentTest;
 import io.openems.edge.common.test.DummyComponentManager;
@@ -136,21 +140,83 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 	}
 
 	@Test
-	public void testFailedReadbackAfterVerifiedDisarmIsRetried() throws Exception {
-		// The site case: the disarm executes and the device reads 0, but the read-back
-		// does not reach the window in time, so it fails silently. It must be retried.
+	public void testExecuteErrorAfterTheDisarmLandedIsRetried() throws Exception {
+		// Candidate site path 1: the device applies the disarm, but the write reports
+		// an error (e.g. a response timeout), so DISABLE_QUEUED fails silently.
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge();
 		final var test = start(sut, bridge, clock(), config().build()) //
 				.next(new TestCase(), CYCLES);
-		sut.chargeWindowForTest().onEnableExecute(new ExecuteState.Error(new RuntimeException("response timeout")));
+		var window = sut.chargeWindowForTest();
+		// The bridge takes the queued disarm before executing it.
+		assertEquals(0, window.enableWriteElement().getNextWriteValueAndReset()[0].getValue());
+		window.onEnableExecute(new ExecuteState.Error(new RuntimeException("response timeout")));
 		bridge.withRegisters(0xE02C, 0);
-		assertEquals(State.FAILED, sut.chargeWindowForTest().getState());
+		assertEquals(State.FAILED, window.getState());
+		assertTrue(window.isRetryableFailure());
+		// Nothing is left queued while the window waits for its retry.
+		test.next(new TestCase(), 2);
+		assertEquals(State.FAILED, window.getState());
+		assertNull(window.enableWriteElement().getNextWriteValueAndReset());
 
 		// The retry reads enable=0 afresh and goes straight to the window write.
 		assertTrue(cyclesUntil(test, sut, State.WINDOW_QUEUED, MAX_RETRY_CYCLES) > 0);
 		assertEquals(1, sut.chargeRetriesTodayForTest());
 		assertEquals(STOP, sut.chargeWindowForTest().queuedStop());
+	}
+
+	@Test
+	public void testReadbackTimeoutAfterExecutedDisarmIsRetried() throws Exception {
+		// Candidate site path 2: the disarm executes and lands, but its read-back does
+		// not arrive within the timeout, so DISABLE_AWAITING_READBACK fails silently.
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge();
+		final var test = start(sut, bridge, clock(), config().build()) //
+				.next(new TestCase(), CYCLES);
+		var window = sut.chargeWindowForTest();
+		assertEquals(0, window.enableWriteElement().getNextWriteValueAndReset()[0].getValue());
+		window.onEnableExecute(ExecuteState.OK);
+		assertEquals(State.DISABLE_AWAITING_READBACK, window.getState());
+		bridge.withRegisters(0xE02C, 0);
+
+		// Run the component's cycle handler without a bridge cycle: no read-back
+		// arrives.
+		var cycle = new Event(EdgeEventConstants.TOPIC_CYCLE_AFTER_PROCESS_IMAGE, Map.of());
+		for (var i = 0; i < 30; i++) {
+			assertEquals(State.DISABLE_AWAITING_READBACK, window.getState(), "cycle " + i);
+			sut.handleEvent(cycle);
+		}
+		assertEquals(State.FAILED, window.getState());
+		assertTrue(window.isRetryableFailure());
+		assertNull(window.enableWriteElement().getNextWriteValueAndReset());
+
+		// Reads resume: the retry reads enable=0 afresh and goes on to the window
+		// write.
+		assertTrue(cyclesUntil(test, sut, State.WINDOW_QUEUED, MAX_RETRY_CYCLES) > 0);
+		assertEquals(1, sut.chargeRetriesTodayForTest());
+		assertEquals(STOP, window.queuedStop());
+	}
+
+	@Test
+	public void testRetriesOnlyCountWhileTheMachineStateIsVerified() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		var bridge = bridge();
+		final var test = start(sut, bridge, clock(), config().build()) //
+				.next(new TestCase(), CYCLES);
+		var window = sut.chargeWindowForTest();
+		window.onEnableExecute(new ExecuteState.Error(new RuntimeException("bus error")));
+		assertEquals(State.FAILED, window.getState());
+
+		// Grid outage: the gated reconcile is unreachable, so no retry is spent.
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		test.next(new TestCase(), 2 * MAX_RETRY_CYCLES);
+		assertEquals(State.FAILED, window.getState());
+		assertEquals(0, sut.chargeRetriesTodayForTest());
+
+		// Mains back: the retry runs.
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		assertTrue(cyclesUntil(test, sut, State.DISABLE_QUEUED, MAX_RETRY_CYCLES) > 0);
+		assertEquals(1, sut.chargeRetriesTodayForTest());
 	}
 
 	@Test
@@ -209,8 +275,16 @@ public class SrneBatteryInverterChargeWindowRetryTest {
 		assertEquals(SrneBatteryInverterImpl.MAX_CHARGE_RETRIES_PER_DAY, sut.chargeRetriesTodayForTest());
 		assertNull(window.enableWriteElement().getNextWriteValueAndReset());
 
-		// After local midnight the count starts again.
-		clock.leap(1, ChronoUnit.DAYS);
+		// 23:59 local (20:59Z): still the same local day, still capped.
+		clock.leap(Duration.between(clock.instant(), Instant.parse("2026-11-11T20:59:00Z")).toMinutes(),
+				ChronoUnit.MINUTES);
+		test.next(new TestCase(), MAX_RETRY_CYCLES);
+		assertEquals(State.FAILED, window.getState());
+		assertEquals(SrneBatteryInverterImpl.MAX_CHARGE_RETRIES_PER_DAY, sut.chargeRetriesTodayForTest());
+
+		// 00:01 local (21:01Z, still 11 Nov in UTC): the count starts again, so the day
+		// is taken in the schedule zone, not in UTC.
+		clock.leap(2, ChronoUnit.MINUTES);
 		assertTrue(cyclesUntil(test, sut, State.DISABLE_QUEUED, MAX_RETRY_CYCLES) > 0);
 		assertEquals(1, sut.chargeRetriesTodayForTest());
 	}

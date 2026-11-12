@@ -111,8 +111,10 @@ final class ScheduleWindow {
 	private boolean queuedTimeout;
 	private boolean staleEnableExecutePending;
 	// Set by retry(): the next sequence may only start from an enable value that
-	// was
-	// read after the retry, never from a read taken before the failure.
+	// was read after the retry, never from a read taken before the failure. Sound
+	// only because verifyEnable() is called for actual bus reads (the enable
+	// channel's onSetNextValue in the component), never from the cached channel
+	// value each cycle; calling it per cycle would make this gate vacuous.
 	private boolean awaitingFreshEnable;
 	private Integer freshEnable;
 
@@ -202,11 +204,9 @@ final class ScheduleWindow {
 	}
 
 	// A suppression that latches while the arm is queued but not yet executed turns
-	// it
-	// into a disarm (or nothing, if the device already reads 0). An arm the bridge
-	// has
-	// already picked up cannot be recalled; the caller's drift correction disarms
-	// it.
+	// it into a disarm (or nothing, if the device already reads 0). An arm the
+	// bridge has already picked up cannot be recalled; the caller's drift
+	// correction disarms it.
 	private String withdrawQueuedArm(Integer actualEnable, int cfgEnable) {
 		if (cfgEnable != 0 || !Integer.valueOf(1).equals(this.targetEnable)) {
 			return null;
@@ -216,8 +216,7 @@ final class ScheduleWindow {
 		// callback will still arrive and must not be taken for the disarm's.
 		var inFlight = this.enableWrite.getNextWriteValueAndReset() == null;
 		// Only a 1 the bridge never took is certainly gone; one in flight may still
-		// land
-		// on a device that reads 0 now, so the disarm is queued anyway.
+		// land on a device that reads 0 now, so the disarm is queued anyway.
 		if (Integer.valueOf(0).equals(actualEnable) && !inFlight) {
 			this.state = State.DONE;
 			return "Withdrew queued [" + this.label + "] schedule enable=1; the target is now 0";
@@ -284,10 +283,8 @@ final class ScheduleWindow {
 	}
 
 	// Takes the single next convergence step toward the desired (window, enable)
-	// end
-	// state, enforcing the invariant that the window is written only while the
-	// device
-	// reads enable == 0.
+	// end state, enforcing the invariant that the window is written only while the
+	// device reads enable == 0.
 	private String advance(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart, int cfgStop) {
 		if (actualEnable == null) {
 			return null;
@@ -485,10 +482,8 @@ final class ScheduleWindow {
 			return this.withdrawQueuedArm(actualEnable, 0);
 		}
 		// DISABLE_VERIFIED and WINDOW_VERIFIED are settled steps waiting for the
-		// verified
-		// machine state to continue the sequence; if the register drifted back to armed
-		// it
-		// is disarmed again, still without advancing any window write.
+		// verified machine state to continue the sequence; if the register drifted back
+		// to armed it is disarmed again, still without advancing any window write.
 		if ((this.state != State.IDLE && !this.isSettledStep()) || actualEnable == null || actualEnable.equals(0)) {
 			return null;
 		}

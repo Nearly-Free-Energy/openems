@@ -148,7 +148,9 @@ night charge ran. Behaviour:
   withdrawn), like a read-back that does not arrive.
 * Each retry re-opens the window after a backoff of 60, 120, 240, then 480 cycles in
   `FAILED`, at most 6 retries per local day (`scheduleTimeZone`); the count resets at
-  local midnight. Retries count only while the machine state is verified.
+  local midnight. Retries count only while the machine state is verified. The
+  count and the backoff step are per day, not per failure: after a retry succeeds,
+  a later failure on the same day continues from where they were.
 * The safety invariant is unchanged: after a retry the next step waits until the
   enable register has been read again, the window registers are written only while
   that read is `0`, and the enable is raised only after the window reads back

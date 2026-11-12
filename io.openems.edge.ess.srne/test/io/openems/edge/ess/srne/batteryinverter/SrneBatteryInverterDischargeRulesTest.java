@@ -363,8 +363,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	// Unverified machine state (5): the window stays disarm-only, so every settled
-	// or
-	// failing state must still get its drifted-back-to-armed register disarmed
+	// or failing state must still get its drifted-back-to-armed register disarmed
 	// again.
 	private static void assertUnverifiedDriftIsDisarmed(SrneBatteryInverterImpl sut, DummyModbusBridge bridge,
 			ComponentTest test) throws Exception {
@@ -817,10 +816,8 @@ public class SrneBatteryInverterDischargeRulesTest {
 	}
 
 	// Guards the path from a verified arm (DONE with target 1) through the live
-	// target
-	// change to a queued disarm; it does not isolate the drift correction, which
-	// would
-	// reach the same disarm.
+	// target change to a queued disarm; it does not isolate the drift correction,
+	// which would reach the same disarm.
 	@Test
 	public void testLatchAfterTheArmWasWrittenAndVerifiedQueuesTheDisarmWithinFewCycles() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
@@ -1075,15 +1072,13 @@ public class SrneBatteryInverterDischargeRulesTest {
 	@Test
 	public void testRestartInsideStartRuleMinutesRelatchesLowStartFromPartlyDischargedSoc() throws Exception {
 		// The night was skipped at 21:00 (device enable 0). A restart at 21:08 with a
-		// SoC
-		// that has since dropped below the threshold latches LOW_START again.
+		// SoC that has since dropped below the threshold latches LOW_START again.
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS).withRegisters(0xE033, 0);
 		var test = start(sut, bridge, clockAt("2026-01-10T18:08:00Z"), config(75, 45).build()) //
 				.next(new TestCase(), CYCLES);
 		// The decision is latched after two confirmations; until then the disarmed
-		// device
-		// is held at 0 and never armed first.
+		// device is held at 0 and never armed first.
 		assertEquals(DischargeSuppressionReason.LOW_START,
 				sut.getDischargeSuppressionReasonChannelForTest().value().asEnum());
 		assertNull(sut.dischargeQueuedEnableForTest());
@@ -1091,8 +1086,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 		assertSuppression(sut, true, DischargeSuppressionReason.LOW_START);
 
 		// A night that was allowed (SoC 80 at 21:00, enable 1) is skipped by a restart
-		// at
-		// 21:08 once the SoC has fallen to 74: the documented fail-open trade-off.
+		// at 21:08 once the SoC has fallen to 74: the documented fail-open trade-off.
 		var allowed = new SrneBatteryInverterImpl();
 		start(allowed, bridge(74, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-01-10T18:08:00Z"),
 				config(75, 45).build()) //
@@ -1104,8 +1098,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 	@Test
 	public void testRestartAfterStartRuleExpiryOfALatchedLowStartKeepsTheNightSuppressed() throws Exception {
 		// Skipped at 21:00 (device enable 0, SoC 60); restart at 21:30. The start rule
-		// is
-		// applied once on the first usable SoC because we would be arming the device
+		// is applied once on the first usable SoC because we would be arming the device
 		// now.
 		// With no floor configured nothing else bounds the discharge.
 		for (var floor : new int[] { -1, 45 }) {
@@ -1124,10 +1117,9 @@ public class SrneBatteryInverterDischargeRulesTest {
 	@Test
 	public void testRestartAfterStartRuleExpiryWithARunningDischargeIsNotSuppressed() throws Exception {
 		// Armed at 21:00 with a healthy SoC; it dropped below the start threshold
-		// during
-		// the discharge and the component restarts at 21:30: the device reads enable=1,
-		// so
-		// only the floor rule governs and the running discharge stays armed.
+		// during the discharge and the component restarts at 21:30: the device reads
+		// enable=1, so only the floor rule governs and the running discharge stays
+		// armed.
 		var sut = new SrneBatteryInverterImpl();
 		var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
 		var test = start(sut, bridge, clockAt("2026-01-10T18:30:00Z"), config(75, 45).build());
@@ -1167,8 +1159,7 @@ public class SrneBatteryInverterDischargeRulesTest {
 	@Test
 	public void testOutOfRangeAndIncoherentThresholdsFailOpen() throws Exception {
 		// {startMin, floor}: each row must leave the discharge rules off (or the
-		// invalid
-		// rule off) so a low SoC never suppresses the night.
+		// invalid rule off) so a low SoC never suppresses the night.
 		for (var pair : new int[][] { { 100, -1 }, { 150, -1 }, { -1, 100 }, { -1, 120 }, { -5, -1 }, { -1, -7 },
 				{ 100, 100 } }) {
 			var sut = new SrneBatteryInverterImpl();
