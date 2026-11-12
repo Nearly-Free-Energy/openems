@@ -579,8 +579,8 @@ final class ModeSchedule {
 			this.reserveActive = soc < this.eveningReserveSoc;
 		}
 		if (this.reserveActive) {
-			// Evening reserve: the daytime priority, so the sun charges the battery for
-			// the peak. The SoC rule has to reach its upper threshold again afterwards.
+			// Evening reserve: the daytime priority, so the sun charges the battery for the
+			// peak. The SoC rule has to reach its upper threshold again afterwards.
 			this.highSoc = false;
 			this.socStateSeeded = true;
 			this.reason = ModeScheduleReason.EVENING_RESERVE;
@@ -694,8 +694,8 @@ final class ModeSchedule {
 			return new Step(ModeScheduleState.WAITING_FOR_DATA, target, null);
 		}
 		if (outputPriority.intValue() == target.intValue()) {
-			// The last handler is kept, so the cooldown still limits a re-correction if
-			// the device is overridden again right after.
+			// The last handler is kept, so the cooldown still limits a re-correction if the
+			// device is overridden again right after.
 			return new Step(ModeScheduleState.IN_SYNC, target, null);
 		}
 		if (this.failures >= MAX_ATTEMPTS) {
@@ -787,8 +787,7 @@ final class ModeSchedule {
 	// The minimum dwell applies to SoC-driven switches only; the window switches at
 	// the boundaries happen on time. Before the first verified switch it runs from
 	// the activation, so a restart loop cannot switch faster than the dwell. A
-	// clock
-	// that moved backwards never holds.
+	// clock that moved backwards never holds.
 	private boolean isDwelling(LocalDateTime now, Integer target) {
 		if (this.reason == ModeScheduleReason.WINDOW) {
 			return false;

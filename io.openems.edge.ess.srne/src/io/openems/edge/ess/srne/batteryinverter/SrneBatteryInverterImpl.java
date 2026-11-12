@@ -92,11 +92,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final UnsignedWordElement maxChargeCurrentLimitWrite = new UnsignedWordElement(0xE20A);
 	// JUSTIFICATION-A3: output priority (E204, source transfer) + BMS-comms enable
 	// (E215) added to the guarded write allow-list (#71) so SBU mode + BMS-SoC
-	// switching
-	// are settable from OpenEMS. Same scalar guarded path as the SoC/current
-	// settings.
-	// E204 mapping (SRNE manual, confirmed on gw-pi2 v29, microgrid-gateway #97,
-	// 4 Nov 2026): 0 SOL, 1 UTI, 2 SBU, 3 SUB.
+	// switching are settable from OpenEMS. Same scalar guarded path as the
+	// SoC/current settings. E204 mapping (SRNE manual, confirmed on gw-pi2 v29,
+	// microgrid-gateway #97, 4 Nov 2026): 0 SOL, 1 UTI, 2 SBU, 3 SUB.
 	private final UnsignedWordElement outputPriorityWrite = new UnsignedWordElement(0xE204);
 	private final UnsignedWordElement bmsCommunicationWrite = new UnsignedWordElement(0xE215);
 	// Timed-charge stop SoC of charge window 1 (E03B). Its read and write tasks are
@@ -356,10 +354,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC3ReadRegistersTask(0xE00F, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.DISCHARGE_CUTOFF_SOC, new UnsignedWordElement(0xE00F))), //
 				// Read-only battery-voltage protection thresholds (see the channel docs).
-				// Separate tasks, so the proven E00F read (safe-write verification) is
-				// never coupled to them. NOTE: a read that the device rejects marks the
-				// whole component defective for a few cycles (all its tasks skipped), so
-				// these must be confirmed to answer on the unit before deploying.
+				// Separate tasks, so the proven E00F read (safe-write verification) is never
+				// coupled to them. NOTE: a read that the device rejects marks the whole
+				// component defective for a few cycles (all its tasks skipped), so these must
+				// be confirmed to answer on the unit before deploying.
 				new FC3ReadRegistersTask(0xE00B, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.OVER_DISCHARGE_RETURN_VOLTAGE, new UnsignedWordElement(0xE00B),
 								SCALE_FACTOR_2), //
@@ -390,8 +388,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC3ReadRegistersTask(0xE026, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, new UnsignedWordElement(0xE026)), //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, new UnsignedWordElement(0xE027))), //
-				// Read-only schedule sections 2/3 (see the channel docs); separate tasks so
-				// the window/enable reads used for schedule verification stay decoupled.
+				// Read-only schedule sections 2/3 (see the channel docs); separate tasks so the
+				// window/enable reads used for schedule verification stay decoupled.
 				new FC3ReadRegistersTask(0xE028, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_START, new UnsignedWordElement(0xE028)), //
 						m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_2_STOP, new UnsignedWordElement(0xE029)), //
@@ -409,8 +407,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC3ReadRegistersTask(0xE033, Priority.LOW, //
 						m(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE, new UnsignedWordElement(0xE033)), //
 						// 0xE034-0xE036 is the inverter real-time clock (year/month, day/hour,
-						// minute/second, each encoded high*256+low). Read-only here so
-						// commissioning can verify the clock before any schedule is trusted.
+						// minute/second, each encoded high*256+low). Read-only here so commissioning
+						// can verify the clock before any schedule is trusted.
 						m(SrneBatteryInverter.ChannelId.RTC_YEAR_MONTH, new UnsignedWordElement(0xE034)), //
 						m(SrneBatteryInverter.ChannelId.RTC_DAY_HOUR, new UnsignedWordElement(0xE035)), //
 						m(SrneBatteryInverter.ChannelId.RTC_MINUTE_SECOND, new UnsignedWordElement(0xE036))), //
@@ -431,8 +429,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				new FC16WriteRegistersTask(this.writeHandlers[7]::onExecute, 0xE20A, this.maxChargeCurrentLimitWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[8]::onExecute, 0xE204, this.outputPriorityWrite), //
 				new FC16WriteRegistersTask(this.writeHandlers[9]::onExecute, 0xE215, this.bmsCommunicationWrite), //
-				// Start and stop each get their OWN single-register task: the SRNE mis-stored
-				// a two-register FC16 here (see ScheduleWindow), and one task would merge the
+				// Start and stop each get their OWN single-register task: the SRNE mis-stored a
+				// two-register FC16 here (see ScheduleWindow), and one task would merge the
 				// contiguous elements into one frame. The enable is a separate write, last.
 				new FC16WriteRegistersTask(this.chargeWindow::onStartExecute, 0xE026,
 						this.chargeWindow.startWriteElement()), //
@@ -454,9 +452,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					m(SrneBatteryInverter.ChannelId.BATTERY_SOC, new UnsignedWordElement(0x0100))));
 		}
 		// Charge window 1 stop SoC (E03B): read and written only when configured. A
-		// read
-		// the device rejects marks the whole component defective, so unmanaged edges
-		// never touch this register.
+		// read the device rejects marks the whole component defective, so unmanaged
+		// edges never touch this register.
 		if (this.isChargeWindow1StopSocManaged()) {
 			protocol.addTask(new FC3ReadRegistersTask(0xE03B, Priority.LOW, //
 					m(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC, new UnsignedWordElement(0xE03B))));
@@ -464,10 +461,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					this.chargeWindow1StopSocWrite));
 		}
 		// The mode schedule's own E204 write task exists only while the schedule is
-		// active, so the default task list is unchanged.
-		// Grid-input voltages for the mode schedule's SUB write on battery: the SRNE's
-		// own AC-input sense (the same registers Srne.Grid-Meter reads, validated by a
-		// live grid-off/grid-on test). Read only while that path is enabled.
+		// active, so the default task list is unchanged. Grid-input voltages for the
+		// mode schedule's SUB write on battery: the SRNE's own AC-input sense (the same
+		// registers Srne.Grid-Meter reads, validated by a live grid-off/grid-on test).
+		// Read only while that path is enabled.
 		if (this.modeSchedule.isActive() && this.modeSchedule.isGridPresentPathEnabled()) {
 			protocol.addTask(new FC3ReadRegistersTask(0x0213, Priority.HIGH, //
 					m(SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L1, new UnsignedWordElement(0x0213), SCALE_FACTOR_2)));
@@ -659,9 +656,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(step.target());
 	}
 
-	// Startup warnings only; the schedule itself still runs. The night-charge
-	// timer (charge window 1) needs the night value while it runs; a timer outside
-	// the night window would not get it.
+	// Startup warnings only; the schedule itself still runs. The night-charge timer
+	// (charge window 1) needs the night value while it runs; a timer outside the
+	// night window would not get it.
 	private void warnIfChargePriorityScheduleMismatched(Config config) {
 		if (!config.controlEnabled()) {
 			this.logWarn(this.log, "Charge-priority schedule is enabled but inert: it needs controlEnabled=true");
@@ -910,8 +907,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.failedCycles = 0;
 			var actual = this.readValue(SrneBatteryInverter.ChannelId.DISCHARGE_SCHEDULE_ENABLE);
 			if (this.dischargeGuard.isInsideWindow() && actual != null && actual != target) {
-				// While suppressed the correction is unlimited but rate-limited; otherwise
-				// it is allowed once per window.
+				// While suppressed the correction is unlimited but rate-limited; otherwise it
+				// is allowed once per window.
 				var suppressed = target == 0;
 				var due = suppressed ? this.driftCooldown == 0 : !this.driftCorrectedUnsuppressed;
 				if (due && this.dischargeWindow.reopen()) {
@@ -962,30 +959,20 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	// JUSTIFICATION-A3: guarded reconcile for output priority (#71). Output
-	// priority =
-	// SBU transfers the load onto the battery - it is effectively the "arm" for
-	// battery
-	// discharge. Mirroring the schedule feature's verified-then-enable, it is
-	// written
-	// only once its safety prerequisites (the reserve-floor / return SoC band and
-	// BMS
-	// comms) have read-back verified, so a failed or still-pending floor write can
-	// never
-	// arm battery discharge against a wrong reserve. Cannot use the flat
-	// reconcile()
-	// because of this cross-setting gate.
+	// priority = SBU transfers the load onto the battery - it is effectively the
+	// "arm" for battery discharge. Mirroring the schedule feature's
+	// verified-then-enable, it is written only once its safety prerequisites (the
+	// reserve-floor / return SoC band and BMS comms) have read-back verified, so a
+	// failed or still-pending floor write can never arm battery discharge against a
+	// wrong reserve. Cannot use the flat reconcile() because of this cross-setting
+	// gate.
 	// JUSTIFICATION-A3: coherent source-transfer reconcile (#71, PR #25 review).
-	// Output
-	// priority = SBU transfers the load onto the battery; its reserve band
-	// (E01F/E020)
-	// and BMS mode (E215) are safety prerequisites. When an arm is requested the
-	// WHOLE
-	// set is validated (present, individually bounded, coherent) BEFORE any of it
-	// is
-	// written, so a rejected arm never leaves a bad reserve band or partial writes
-	// on the
-	// live device. When no arm is requested the band and BMS remain independent
-	// settings.
+	// Output priority = SBU transfers the load onto the battery; its reserve band
+	// (E01F/E020) and BMS mode (E215) are safety prerequisites. When an arm is
+	// requested the WHOLE set is validated (present, individually bounded,
+	// coherent) BEFORE any of it is written, so a rejected arm never leaves a bad
+	// reserve band or partial writes on the live device. When no arm is requested
+	// the band and BMS remain independent settings.
 	private void reconcileSourceTransfer() {
 		var line = this.config.switchToLineSoc();
 		var battery = this.config.switchToBatterySoc();
@@ -1081,16 +1068,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	// Package-private for tests: lets a test assert that a reserve-band / BMS write
-	// did
-	// NOT queue on a rejected arm (state stays IDLE), not just that the aggregate
-	// failed.
+	// did NOT queue on a rejected arm (state stays IDLE), not just that the
+	// aggregate failed.
 	SafeWriteHandler.State writeHandlerStateForTest(int index) {
 		return this.writeHandlers[index].getState();
 	}
 
 	// Package-private for tests: the dummy bridge cannot echo a written register,
-	// so
-	// tests pin the enable value that was queued.
+	// so tests pin the enable value that was queued.
 	Integer dischargeQueuedEnableForTest() {
 		return this.dischargeWindow.queuedEnable();
 	}
@@ -1175,9 +1160,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// PR #24). Reads the three device registers for the window and hands them, with
 	// the configured targets, to the ScheduleWindow state machine which validates
 	// the pair, writes the pair as two single-register requests and only then
-	// enables. Not a wrapper around
-	// the scalar reconcile(): the pair validation + verified-then-enable ordering
-	// cannot be expressed by the single-register path.
+	// enables. Not a wrapper around the scalar reconcile(): the pair validation +
+	// verified-then-enable ordering cannot be expressed by the single-register
+	// path.
 	private void reconcileWindow(ScheduleWindow window, SrneBatteryInverter.ChannelId startChannel,
 			SrneBatteryInverter.ChannelId stopChannel, SrneBatteryInverter.ChannelId enableChannel, int cfgStart,
 			int cfgStop, int cfgEnable) {
