@@ -403,6 +403,13 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut2));
 		assertEquals(Boolean.FALSE, safeValueMissing(sut2));
 		assertTrue(sut2.takeChargePriorityWriteForTest());
+		// The device takes the write, so the schedule comes to rest.
+		sut2.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge2.withRegister(0xE20F, PV_ONLY);
+		test2.next(new TestCase(), CYCLES);
+		final var restingState = state(sut2);
+		assertNotEquals(ModeScheduleState.UNDEFINED, restingState);
+		assertEquals(Boolean.FALSE, safeValueMissing(sut2));
 
 		// A failure that alternates with clean cycles raises the alarm on every
 		// failing cycle and clears it on every clean one.
@@ -416,14 +423,17 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 		});
 		final var failuresBefore = sut2.chargePriorityFailuresForTest();
 		final var stateLogsBefore = sut2.chargePriorityStateLogsForTest();
-		final var flaps = 200;
+		// At least 1000 failures, all within one stack-trace interval of the first
+		// onset at activation.
+		final var flaps = 1000;
+		assertTrue(2 * START_CYCLES + CYCLES + 2 * flaps < SrneBatteryInverterImpl.FAILURE_STACK_TRACE_INTERVAL_CYCLES);
 		for (var i = 0; i < flaps; i++) {
 			test2.next(new TestCase());
 			assertEquals(Boolean.TRUE, safeValueMissing(sut2), "failing cycle " + i);
 			assertEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
 			test2.next(new TestCase());
 			assertEquals(Boolean.FALSE, safeValueMissing(sut2), "clean cycle " + i);
-			assertNotEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
+			assertEquals(restingState, nextState(sut2), "clean cycle " + i);
 		}
 		// Counted, not reset by the clean cycles.
 		assertEquals(failuresBefore + flaps, sut2.chargePriorityFailuresForTest());
