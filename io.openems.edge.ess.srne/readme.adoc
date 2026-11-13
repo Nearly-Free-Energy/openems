@@ -182,7 +182,8 @@ resuming the charge.
   after 3 fresh reads below `nightChargeStopSoc - 5`, otherwise it stays disarmed
   (`HELD_DISARMED`) until the re-arm time. A window rewrite inside the window (config
   change) therefore also stays disarmed until then, unless the battery is clearly low.
-  For the first 30 minutes after activation (1800 cycles) a disarmed device is not armed
+  For the first 1800 evaluations after activation (counted only while the machine state
+  is verified; about 30 minutes at the default 1 s cycle) a disarmed device is not armed
   at all unless the battery is clearly low, so a restart on a stale clock (gw-pi2 has no
   RTC; fake-hwclock until NTP) cannot resume the charge before the clock is corrected.
 * Clock: the edge time goes through the same plausibility and settle gate as the mode
@@ -190,7 +191,12 @@ resuming the charge.
   more than 5 minutes). The stop is released at once only when the clock crosses the
   re-arm time forward in small steps. After a clock step (NTP or manual) or a gap past
   it, the re-arm waits for 2 hours of steady time past the re-arm time, so a forward
-  step cannot re-arm the charge inside the real window. A backward step into the window
+  step cannot re-arm the charge inside the real window. The guard is bounded by those 2
+  hours: a forward step of more than 6 hours early in the window (e.g. at 00:30) re-arms
+  at about 02:30 real time, and the charge may then run to the window end above the stop
+  SoC (accepted residual risk; normal NTP corrections are small). The time is observed
+  every cycle, also during a grid outage, so an outage spanning the re-arm time does not
+  delay the re-arm. A backward step into the window
   after a re-arm stops the charge again (the safe direction) if the SoC is at the stop.
 * Budgets: a failed write (execute error, wrong or missing read-back) is retried after
   60 cycles, at most 5 times per target change and local day. At most 4 disarm writes

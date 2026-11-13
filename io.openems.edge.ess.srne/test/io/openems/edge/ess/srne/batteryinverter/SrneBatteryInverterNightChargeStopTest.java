@@ -222,4 +222,31 @@ public class SrneBatteryInverterNightChargeStopTest {
 		assertEquals(NightChargeStop.State.WRITE_FAILED, state(sut));
 		test.deactivate();
 	}
+
+	@Test
+	public void testRearmTimeCrossedDuringAnOutageRearmsWhenMainsReturns() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-13T02:55:00Z"); // 05:55 local
+		final var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, clock, config(50));
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		deviceWritesEnable(sut, bridge, test, 0);
+
+		// Grid lost; the clock runs on in 5-minute steps past 06:15 local.
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		bridge.withRegisters(0x0100, 30);
+		for (var i = 0; i < 6; i++) {
+			clock.leap(5, ChronoUnit.MINUTES);
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(NightChargeStop.State.WAITING_FOR_MAINS, state(sut));
+		assertNull(sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset());
+
+		// Mains back at 06:25: the re-arm goes out at once, not 2 hours later.
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		test.next(new TestCase(), CYCLES);
+		assertEquals(NightChargeStop.State.OUTSIDE_WINDOW, state(sut));
+		assertEquals(1, sut.chargeWindowForTest().queuedEnable());
+		test.deactivate();
+	}
 }

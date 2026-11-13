@@ -491,4 +491,32 @@ public class NightChargeStopTest {
 		assertEquals(State.OUTSIDE_WINDOW, restarted.cycles(at(next, 0, 6), 3).state());
 		assertEquals(1, restarted.enable);
 	}
+
+	@Test
+	public void testOutageSpanningTheRearmTimeRearmsAtOnceWhenMainsReturns() {
+		// step() runs only behind the machine-state gate; the clock gate runs every
+		// cycle and sees the re-arm time crossed in small steps during the outage.
+		var device = new Device(1);
+		var zone = java.time.ZoneId.of("Africa/Kampala");
+		var t = at(2, 0).atZone(zone).toInstant();
+		for (var i = 0; i <= ModeSchedule.CLOCK_SETTLE_CYCLES; i++) {
+			device.sut.plausibleTime(t = t.plusSeconds(1), zone);
+		}
+		device.soc(60, 3);
+		var now = device.sut.plausibleTime(t = t.plusSeconds(1), zone);
+		device.cycles(now, 3);
+		assertEquals(0, device.enable);
+		// Grid lost at 02:01: only the clock gate runs, one minute per cycle, until
+		// 00:30 the next night.
+		LocalDateTime seen = null;
+		while (t.isBefore(at(NIGHT.plusDays(1), 0, 30).atZone(zone).toInstant())) {
+			seen = device.sut.plausibleTime(t = t.plusSeconds(60), zone);
+		}
+		assertNotNull(seen);
+		// Mains back: the latch was released at 06:15, so the next night charges now.
+		device.soc(20, 3);
+		var step = device.cycles(seen, 3);
+		assertEquals(State.CHARGING, step.state());
+		assertEquals(1, device.enable);
+	}
 }

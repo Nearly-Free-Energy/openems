@@ -171,6 +171,7 @@ final class NightChargeStop {
 	private int unknownCycles;
 	private int evaluations;
 	private boolean latchedThisActivation;
+	private String pendingMessage;
 	private Instant lastInstant;
 	private int steadyClockCycles;
 
@@ -290,6 +291,23 @@ final class NightChargeStop {
 	 * @return the plausible local date-time, or null
 	 */
 	LocalDateTime plausibleTime(Instant instant, ZoneId zone) {
+		var now = this.settledTime(instant, zone);
+		// The time is observed here every cycle, also while the machine-state gate
+		// keeps step() from running, so an outage spanning the re-arm time is not
+		// taken for a clock step.
+		if (now == null) {
+			this.lastNow = null;
+			this.beyondSince = null;
+		} else {
+			var message = this.observe(now);
+			if (message != null) {
+				this.pendingMessage = message;
+			}
+		}
+		return now;
+	}
+
+	private LocalDateTime settledTime(Instant instant, ZoneId zone) {
 		if (instant == null || instant.isBefore(ModeSchedule.MIN_PLAUSIBLE_TIME)) {
 			this.lastInstant = null;
 			this.steadyClockCycles = 0;
@@ -330,6 +348,25 @@ final class NightChargeStop {
 		return !now.isBefore(this.beyondSince.plus(REARM_CONFIRM));
 	}
 
+	// Tracks clock continuity and releases the latch once the re-arm time is
+	// passed. Idempotent for the same time, so the gate and step() may both call
+	// it.
+	private String observe(LocalDateTime now) {
+		var continuous = this.lastNow != null && !now.isBefore(this.lastNow)
+				&& Duration.between(this.lastNow, now).compareTo(MAX_CLOCK_STEP) <= 0;
+		if (!continuous) {
+			this.beyondSince = null;
+		}
+		String message = null;
+		if (this.latchedOn != null && this.releaseLatch(now, continuous)) {
+			this.latchedOn = null;
+			this.beyondSince = null;
+			message = "Night charge window over; re-arming the charge schedule";
+		}
+		this.lastNow = now;
+		return message;
+	}
+
 	/**
 	 * Evaluates one cycle and hands the resulting enable target to the window: a
 	 * settled or failed window is re-opened when the target changes, and a failed
@@ -363,18 +400,11 @@ final class NightChargeStop {
 			return new Step(this.applied, failedState != null ? failedState : State.WAITING_FOR_DATA, message);
 		}
 		this.unknownCycles = 0;
-		var continuous = this.lastNow != null && !now.isBefore(this.lastNow)
-				&& Duration.between(this.lastNow, now).compareTo(MAX_CLOCK_STEP) <= 0;
-		if (!continuous) {
-			this.beyondSince = null;
+		var message = this.observe(now);
+		if (message == null) {
+			message = this.pendingMessage;
 		}
-		String message = null;
-		if (this.latchedOn != null && this.releaseLatch(now, continuous)) {
-			this.latchedOn = null;
-			this.beyondSince = null;
-			message = "Night charge window over; re-arming the charge schedule";
-		}
-		this.lastNow = now;
+		this.pendingMessage = null;
 		var inside = this.isInsideWindow(now.toLocalTime());
 		var deviceDisarmed = Integer.valueOf(0).equals(deviceEnable);
 		var limit = false;

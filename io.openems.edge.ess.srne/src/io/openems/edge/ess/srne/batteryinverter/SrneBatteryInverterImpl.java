@@ -542,11 +542,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// Source transfer: the reserve band (E01F/E020), BMS mode (E215) and output
 		// priority (E204) are reconciled together as one coherent, validated operation.
 		this.reconcileSourceTransfer();
+		// Evaluated here, behind the machine-state gate, right before the window.
+		final var chargeEnable = this.effectiveChargeEnable();
 		this.reconcileWindow(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
 				SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, //
-				this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), this.effectiveChargeEnable());
+				this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), chargeEnable);
 		this.reconcileWindow(this.dischargeWindow, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
