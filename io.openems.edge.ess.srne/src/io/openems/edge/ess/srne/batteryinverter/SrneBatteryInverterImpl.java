@@ -127,6 +127,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private boolean chargePriorityNightLateLogged;
 	private boolean chargePrioritySafeMissingLogged;
 	private boolean deviceChargeTimerChecked;
+	// Each schedule runs isolated: a failure in one is logged and the rest of the
+	// cycle (the other schedule, every scalar setting, both TOU windows) carries
+	// on. The fields are a seam so tests can make one schedule throw.
+	private Runnable modeScheduleReconcile = this::reconcileModeSchedule;
+	private Runnable chargePriorityReconcile = this::reconcileChargePrioritySchedule;
+	private String modeScheduleFailure;
+	private String chargePriorityFailure;
 	private ZoneId scheduleZone = ZoneId.of(DEFAULT_SCHEDULE_ZONE);
 	private Integer appliedDischargeEnable;
 	private int failedCycles;
@@ -535,8 +542,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		// The two daily schedules are independent: neither relies on the other's
 		// write landing first at a shared boundary (E20F waits for its own gate).
-		this.reconcileModeSchedule();
-		this.reconcileChargePrioritySchedule();
+		this.modeScheduleFailure = this.reconcileIsolated("Mode schedule", this.modeScheduleReconcile,
+				this.modeScheduleFailure);
+		this.chargePriorityFailure = this.reconcileIsolated("Charge-priority schedule", this.chargePriorityReconcile,
+				this.chargePriorityFailure);
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
 		}
@@ -576,6 +585,31 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.dischargeWindow1Start(), this.config.dischargeWindow1Stop(),
 				this.effectiveDischargeEnable());
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+	}
+
+	/**
+	 * Runs one schedule's reconcile so that an exception in it cannot skip the rest
+	 * of {@link #reconcileSafeSettings()}. Logs when it starts failing (not every
+	 * cycle) and when it recovers.
+	 *
+	 * @param name        the schedule name for the log
+	 * @param reconcile   the schedule's reconcile
+	 * @param lastFailure the failure logged on the previous cycle, or null
+	 * @return the failure of this cycle, or null if it ran cleanly
+	 */
+	private String reconcileIsolated(String name, Runnable reconcile, String lastFailure) {
+		try {
+			reconcile.run();
+		} catch (RuntimeException e) {
+			if (lastFailure == null) {
+				this.log.error("[" + this.id() + "] " + name + " failed, the other settings carry on", e);
+			}
+			return e.toString();
+		}
+		if (lastFailure != null) {
+			this.logInfo(this.log, name + " recovered");
+		}
+		return null;
 	}
 
 	/**
@@ -759,6 +793,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// Package-private for tests: the dummy bridge does not execute writes.
 	ChargePrioritySchedule chargePriorityScheduleForTest() {
 		return this.chargePrioritySchedule;
+	}
+
+	void setScheduleReconcilesForTest(Runnable modeSchedule, Runnable chargePriority) {
+		this.modeScheduleReconcile = modeSchedule != null ? modeSchedule : this::reconcileModeSchedule;
+		this.chargePriorityReconcile = chargePriority != null ? chargePriority : this::reconcileChargePrioritySchedule;
 	}
 
 	boolean takeChargePriorityWriteForTest() {

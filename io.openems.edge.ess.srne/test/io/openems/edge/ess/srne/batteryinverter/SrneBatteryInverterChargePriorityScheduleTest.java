@@ -345,6 +345,46 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 	}
 
 	@Test
+	public void testFailingScheduleDoesNotStopTheOtherSettings() throws Exception {
+		// One schedule throwing every cycle must not skip the other schedule, the
+		// scalar settings (here the E03B stop SoC) or the TOU windows.
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS).withRegister(0xE03B, 4096);
+		final var clock = new TimeLeapClock(Instant.parse(DAY), ZoneOffset.UTC);
+		Runnable failing = () -> {
+			throw new IllegalStateException("injected");
+		};
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(config().setChargeWindow1StopSoc(50).build());
+		sut.setScheduleReconcilesForTest(failing, null);
+		test.next(new TestCase(), START_CYCLES);
+		assertEquals(SafeWriteHandler.State.QUEUED, sut.chargeWindow1StopSocHandlerForTest().getState());
+		assertEquals(PV_ONLY, target(sut));
+		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
+
+		var sut2 = new SrneBatteryInverterImpl();
+		final var bridge2 = bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS).withRegister(0xE03B, 4096);
+		final var test2 = new ComponentTest(sut2) //
+				.addReference("setModbus", bridge2) //
+				.addReference("componentManager",
+						new DummyComponentManager(new TimeLeapClock(Instant.parse(DAY), ZoneOffset.UTC))) //
+				.activate(config().setChargeWindow1StopSoc(50).build());
+		sut2.setScheduleReconcilesForTest(null, failing);
+		test2.next(new TestCase(), START_CYCLES);
+		assertEquals(SafeWriteHandler.State.QUEUED, sut2.chargeWindow1StopSocHandlerForTest().getState());
+		assertNull(target(sut2));
+		assertFalse(sut2.takeChargePriorityWriteForTest());
+
+		// Once the schedule stops failing it picks up again (after its startup hold).
+		sut2.setScheduleReconcilesForTest(null, null);
+		test2.next(new TestCase(), START_CYCLES);
+		assertEquals(PV_ONLY, target(sut2));
+		assertTrue(sut2.takeChargePriorityWriteForTest());
+	}
+
+	@Test
 	public void testNightLateChannel() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var clock = new TimeLeapClock(Instant.parse(NIGHT), ZoneOffset.UTC);

@@ -170,8 +170,9 @@ final class ChargePrioritySchedule {
 	private LocalDate safeOverridesDate;
 	private int safeOverridesToday;
 	private boolean safeDue;
-	// Never null: LocalDate.MIN until the clock is first known, so the per-day
-	// counters work with a never-known clock (they share one MIN bucket).
+	// LocalDate.MIN until the clock is first known, so the per-day counters work
+	// with a never-known clock (they share one MIN bucket); the *On(date) helpers
+	// also treat a null date as an empty day.
 	private LocalDate lastDate = LocalDate.MIN;
 	private int unknownClockCycles;
 	private LocalDateTime nightMismatchSince;
@@ -682,19 +683,19 @@ final class ChargePrioritySchedule {
 	}
 
 	private int overridesOn(LocalDate date) {
-		return date.equals(this.overridesDate) ? this.overridesToday : 0;
+		return date != null && date.equals(this.overridesDate) ? this.overridesToday : 0;
 	}
 
 	private int writesOn(LocalDate date) {
-		return date.equals(this.writesDate) ? this.writesToday : 0;
+		return date != null && date.equals(this.writesDate) ? this.writesToday : 0;
 	}
 
 	private int safeOverridesOn(LocalDate date) {
-		return date.equals(this.safeOverridesDate) ? this.safeOverridesToday : 0;
+		return date != null && date.equals(this.safeOverridesDate) ? this.safeOverridesToday : 0;
 	}
 
 	private int dayWritesOn(LocalDate date) {
-		return date.equals(this.dayWritesDate) ? this.dayWritesToday : 0;
+		return date != null && date.equals(this.dayWritesDate) ? this.dayWritesToday : 0;
 	}
 
 	/**

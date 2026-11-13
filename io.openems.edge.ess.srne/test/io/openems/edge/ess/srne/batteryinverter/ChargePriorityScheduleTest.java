@@ -233,6 +233,20 @@ public class ChargePriorityScheduleTest {
 	}
 
 	@Test
+	public void testPerDayCountersTreatNullDateAsEmptyDay() {
+		var sut = defaults();
+		assertEquals(0, sut.writesTodayForTest(null));
+		assertEquals(0, sut.dayWritesTodayForTest(null));
+		for (var i = 0; i < ChargePrioritySchedule.UNKNOWN_CLOCK_FALLBACK_CYCLES; i++) {
+			step(sut, null, HYBRID, true);
+		}
+		device(sut, PV_ONLY);
+		step(sut, null, PV_ONLY, true);
+		assertEquals(1, sut.dayWritesTodayForTest(LocalDate.MIN));
+		assertEquals(0, sut.dayWritesTodayForTest(null));
+	}
+
+	@Test
 	public void testHoldModeWithNeverKnownClock() {
 		// Invalid config and off-with-restore both hold the safe value from the first
 		// cycle, without any known date.
