@@ -3,6 +3,7 @@ package io.openems.edge.ess.srne.batteryinverter;
 import static io.openems.edge.ess.srne.SrneConstants.DEFAULT_UNIT_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -70,6 +71,16 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 	private static ModeScheduleState state(SrneBatteryInverterImpl sut) {
 		Channel<ModeScheduleState> channel = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE);
 		return channel.value().asEnum();
+	}
+
+	private static Boolean safeValueMissing(SrneBatteryInverterImpl sut) {
+		Channel<Boolean> channel = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING);
+		return channel.getNextValue().get();
+	}
+
+	private static ModeScheduleState nextState(SrneBatteryInverterImpl sut) {
+		Channel<ModeScheduleState> channel = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE);
+		return channel.getNextValue().asEnum();
 	}
 
 	private static Integer target(SrneBatteryInverterImpl sut) {
@@ -363,6 +374,7 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 		assertEquals(SafeWriteHandler.State.QUEUED, sut.chargeWindow1StopSocHandlerForTest().getState());
 		assertEquals(PV_ONLY, target(sut));
 		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
+		assertEquals(Boolean.FALSE, safeValueMissing(sut));
 
 		var sut2 = new SrneBatteryInverterImpl();
 		final var bridge2 = bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS).withRegister(0xE03B, 4096);
@@ -376,12 +388,38 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 		assertEquals(SafeWriteHandler.State.QUEUED, sut2.chargeWindow1StopSocHandlerForTest().getState());
 		assertNull(target(sut2));
 		assertFalse(sut2.takeChargePriorityWriteForTest());
+		// Never silent: the safe-value alarm holds and the state reads unknown.
+		assertEquals(Boolean.TRUE, safeValueMissing(sut2));
+		assertEquals(ModeScheduleState.UNDEFINED, state(sut2));
 
-		// Once the schedule stops failing it picks up again (after its startup hold).
+		// Once the schedule stops failing it picks up again (after its startup hold),
+		// and the state and alarm are its own again.
 		sut2.setScheduleReconcilesForTest(null, null);
 		test2.next(new TestCase(), START_CYCLES);
 		assertEquals(PV_ONLY, target(sut2));
+		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut2));
+		assertEquals(Boolean.FALSE, safeValueMissing(sut2));
 		assertTrue(sut2.takeChargePriorityWriteForTest());
+
+		// A failure that alternates with clean cycles raises the alarm on every
+		// failing cycle and clears it on every clean one.
+		var flip = new boolean[1];
+		sut2.setScheduleReconcilesForTest(null, () -> {
+			flip[0] = !flip[0];
+			if (flip[0]) {
+				throw new IllegalStateException("flapping");
+			}
+			sut2.reconcileChargePriorityForTest();
+		});
+		test2.next(new TestCase());
+		assertEquals(Boolean.TRUE, safeValueMissing(sut2));
+		assertEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
+		test2.next(new TestCase());
+		assertEquals(Boolean.FALSE, safeValueMissing(sut2));
+		assertNotEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
+		// Counted, not reset by the clean cycles: START_CYCLES from activation plus
+		// one.
+		assertEquals(START_CYCLES + 1, sut2.chargePriorityFailuresForTest());
 	}
 
 	@Test

@@ -485,6 +485,11 @@ final class ChargePrioritySchedule {
 		if (!this.managesRegister()) {
 			return new Step(ModeScheduleState.DISABLED, null, null);
 		}
+		// The startup hold counts only cycles in which the schedule is evaluated. A
+		// cycle whose reconcile throws (isolated by the caller) does not advance it,
+		// so a schedule that failed from activation still waits out its hold after
+		// recovering instead of writing at once. Keep the increment here rather than
+		// moving it ahead of code that can throw.
 		if (this.cycles < ModeSchedule.STARTUP_HOLD_CYCLES) {
 			this.cycles++;
 		}

@@ -132,8 +132,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// on. The fields are a seam so tests can make one schedule throw.
 	private Runnable modeScheduleReconcile = this::reconcileModeSchedule;
 	private Runnable chargePriorityReconcile = this::reconcileChargePrioritySchedule;
-	private String modeScheduleFailure;
-	private String chargePriorityFailure;
+	private final IsolatedFailures modeScheduleFailures = new IsolatedFailures("Mode schedule");
+	private final IsolatedFailures chargePriorityFailures = new IsolatedFailures("Charge-priority schedule");
+	private long reconcileCycles;
 	private ZoneId scheduleZone = ZoneId.of(DEFAULT_SCHEDULE_ZONE);
 	private Integer appliedDischargeEnable;
 	private int failedCycles;
@@ -542,10 +543,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		// The two daily schedules are independent: neither relies on the other's
 		// write landing first at a shared boundary (E20F waits for its own gate).
-		this.modeScheduleFailure = this.reconcileIsolated("Mode schedule", this.modeScheduleReconcile,
-				this.modeScheduleFailure);
-		this.chargePriorityFailure = this.reconcileIsolated("Charge-priority schedule", this.chargePriorityReconcile,
-				this.chargePriorityFailure);
+		this.reconcileCycles++;
+		this.reconcileIsolated(this.modeScheduleReconcile, this.modeScheduleFailures);
+		if (!this.reconcileIsolated(this.chargePriorityReconcile, this.chargePriorityFailures)) {
+			this.reportChargePriorityReconcileFailing();
+		}
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
 		}
@@ -588,28 +590,74 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	/**
-	 * Runs one schedule's reconcile so that an exception in it cannot skip the rest
-	 * of {@link #reconcileSafeSettings()}. Logs when it starts failing (not every
-	 * cycle) and when it recovers.
-	 *
-	 * @param name        the schedule name for the log
-	 * @param reconcile   the schedule's reconcile
-	 * @param lastFailure the failure logged on the previous cycle, or null
-	 * @return the failure of this cycle, or null if it ran cleanly
+	 * Failure log of one isolated schedule reconcile. Counts failures instead of a
+	 * flag that one clean cycle resets, so a flapping failure logs its stack trace
+	 * at most once per {@link #FAILURE_STACK_TRACE_INTERVAL_CYCLES}.
 	 */
-	private String reconcileIsolated(String name, Runnable reconcile, String lastFailure) {
+	private static final class IsolatedFailures {
+		private final String name;
+		private boolean failing;
+		private boolean onsetLogged;
+		private int failures;
+		private long lastStackTraceCycle = Long.MIN_VALUE;
+
+		private IsolatedFailures(String name) {
+			this.name = name;
+		}
+	}
+
+	/** Minimum cycles between two logged stack traces of one schedule (~1 h). */
+	static final int FAILURE_STACK_TRACE_INTERVAL_CYCLES = 3600;
+
+	/**
+	 * Runs one schedule's reconcile so that an exception in it cannot skip the rest
+	 * of {@link #reconcileSafeSettings()}. The stack trace is logged at the start
+	 * of a failure, at most once per {@link #FAILURE_STACK_TRACE_INTERVAL_CYCLES};
+	 * a recovery is logged only after a logged start.
+	 *
+	 * @param reconcile the schedule's reconcile
+	 * @param failures  the schedule's failure log
+	 * @return true if it ran cleanly, false if it threw
+	 */
+	private boolean reconcileIsolated(Runnable reconcile, IsolatedFailures failures) {
 		try {
 			reconcile.run();
 		} catch (RuntimeException e) {
-			if (lastFailure == null) {
-				this.log.error("[" + this.id() + "] " + name + " failed, the other settings carry on", e);
+			failures.failures++;
+			if (!failures.failing) {
+				failures.failing = true;
+				failures.onsetLogged = failures.lastStackTraceCycle == Long.MIN_VALUE
+						|| this.reconcileCycles - failures.lastStackTraceCycle >= FAILURE_STACK_TRACE_INTERVAL_CYCLES;
+				if (failures.onsetLogged) {
+					failures.lastStackTraceCycle = this.reconcileCycles;
+					this.log.error("[" + this.id() + "] " + failures.name + " failed (" + failures.failures
+							+ " failures since activation; next stack trace in " + FAILURE_STACK_TRACE_INTERVAL_CYCLES
+							+ " cycles at the earliest), the other settings carry on", e);
+				}
 			}
-			return e.toString();
+			return false;
 		}
-		if (lastFailure != null) {
-			this.logInfo(this.log, name + " recovered");
+		if (failures.failing) {
+			failures.failing = false;
+			if (failures.onsetLogged) {
+				this.logInfo(this.log, failures.name + " recovered");
+			}
 		}
-		return null;
+		return true;
+	}
+
+	// A throwing charge-priority reconcile must never look healthy: the safe-value
+	// alarm is raised and the state and target read unknown until it runs cleanly.
+	private void reportChargePriorityReconcileFailing() {
+		if (!this.chargePrioritySafeMissingLogged) {
+			this.logWarn(this.log, "Charge-priority schedule: reconcile failing; E20F is not managed, "
+					+ "the grid may charge the battery");
+		}
+		this.chargePrioritySafeMissingLogged = true;
+		this.lastChargePriorityState = null;
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING).setNextValue(true);
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE).setNextValue(null);
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(null);
 	}
 
 	/**
@@ -798,6 +846,14 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	void setScheduleReconcilesForTest(Runnable modeSchedule, Runnable chargePriority) {
 		this.modeScheduleReconcile = modeSchedule != null ? modeSchedule : this::reconcileModeSchedule;
 		this.chargePriorityReconcile = chargePriority != null ? chargePriority : this::reconcileChargePrioritySchedule;
+	}
+
+	void reconcileChargePriorityForTest() {
+		this.reconcileChargePrioritySchedule();
+	}
+
+	int chargePriorityFailuresForTest() {
+		return this.chargePriorityFailures.failures;
 	}
 
 	boolean takeChargePriorityWriteForTest() {

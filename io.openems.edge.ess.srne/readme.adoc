@@ -561,6 +561,18 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
   1800 cycles, about 30 minutes, to spare the settings memory). The grid may then
   charge the battery. A warning names which of the two reasons holds. WARNING, not FAULT, so the alarm never drives an ESS state
   machine into its error state.
+* Reconcile failing: if the charge-priority reconcile itself throws, the rest of the
+  cycle carries on (isolated), `ChargePrioritySafeValueMissing` is set `true` with the
+  reason "reconcile failing" in the log, and `ChargePriorityScheduleState` and
+  `ChargePriorityScheduleTarget` read unknown until it runs cleanly again. Its stack
+  trace is logged when a failure starts, at most once per 3600 cycles (about an hour),
+  so a flapping failure does not flood the log; the failure count is in the message.
+  The startup hold does not advance while it throws.
+* Never-known clock: until the clock is first known, the per-day counters (day
+  re-corrections, writes) share one bucket (`LocalDate.MIN`) that never rolls over.
+  So after 3 day re-corrections with an unknown clock the persistent-override alarm
+  and the 1800-cycle re-correction spacing hold until the clock becomes known (fail
+  loud), not until a local midnight.
 * Turning it off and invalid configuration. `0xE20F` is a persistent setting, so a
   schedule that stops must not leave the night value behind:
   ** Invalid configuration (a night value outside `0..3`, a day value other than `3`,
