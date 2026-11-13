@@ -28,9 +28,9 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
  * controllable clock. Africa/Kampala is UTC+3: 07:00Z is 10:00 local (daytime,
  * SUB) and 16:00Z is 19:00 local (evening, SBU). The dummy bridge does not
  * execute writes, so a test plays the device by invoking the same execute
- * callback the write task uses and then presenting the register read-back.
- * The schedule writes nothing for {@link ModeSchedule#STARTUP_HOLD_CYCLES}
- * cycles after activation, and the clock gate needs
+ * callback the write task uses and then presenting the register read-back. The
+ * schedule writes nothing for {@link ModeSchedule#STARTUP_HOLD_CYCLES} cycles
+ * after activation, and the clock gate needs
  * {@link ModeSchedule#CLOCK_SETTLE_CYCLES} steady cycles after a jump.
  */
 public class SrneBatteryInverterModeScheduleTest {
@@ -468,7 +468,8 @@ public class SrneBatteryInverterModeScheduleTest {
 		assertFalse(sut.takeModeScheduleWriteForTest());
 	}
 
-	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3), SoC
+	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3),
+	// SoC
 	// falls below daytimeSbuBelowSoc. With the grid present on all phases the SUB
 	// write goes out; with the grid absent it does not.
 	private static void sbuThenOnBatteryBelowThreshold(boolean gridPresent, int gridPresentMinVoltage)
@@ -534,8 +535,8 @@ public class SrneBatteryInverterModeScheduleTest {
 		final var clock = clockAt("2026-11-10T12:00:00Z"); // 15:00 local, in the reserve window
 		final var bridge = bridge(SBU, MachineState.RUNNING_MAINS_BYPASS) //
 				.withRegisters(0x0100, 88);
-		final var test = start(sut, bridge, clock, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85)
-				.setEveningReserveSoc(90).build());
+		final var test = start(sut, bridge, clock,
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).setEveningReserveSoc(90).build());
 		assertEquals(SUB, target(sut));
 		assertEquals(ModeScheduleReason.EVENING_RESERVE, reason(sut));
 		for (var i = 0; i < 3; i++) {
