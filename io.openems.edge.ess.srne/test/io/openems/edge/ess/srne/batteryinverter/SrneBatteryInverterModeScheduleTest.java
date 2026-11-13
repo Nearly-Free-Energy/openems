@@ -468,9 +468,8 @@ public class SrneBatteryInverterModeScheduleTest {
 	}
 
 	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3),
-	// SoC
-	// falls below daytimeSbuBelowSoc. With the grid present on all phases the SUB
-	// write goes out; with the grid absent it does not.
+	// SoC falls below daytimeSbuBelowSoc. With the grid present on all phases the
+	// SUB write goes out; with the grid absent it does not.
 	private static void sbuThenOnBatteryBelowThreshold(boolean gridPresent, int gridPresentMinVoltage)
 			throws Exception {
 		var sut = new SrneBatteryInverterImpl();

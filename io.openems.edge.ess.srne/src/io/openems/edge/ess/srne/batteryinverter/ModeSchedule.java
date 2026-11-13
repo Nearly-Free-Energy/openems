@@ -883,8 +883,7 @@ final class ModeSchedule {
 	// The minimum dwell applies to SoC-driven switches only; the window switches at
 	// the boundaries happen on time. Before the first verified switch it runs from
 	// the activation, so a restart loop cannot switch faster than the dwell. A
-	// clock
-	// that moved backwards never holds.
+	// clock that moved backwards never holds.
 	private boolean isDwelling(LocalDateTime now, Integer target) {
 		if (this.reason == ModeScheduleReason.WINDOW) {
 			return false;

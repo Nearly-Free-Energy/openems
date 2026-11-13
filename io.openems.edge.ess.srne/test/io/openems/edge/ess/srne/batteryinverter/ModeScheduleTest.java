@@ -746,8 +746,8 @@ public class ModeScheduleTest {
 	}
 
 	// A device that reverts E204 to `other` right after every verified write.
-	// Returns
-	// the cycle index of each write made in `cycles` cycles at a fixed time.
+	// Returns the cycle index of each write made in `cycles` cycles at a fixed
+	// time.
 	private static List<Integer> fight(ModeSchedule sut, LocalTime time, int target, int other, int cycles) {
 		List<Integer> writes = new ArrayList<>();
 		for (var i = 0; i < cycles; i++) {
@@ -858,8 +858,7 @@ public class ModeScheduleTest {
 		assertFalse(
 				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10).isGridPresentPathEnabled());
 		// Window switch to SUB while the unit runs on battery with the grid up: waits
-		// for
-		// mains as before.
+		// for mains as before.
 		var sut = defaults();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
 			step(sut, DAY, 50, SUB, true);
@@ -901,8 +900,7 @@ public class ModeScheduleTest {
 	}
 
 	// Past the startup hold and the dwell from activation (at 10:00), device in SBU
-	// at
-	// 88 % (seeded high).
+	// at 88 % (seeded high).
 	private static ModeSchedule primedReserve() {
 		var sut = reserveSchedule();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {

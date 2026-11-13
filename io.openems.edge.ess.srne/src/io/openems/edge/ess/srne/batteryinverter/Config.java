@@ -61,8 +61,7 @@ import io.openems.edge.ess.srne.SrneConstants;
 	int maxChargeCurrentLimit() default -1;
 
 	// Output priority (source transfer) and BMS-comms enable. Raw mode numbers.
-	// E204:
-	// 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual; confirmed on gw-pi2 v29,
+	// E204: 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual; confirmed on gw-pi2 v29,
 	// microgrid-gateway #97, 4 Nov 2026). -1 leaves unchanged. See #71.
 	@AttributeDefinition(name = "Output priority mode", description = "Raw target for E204 (source transfer): 0 SOL, 1 UTI, 2 SBU, 3 SUB; -1 leaves unchanged. Must be -1 when the daily mode schedule is enabled (one owner of E204), otherwise the schedule reports CONFIG_INVALID and stays off.")
 	int outputPriority() default -1;
@@ -81,9 +80,8 @@ import io.openems.edge.ess.srne.SrneConstants;
 
 	// Timed-charge stop SoC for charge window 1 (E03B, protocol V1.94+). The night
 	// charge in window 1 stops once the battery reaches this SoC, so a wide
-	// off-peak
-	// window (e.g. 00:00-06:00) charges in whatever minutes the grid is present.
-	// -1 leaves the register unmanaged (and unread). Valid 10..100.
+	// off-peak window (e.g. 00:00-06:00) charges in whatever minutes the grid is
+	// present. -1 leaves the register unmanaged (and unread). Valid 10..100.
 	@AttributeDefinition(name = "Charge window 1 stop SoC", description = "Target for E03B (timed-charge stop SoC of charge window 1) in percent; range 10..100; -1 leaves unchanged and does not read the register.")
 	int chargeWindow1StopSoc() default -1;
 
@@ -141,9 +139,8 @@ import io.openems.edge.ess.srne.SrneConstants;
 	String daytimeStart() default "00:30";
 
 	// Daytime SoC rule: in SUB the SRNE curtails PV once the battery is nearly
-	// full,
-	// so the daytime target becomes SBU above an upper SoC and SUB again below a
-	// lower one (hysteresis). Both -1 = off (default).
+	// full, so the daytime target becomes SBU above an upper SoC and SUB again
+	// below a lower one (hysteresis). Both -1 = off (default).
 	@AttributeDefinition(name = "Daytime SBU above SoC", description = "In the daytime window, switch to the evening priority (SBU) once SoC is at or above this percent; 10..100 and above daytimeSbuBelowSoc; -1 = off (set both or neither).")
 	int daytimeSbuAboveSoc() default -1;
 
@@ -157,10 +154,9 @@ import io.openems.edge.ess.srne.SrneConstants;
 	int gridPresentMinVoltage() default -1;
 
 	// Evening reserve: from eveningReserveFrom until eveningStart, while SoC is
-	// below
-	// eveningReserveSoc the daytime target is the daytime priority (SUB),
-	// overriding
-	// the daytime SoC rule, so the sun charges the battery for the peak. -1 = off.
+	// below eveningReserveSoc the daytime target is the daytime priority (SUB),
+	// overriding the daytime SoC rule, so the sun charges the battery for the peak.
+	// -1 = off.
 	@AttributeDefinition(name = "Evening reserve SoC", description = "Mode schedule: from eveningReserveFrom until eveningStart, while SoC is below this percent the target is the daytime priority (SUB), overriding the daytime SBU rule; 20..100; -1 = off.")
 	int eveningReserveSoc() default -1;
 
