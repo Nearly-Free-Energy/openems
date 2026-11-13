@@ -170,6 +170,8 @@ final class ChargePrioritySchedule {
 	private LocalDate safeOverridesDate;
 	private int safeOverridesToday;
 	private boolean safeDue;
+	// Never null: LocalDate.MIN until the clock is first known, so the per-day
+	// counters work with a never-known clock (they share one MIN bucket).
 	private LocalDate lastDate = LocalDate.MIN;
 	private int unknownClockCycles;
 	private LocalDateTime nightMismatchSince;

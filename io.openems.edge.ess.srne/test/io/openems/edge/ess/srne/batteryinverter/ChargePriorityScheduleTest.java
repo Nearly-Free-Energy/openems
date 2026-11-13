@@ -205,6 +205,60 @@ public class ChargePriorityScheduleTest {
 	}
 
 	@Test
+	public void testFreshScheduleWithNeverKnownClock() {
+		// Reboot before NTP: the clock has never been plausible since activation (no
+		// priming with a known date). The fallback write is queued, verified and
+		// counted, and the alarm is evaluated every cycle without a known date.
+		var sut = defaults();
+		for (var i = 1; i < ChargePrioritySchedule.UNKNOWN_CLOCK_FALLBACK_CYCLES; i++) {
+			assertStep(step(sut, null, HYBRID, true), ModeScheduleState.WAITING_FOR_DATA, null, null);
+			assertFalse(sut.isSafeValueMissing());
+		}
+		assertStep(step(sut, null, HYBRID, true), ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		assertFalse(sut.isSafeValueMissing());
+		device(sut, PV_ONLY);
+		assertStep(step(sut, null, PV_ONLY, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.handlerState());
+		assertNull(sut.safeValueMissingReason());
+		// An override with the clock still unknown is re-corrected (date-less
+		// re-correction path) and the alarm keeps evaluating.
+		var wrote = false;
+		for (var i = 0; i <= ChargePrioritySchedule.DAY_ALARM_BACKOFF_CYCLES && !wrote; i++) {
+			wrote = step(sut, null, HYBRID, false).write() != null;
+			sut.isSafeValueMissing();
+		}
+		assertTrue(wrote);
+		device(sut, PV_ONLY);
+		assertStep(step(sut, null, PV_ONLY, false), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+	}
+
+	@Test
+	public void testHoldModeWithNeverKnownClock() {
+		// Invalid config and off-with-restore both hold the safe value from the first
+		// cycle, without any known date.
+		for (var sut : new ChargePrioritySchedule[] {
+				ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, "00:00", "6:00"),
+				ChargePrioritySchedule.fromConfig(false, HYBRID, PV_ONLY, "00:00", "06:00", true) }) {
+			for (var i = 0; i < 10; i++) {
+				// E20F unread, then already at the safe value: the alarm is evaluated.
+				step(sut, null, null, true);
+				assertFalse(sut.isSafeValueMissing());
+				step(sut, null, PV_ONLY, true);
+				assertFalse(sut.isSafeValueMissing());
+			}
+			var wrote = false;
+			for (var i = 0; i < ChargePrioritySchedule.DAY_STARTUP_HOLD_CYCLES + 1 && !wrote; i++) {
+				wrote = step(sut, null, HYBRID, false).write() != null;
+			}
+			assertTrue(wrote);
+			device(sut, PV_ONLY);
+			step(sut, null, PV_ONLY, false);
+			assertEquals(SafeWriteHandler.State.VERIFIED, sut.handlerState());
+			assertEquals(1, sut.dayWritesTodayForTest(LocalDate.MIN));
+		}
+	}
+
+	@Test
 	public void testUnknownClockFallbackOnBattery() {
 		var sut = primed();
 		for (var i = 1; i < ChargePrioritySchedule.UNKNOWN_CLOCK_FALLBACK_CYCLES; i++) {

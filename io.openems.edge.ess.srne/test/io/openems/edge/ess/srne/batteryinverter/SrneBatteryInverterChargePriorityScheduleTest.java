@@ -305,6 +305,46 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 	}
 
 	@Test
+	public void testNeverKnownClockKeepsTheOtherSettingsRunning() throws Exception {
+		// Reboot before NTP: the edge clock stays before the plausibility floor, so the
+		// schedule never knows the time. The day-value fallback still goes out and the
+		// rest of the settings reconcile (here the E03B stop SoC) is not cut short.
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(HYBRID, MachineState.RUNNING_MAINS_BYPASS).withRegister(0xE03B, 4096);
+		final var clock = new TimeLeapClock(Instant.parse("2026-10-01T00:00:00Z"), ZoneOffset.UTC);
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(config().setChargeWindow1StopSoc(50).build()) //
+				.next(new TestCase(), START_CYCLES);
+		assertEquals(SafeWriteHandler.State.QUEUED, sut.chargeWindow1StopSocHandlerForTest().getState());
+		assertEquals(PV_ONLY, target(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, PV_ONLY);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.chargePriorityScheduleForTest().handlerState());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+	}
+
+	@Test
+	public void testHoldModeWithNeverKnownClock() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(HYBRID, MachineState.SOFT_START);
+		final var clock = new TimeLeapClock(Instant.parse("2026-10-01T00:00:00Z"), ZoneOffset.UTC);
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(config().setChargePrioritySchedule(false).build()) //
+				.next(new TestCase(), CYCLES + ChargePrioritySchedule.DAY_STARTUP_HOLD_CYCLES);
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, PV_ONLY);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(ModeScheduleState.DISABLED, state(sut));
+	}
+
+	@Test
 	public void testNightLateChannel() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var clock = new TimeLeapClock(Instant.parse(NIGHT), ZoneOffset.UTC);
