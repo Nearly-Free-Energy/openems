@@ -405,7 +405,8 @@ public class SrneBatteryInverterModeScheduleTest {
 	@Test
 	public void testInvalidConfigValues() throws Exception {
 		for (var config : new MyConfig[] { config().setEveningStart("25:00").build(),
-				config().setDaytimePriority(SBU).setEveningPriority(SBU).build() }) {
+				config().setDaytimePriority(SBU).setEveningPriority(SBU).build(),
+				config().setDaytimeSbuAboveSoc(30).setDaytimeSbuBelowSoc(25).setDaytimeSocRuleFrom("19:00").build() }) {
 			var sut = new SrneBatteryInverterImpl();
 			start(sut, bridge(SBU, MachineState.RUNNING_MAINS_BYPASS), DAY, config) //
 					.next(new TestCase(), CYCLES);
@@ -554,5 +555,18 @@ public class SrneBatteryInverterModeScheduleTest {
 		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
 		assertEquals(SBU, target(sut));
 		assertEquals(ModeScheduleReason.HIGH_SOC, reason(sut));
+	}
+
+	@Test
+	public void testDaytimeSocRuleFromHoldsSubAtNight() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		// 02:00 local, after the night charge, device in SUB at 50 %.
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 50);
+		start(sut, bridge, "2026-11-10T23:00:00Z", config().setDaytimeStart("00:00").setDaytimeSbuAboveSoc(30)
+				.setDaytimeSbuBelowSoc(25).setDaytimeSocRuleFrom("06:00").build());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(SUB, target(sut));
+		assertEquals(ModeScheduleReason.WINDOW, reason(sut));
 	}
 }

@@ -146,6 +146,12 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Daytime SBU below SoC", description = "In the daytime window, return to the daytime priority (SUB) once SoC is below this percent; 10..100 and below daytimeSbuAboveSoc; -1 = off (set both or neither).")
 	int daytimeSbuBelowSoc() default -1;
 
+	// Start of the daytime SoC rule: from daytimeStart until then the daytime target
+	// is the daytime priority (SUB) and SoC is not evaluated, so the night grid charge
+	// is kept for the morning peak. Empty = the rule applies from daytimeStart.
+	@AttributeDefinition(name = "Daytime SoC rule from", description = "Mode schedule: local time HH:MM (schedule time zone) from which the daytime SoC rule applies; before it, from daytimeStart, the target is the daytime priority (SUB) and SoC is not evaluated. Must lie in the daytime window. Empty (default) = the rule applies from daytimeStart.")
+	String daytimeSocRuleFrom() default "";
+
 	@AttributeDefinition(name = "Minimum dwell minutes", description = "A SoC-driven mode switch waits at least this many minutes after the last verified switch; 0..1440.")
 	int minDwellMinutes() default 10;
 
