@@ -34,6 +34,8 @@ public class SrneBatteryInverterNightChargeStopTest {
 	private static final int START = 0; // 00:00
 	private static final int STOP = 1536; // 06:00
 	private static final int CYCLES = 16; // >= number of LOW read tasks
+	// The clock gate needs CLOCK_SETTLE_CYCLES steady cycles after start or a step.
+	private static final int SETTLE_CYCLES = ModeSchedule.CLOCK_SETTLE_CYCLES + CYCLES;
 
 	private static TimeLeapClock clockAt(String utc) {
 		return new TimeLeapClock(Instant.parse(utc), ZoneOffset.UTC);
@@ -69,7 +71,7 @@ public class SrneBatteryInverterNightChargeStopTest {
 				.addReference("setModbus", bridge) //
 				.addReference("componentManager", new DummyComponentManager(clock)) //
 				.activate(config) //
-				.next(new TestCase(), CYCLES);
+				.next(new TestCase(), SETTLE_CYCLES);
 	}
 
 	private static NightChargeStop.State state(SrneBatteryInverterImpl sut) {
@@ -136,7 +138,7 @@ public class SrneBatteryInverterNightChargeStopTest {
 		// 03:00 local, SoC at the stop: the charge schedule is disarmed (E02C = 0).
 		clock.leap(150, ChronoUnit.MINUTES);
 		bridge.withRegisters(0x0100, 50);
-		test.next(new TestCase(), CYCLES);
+		test.next(new TestCase(), SETTLE_CYCLES);
 		assertEquals(NightChargeStop.State.STOPPED, state(sut));
 		assertEquals(0, sut.chargeWindowForTest().queuedEnable());
 		assertEquals(ScheduleWindow.State.DISABLE_QUEUED, sut.chargeWindowForTest().getState());
@@ -146,12 +148,15 @@ public class SrneBatteryInverterNightChargeStopTest {
 		// Still in the window at a low SoC: no re-arm.
 		bridge.withRegisters(0x0100, 30);
 		clock.leap(150, ChronoUnit.MINUTES); // 05:30
-		test.next(new TestCase(), CYCLES);
+		test.next(new TestCase(), SETTLE_CYCLES);
 		assertEquals(NightChargeStop.State.STOPPED, state(sut));
 		assertEquals(ScheduleWindow.State.DONE, sut.chargeWindowForTest().getState());
 
-		// 06:15 local: re-armed so the next night charges.
-		clock.leap(45, ChronoUnit.MINUTES);
+		// 06:10, then 06:15 local in a small step: re-armed so the next night charges.
+		clock.leap(40, ChronoUnit.MINUTES);
+		test.next(new TestCase(), SETTLE_CYCLES);
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		clock.leap(5, ChronoUnit.MINUTES);
 		test.next(new TestCase(), CYCLES);
 		assertEquals(NightChargeStop.State.OUTSIDE_WINDOW, state(sut));
 		assertEquals(1, sut.chargeWindowForTest().queuedEnable());
@@ -174,6 +179,47 @@ public class SrneBatteryInverterNightChargeStopTest {
 		test.next(new TestCase(), CYCLES);
 		assertEquals(NightChargeStop.State.STOPPED, state(sut));
 		assertEquals(0, sut.chargeWindowForTest().queuedEnable());
+		test.deactivate();
+	}
+
+	@Test
+	public void testClockStepPastTheWindowEndDoesNotRearm() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-13T00:00:00Z"); // 03:00 local
+		final var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, clock, config(50));
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		deviceWritesEnable(sut, bridge, test, 0);
+
+		// The edge clock steps to 07:00 local and settles: still stopped.
+		clock.leap(4, ChronoUnit.HOURS);
+		test.next(new TestCase(), SETTLE_CYCLES);
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		assertEquals(ScheduleWindow.State.DONE, sut.chargeWindowForTest().getState());
+		assertNull(sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset());
+		test.deactivate();
+	}
+
+	@Test
+	public void testFailedRearmReportsWriteFailed() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-13T02:55:00Z"); // 05:55 local
+		final var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = start(sut, bridge, clock, config(50));
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		deviceWritesEnable(sut, bridge, test, 0);
+		bridge.withRegisters(0x0100, 30);
+
+		// 06:15 local in small steps: the re-arm goes out, but the read-back stays 0.
+		for (var i = 0; i < 4; i++) {
+			clock.leap(5, ChronoUnit.MINUTES);
+			test.next(new TestCase(), CYCLES);
+		}
+		assertEquals(1, sut.chargeWindowForTest().queuedEnable());
+		deviceWritesEnable(sut, bridge, test, 0);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(ScheduleWindow.State.FAILED, sut.chargeWindowForTest().getState());
+		assertEquals(NightChargeStop.State.WRITE_FAILED, state(sut));
 		test.deactivate();
 	}
 }

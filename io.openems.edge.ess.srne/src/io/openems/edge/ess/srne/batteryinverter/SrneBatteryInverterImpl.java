@@ -118,6 +118,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private Config config;
 	private DischargeGuard dischargeGuard = new DischargeGuard(-1, -1);
 	private NightChargeStop nightChargeStop = NightChargeStop.OFF;
+	private LocalDateTime nightChargeNow;
 	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null, null,
 			-1);
 	private ModeScheduleState lastModeScheduleState;
@@ -509,6 +510,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.updateDischargeSuppression();
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
 		this.reconcileModeSchedule();
+		this.updateNightChargeClock();
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
 		}
@@ -704,16 +706,25 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		if (!this.nightChargeStop.isActive()) {
 			return this.config.chargeScheduleEnable();
 		}
-		var instant = this.instantOrNull();
-		var now = instant == null || instant.isBefore(ModeSchedule.MIN_PLAUSIBLE_TIME) ? null
-				: LocalDateTime.ofInstant(instant, this.scheduleZone);
-		var step = this.nightChargeStop.step(now, this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE),
-				this.chargeWindow);
+		var step = this.nightChargeStop.step(this.nightChargeNow,
+				this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE), this.chargeWindow);
 		if (step.message() != null) {
 			this.logInfo(this.log, step.message());
 		}
 		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE, step.state());
 		return step.enable();
+	}
+
+	// The clock gate is fed every cycle, also while the machine-state gate is
+	// closed, so a clock step is seen whenever it happens. A configured rule that
+	// cannot act reports OFF.
+	private void updateNightChargeClock() {
+		if (this.nightChargeStop.isActive()) {
+			this.nightChargeNow = this.nightChargeStop.plausibleTime(this.instantOrNull(), this.scheduleZone);
+		} else if (this.config != null && this.config.nightChargeStopSoc() != -1) {
+			ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE,
+					NightChargeStop.State.OFF);
+		}
 	}
 
 	// Package-private for tests.

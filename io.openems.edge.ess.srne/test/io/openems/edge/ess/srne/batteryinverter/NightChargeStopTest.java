@@ -39,14 +39,32 @@ public class NightChargeStopTest {
 
 	/** Plays the charge window and its enable register. */
 	private static final class Device {
-		private final NightChargeStop sut = NightChargeStop.fromConfig(STOP_SOC, true, 1, START, STOP);
+		private final int start;
+		private final int stop;
+		private final NightChargeStop sut;
 		private final ScheduleWindow window = new ScheduleWindow(0xE026, 0xE02C, "CHARGE");
 		private Integer enable;
 		private int writes;
 		private boolean failReadback;
 
 		private Device(int enable) {
+			this(enable, START, STOP);
+		}
+
+		private Device(int enable, int start, int stop) {
 			this.enable = enable;
+			this.start = start;
+			this.stop = stop;
+			this.sut = NightChargeStop.fromConfig(STOP_SOC, true, 1, start, stop);
+		}
+
+		// One cycle per minute from `from` to `to` (inclusive): a steady clock.
+		private NightChargeStop.Step walk(LocalDateTime from, LocalDateTime to) {
+			NightChargeStop.Step step = null;
+			for (var t = from; !t.isAfter(to); t = t.plusMinutes(1)) {
+				step = this.cycle(t);
+			}
+			return step;
 		}
 
 		private void soc(int soc, int reads) {
@@ -59,7 +77,7 @@ public class NightChargeStopTest {
 		// the bus executes a queued enable write and reads the register back.
 		private NightChargeStop.Step cycle(LocalDateTime now) {
 			var step = this.sut.step(now, this.enable, this.window);
-			this.window.reconcile(START, STOP, this.enable, START, STOP, step.enable());
+			this.window.reconcile(this.start, this.stop, this.enable, this.start, this.stop, step.enable());
 			this.window.onCycle(30);
 			var queued = this.window.enableWriteElement().getNextWriteValueAndReset();
 			if (queued != null) {
@@ -226,6 +244,10 @@ public class NightChargeStopTest {
 		device.soc(60, 3);
 		assertEquals(State.HELD_DISARMED, device.cycles(at(6, 5), 3).state());
 		assertEquals(0, device.writes);
+		// Right after activation a disarmed device is not armed (the clock may be
+		// stale); after the arm hold it is.
+		assertEquals(State.HELD_DISARMED, device.cycles(at(6, 15), NightChargeStop.ARM_HOLD_CYCLES - 4).state());
+		assertEquals(0, device.writes);
 		assertEquals(State.OUTSIDE_WINDOW, device.cycles(at(6, 15), 3).state());
 		assertEquals(1, device.enable);
 		assertEquals(1, device.writes);
@@ -287,6 +309,7 @@ public class NightChargeStopTest {
 		assertEquals(0, device.enable);
 		// Every re-arm read-back fails.
 		device.failReadback = true;
+		device.cycle(at(6, 14));
 		device.cycles(at(6, 15), NightChargeStop.RETRY_COOLDOWN_CYCLES * (NightChargeStop.MAX_FAILURES + 3));
 		assertEquals(1 + 1 + NightChargeStop.MAX_FAILURES, device.writes);
 		assertEquals(NightChargeStop.MAX_FAILURES, device.sut.failuresForTest());
@@ -299,5 +322,173 @@ public class NightChargeStopTest {
 		var step = device.cycles(at(NIGHT.plusDays(1), 0, 5), NightChargeStop.RETRY_COOLDOWN_CYCLES + 3);
 		assertEquals(State.CHARGING, step.state());
 		assertEquals(1, device.enable);
+	}
+
+	@Test
+	public void testClockJumpPastTheRearmTimeDoesNotRearmInTheWindow() {
+		// Review scenario A: stopped at 03:00, then the edge clock steps to 07:00.
+		var device = new Device(1);
+		device.soc(60, 3);
+		device.cycles(at(3, 0), 3);
+		assertEquals(0, device.enable);
+		var step = device.cycle(at(7, 0));
+		assertEquals(State.STOPPED, step.state());
+		assertEquals(0, step.enable());
+		// Steady at the stepped time for less than the confirmation: still stopped.
+		assertEquals(State.STOPPED, device.walk(at(7, 0), at(8, 59)).state());
+		assertEquals(0, device.enable);
+		// Corrected back into the window: still stopped, no second write.
+		assertEquals(State.STOPPED, device.cycles(at(3, 10), 3).state());
+		assertEquals(1, device.writes);
+		// The real window end, crossed in small steps: re-armed at 06:15.
+		assertEquals(State.STOPPED, device.walk(at(3, 11), at(6, 14)).state());
+		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(6, 15)).state());
+		device.cycles(at(6, 15), 2);
+		assertEquals(1, device.enable);
+		assertEquals(2, device.writes);
+	}
+
+	@Test
+	public void testSteppedClockRearmsAfterTheConfirmation() {
+		// A forward step that was a real correction: re-armed after REARM_CONFIRM.
+		var device = new Device(1);
+		device.soc(60, 3);
+		device.cycles(at(3, 0), 3);
+		var confirmed = at(7, 0).plus(NightChargeStop.REARM_CONFIRM);
+		assertEquals(State.STOPPED, device.walk(at(7, 0), confirmed.minusMinutes(1)).state());
+		assertEquals(0, device.enable);
+		assertEquals(State.OUTSIDE_WINDOW, device.cycle(confirmed).state());
+		device.cycles(confirmed, 2);
+		assertEquals(1, device.enable);
+	}
+
+	@Test
+	public void testBackwardStepAfterTheRearmStopsAgain() {
+		var device = new Device(1);
+		device.soc(60, 3);
+		device.cycles(at(3, 0), 3);
+		device.walk(at(6, 0), at(6, 16));
+		assertEquals(1, device.enable);
+		assertEquals(2, device.writes);
+		// The clock steps back into the window with the battery full: stopped again
+		// (the safe direction), then re-armed once the window end is crossed again.
+		assertEquals(State.STOPPED, device.cycles(at(5, 0), 3).state());
+		assertEquals(0, device.enable);
+		assertEquals(State.OUTSIDE_WINDOW, device.walk(at(5, 1), at(6, 15)).state());
+		device.cycles(at(6, 15), 2);
+		assertEquals(1, device.enable);
+		assertEquals(4, device.writes);
+	}
+
+	@Test
+	public void testPlausibleTimeGate() {
+		var sut = NightChargeStop.fromConfig(STOP_SOC, true, 1, START, STOP);
+		var zone = java.time.ZoneId.of("Africa/Kampala");
+		assertNull(sut.plausibleTime(null, zone));
+		assertNull(sut.plausibleTime(java.time.Instant.parse("2026-10-31T23:59:00Z"), zone));
+		var t = java.time.Instant.parse("2026-11-13T00:00:00Z");
+		for (var i = 0; i < ModeSchedule.CLOCK_SETTLE_CYCLES; i++) {
+			assertNull(sut.plausibleTime(t = t.plusSeconds(1), zone));
+		}
+		assertNotNull(sut.plausibleTime(t = t.plusSeconds(1), zone));
+		// A forward jump past the step limit restarts the settle count.
+		assertNull(sut.plausibleTime(t = t.plusSeconds(4 * 3600), zone));
+		for (var i = 0; i < ModeSchedule.CLOCK_SETTLE_CYCLES - 1; i++) {
+			assertNull(sut.plausibleTime(t = t.plusSeconds(1), zone));
+		}
+		assertNotNull(sut.plausibleTime(t = t.plusSeconds(1), zone));
+		// So does a backward step.
+		assertNull(sut.plausibleTime(t.minusSeconds(60), zone));
+	}
+
+	@Test
+	public void testRestartOnAStaleClockDoesNotArm() {
+		// Review scenario B: restart at real 03:00 after a stop, the clock still reads
+		// yesterday 22:00 (plausible, outside the window and the hold span).
+		var device = new Device(0);
+		device.soc(48, 3);
+		var step = device.cycles(at(NIGHT.minusDays(1), 22, 0), 30);
+		assertEquals(State.HELD_DISARMED, step.state());
+		assertEquals(0, step.enable());
+		// NTP corrects to 03:00: inside the hold span, still held.
+		assertEquals(State.HELD_DISARMED, device.cycles(at(3, 0), 30).state());
+		assertEquals(0, device.writes);
+	}
+
+	@Test
+	public void testUnknownTimeFailsOpenAfterTheCap() {
+		var device = new Device(1);
+		device.soc(60, 3);
+		device.cycles(at(3, 0), 3);
+		assertEquals(0, device.enable);
+		var step = device.cycles(null, NightChargeStop.UNKNOWN_TIME_CAP_CYCLES);
+		assertEquals(State.WAITING_FOR_DATA, step.state());
+		assertEquals(0, step.enable());
+		assertEquals(0, device.enable);
+		step = device.cycle(null);
+		assertEquals(1, step.enable());
+		assertNotNull(step.message());
+		device.cycles(null, 2);
+		assertEquals(1, device.enable);
+	}
+
+	@Test
+	public void testFailedRearmThenNextNightInTheHysteresisBandStaysOff() {
+		var device = new Device(1);
+		device.soc(60, 3);
+		device.cycles(at(1, 0), 3);
+		device.failReadback = true;
+		device.walk(at(6, 0), at(7, 0));
+		assertEquals(0, device.enable);
+		device.failReadback = false;
+		// Next night at 47 % (between stop - 5 and the stop): held off, no write. The
+		// battery is already near the stop SoC, so nothing is lost.
+		device.soc(47, 3);
+		var writes = device.writes;
+		var step = device.cycles(at(NIGHT.plusDays(1), 0, 30), NightChargeStop.RETRY_COOLDOWN_CYCLES + 3);
+		assertEquals(State.HELD_DISARMED, step.state());
+		assertEquals(0, step.enable());
+		assertEquals(writes, device.writes);
+	}
+
+	@Test
+	public void testDailyLimitThenRearmWithTheDeviceStillArmedWritesNothing() {
+		var device = new Device(1);
+		device.failReadback = true;
+		device.soc(60, 3);
+		device.walk(at(0, 0), at(5, 0));
+		assertEquals(NightChargeStop.MAX_DAILY_WRITES, device.writes);
+		assertEquals(State.DAILY_WRITE_LIMIT, device.cycle(at(5, 1)).state());
+		assertEquals(1, device.enable);
+		device.failReadback = false;
+		// 06:15: the target returns to 1, which the device already reads: no write.
+		device.walk(at(5, 2), at(6, 20));
+		assertEquals(NightChargeStop.MAX_DAILY_WRITES, device.writes);
+		assertEquals(1, device.enable);
+		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(6, 21)).state());
+	}
+
+	@Test
+	public void testRearmTimeAfterMidnightForALateWindow() {
+		// Window 20:00-23:50: the re-arm time is 00:05 the next day.
+		var late = new Device(1, 20 * 256, 23 * 256 + 50);
+		late.soc(60, 3);
+		late.cycles(at(22, 0), 3);
+		assertEquals(0, late.enable);
+		var next = NIGHT.plusDays(1);
+		assertEquals(State.STOPPED, late.walk(at(23, 40), at(next, 0, 4)).state());
+		assertEquals(State.OUTSIDE_WINDOW, late.cycle(at(next, 0, 5)).state());
+		late.cycles(at(next, 0, 5), 2);
+		assertEquals(1, late.enable);
+
+		// After a restart (past the arm hold), a device read disarmed at 00:02 is in
+		// yesterday's hold span: held until 00:05.
+		var restarted = new Device(0, 20 * 256, 23 * 256 + 50);
+		restarted.soc(48, 3);
+		restarted.cycles(at(21, 0), NightChargeStop.ARM_HOLD_CYCLES);
+		assertEquals(State.HELD_DISARMED, restarted.cycles(at(next, 0, 2), 3).state());
+		assertEquals(0, restarted.writes);
+		assertEquals(State.OUTSIDE_WINDOW, restarted.cycles(at(next, 0, 6), 3).state());
+		assertEquals(1, restarted.enable);
 	}
 }
