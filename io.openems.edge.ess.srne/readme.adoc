@@ -466,12 +466,20 @@ charge window is not touched.
   `daytimeStart` until then the target is the plain daytime priority (SUB, houses on
   the grid, battery kept) and SoC is not evaluated (reason `WINDOW`, so like the
   boundary switches it does not wait the dwell); from `daytimeSocRuleFrom` until
-  `eveningStart` the SoC rule applies as above, starting in the daytime priority (it
-  has to reach `daytimeSbuAboveSoc` first). The evening reserve still takes precedence
-  where its window overlaps. All write gates (machine state, clock, dwell for the
-  SoC-driven switches, failure and override budgets, daily ceiling) are unchanged.
+  `eveningStart` the SoC rule applies as above. At `daytimeSocRuleFrom` its hysteresis
+  is seeded from the device as after a restart: a device in SUB starts low (SoC has to
+  reach `daytimeSbuAboveSoc`), a device still in SBU with SoC at or above
+  `daytimeSbuBelowSoc` stays SBU, so SUB is never written over a running SBU in the
+  band. The evening reserve still takes precedence where its window overlaps. All
+  write gates (machine state, clock, dwell for the SoC-driven switches, failure and
+  override budgets, daily ceiling) are unchanged. Before `daytimeSocRuleFrom` the
+  target is a window target, so like in the evening an overridden E204 (panel, app) is
+  re-corrected without the dwell, limited by the override caps.
   `daytimeSocRuleFrom` is not a window boundary: crossing it does not refill the
-  failure or override budgets. Without the SoC rule it has no effect.
+  failure budget, and re-corrections spent at night count against the daily override
+  cap (the per-window override budget restarts with the new SoC-driven target).
+  Without the SoC rule the value is ignored, but it is still validated: a malformed
+  value makes the schedule `CONFIG_INVALID`, as for `eveningReserveFrom`.
 * Evening reserve (optional, `eveningReserveSoc`, default `-1` = off; valid 20..100;
   `eveningReserveFrom`, `HH:MM` local, default `14:00`, must lie in the daytime window):
   from `eveningReserveFrom` until `eveningStart`, while SoC is below

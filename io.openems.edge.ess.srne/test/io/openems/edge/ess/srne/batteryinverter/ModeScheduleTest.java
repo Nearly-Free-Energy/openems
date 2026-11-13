@@ -746,8 +746,8 @@ public class ModeScheduleTest {
 	}
 
 	// A device that reverts E204 to `other` right after every verified write.
-	// Returns
-	// the cycle index of each write made in `cycles` cycles at a fixed time.
+	// Returns the cycle index of each write made in `cycles` cycles at a fixed
+	// time.
 	private static List<Integer> fight(ModeSchedule sut, LocalTime time, int target, int other, int cycles) {
 		List<Integer> writes = new ArrayList<>();
 		for (var i = 0; i < cycles; i++) {
@@ -858,8 +858,7 @@ public class ModeScheduleTest {
 		assertFalse(
 				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10).isGridPresentPathEnabled());
 		// Window switch to SUB while the unit runs on battery with the grid up: waits
-		// for
-		// mains as before.
+		// for mains as before.
 		var sut = defaults();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
 			step(sut, DAY, 50, SUB, true);
@@ -893,16 +892,14 @@ public class ModeScheduleTest {
 				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, 261).getInvalidReason());
 	}
 
-	// ---- Evening reserve (SoC rule 95 / 85, reserve 90 % from 14:00 to 18:00)
-	// ----
+	// ---- Evening reserve (SoC rule 95 / 85, reserve 90 %, 14:00-18:00) ----
 
 	private static ModeSchedule reserveSchedule() {
 		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, "14:00");
 	}
 
 	// Past the startup hold and the dwell from activation (at 10:00), device in SBU
-	// at
-	// 88 % (seeded high).
+	// at 88 % (seeded high).
 	private static ModeSchedule primedReserve() {
 		var sut = reserveSchedule();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
@@ -1015,8 +1012,7 @@ public class ModeScheduleTest {
 		assertStep(socStep(sut, t.plusMinutes(11), 89, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
 	}
 
-	// ---- Daytime SoC rule from 06:00 (gw-pi2: daytime from 00:00, rule 30 / 25)
-	// ----
+	// ---- SoC rule from 06:00 (gw-pi2: daytime from 00:00, rule 30 / 25) ----
 
 	private static ModeSchedule ruleFrom(int above, int below, String from) {
 		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:00", -1, above, below, 10, -1, -1, "14:00", from);
@@ -1106,8 +1102,7 @@ public class ModeScheduleTest {
 
 	// 12 Nov 2026 on gw-pi2 (rule 50 / 40): SUB at 40 % -> grid charge -> SBU at
 	// 50 %, all night. Returns the first time before 06:00 the target leaves SUB or
-	// a
-	// write goes out, or null.
+	// a write goes out, or null.
 	private static LocalTime firstNightWrite(ModeSchedule sut) {
 		primedAt(sut, LocalTime.of(0, 41), 45, SUB);
 		var soc = 45;
@@ -1143,15 +1138,81 @@ public class ModeScheduleTest {
 
 	@Test
 	public void testSocRuleFromEmptyIsUnchangedBehaviour() {
-		var before = ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:00", -1, 30, 25, 10, -1, 90, "14:00");
-		var after = ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:00", -1, 30, 25, 10, -1, 90, "14:00", "");
-		var socs = new int[] { 20, 26, 31, 29, 24, 50, 95, 89, 91, 27 };
-		var i = 0;
-		for (var t = LocalTime.of(0, 0); i < 24 * 6; t = t.plusMinutes(10), i++) {
-			var soc = socs[i % socs.length];
-			assertEquals(before.targetFor(at(t), soc, SUB), after.targetFor(at(t), soc, SUB), "" + t);
-			assertEquals(before.reason(), after.reason(), "" + t);
+		// Empty, and daytimeSocRuleFrom equal to daytimeStart, behave as before: the
+		// rule applies from 00:00, including the seeding from the device.
+		for (var from : new String[] { "", "00:00" }) {
+			var sut = ruleFrom(30, 25, from);
+			for (var t = LocalTime.of(0, 0); t.isBefore(LocalTime.of(18, 0)); t = t.plusMinutes(1)) {
+				assertFalse(sut.isBeforeSocRule(t), from + " " + t);
+			}
+			// Restart at 02:00 with the device in SBU in the band: stays SBU.
+			assertEquals(SBU, sut.targetFor(at(LocalTime.of(2, 0)), 27, SBU));
+			assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+			assertEquals(SUB, sut.targetFor(at(LocalTime.of(2, 10)), 24, SBU));
+			assertEquals(ModeScheduleReason.LOW_SOC, sut.reason());
+			// Next day: evening, then the rule right after daytimeStart.
+			assertEquals(SBU, sut.targetFor(at(LocalTime.of(23, 0)), 50, SBU));
+			assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+			assertEquals(SUB, sut.targetFor(at(LocalTime.of(0, 0)), 29, SBU));
+			assertEquals(ModeScheduleReason.LOW_SOC, sut.reason());
+			assertEquals(SBU, sut.targetFor(at(LocalTime.of(0, 10)), 30, SUB));
+			assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+			assertEquals(SBU, sut.targetFor(at(LocalTime.of(3, 0)), 25, SBU));
+			assertEquals(SUB, sut.targetFor(at(LocalTime.of(3, 10)), 24, SBU));
+			assertEquals(ModeScheduleReason.LOW_SOC, sut.reason());
 		}
+	}
+
+	@Test
+	public void testSocRuleFromSeedsFromTheDeviceAtSix() {
+		// Device still in SBU at 06:00 in the band (28 %, rule 30 / 25): no SUB over a
+		// running SBU.
+		var sut = siteSchedule();
+		assertEquals(SUB, sut.targetFor(at(LocalTime.of(5, 58)), 28, SBU));
+		assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+		assertEquals(SBU, sut.targetFor(at(LocalTime.of(6, 0)), 28, SBU));
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		// Device in SUB at 06:00 in the band: starts low.
+		var inSub = siteSchedule();
+		assertEquals(SUB, inSub.targetFor(at(LocalTime.of(5, 58)), 28, SUB));
+		assertEquals(SUB, inSub.targetFor(at(LocalTime.of(6, 0)), 28, SUB));
+		assertEquals(ModeScheduleReason.LOW_SOC, inSub.reason());
+		// E204 unreadable at 06:00: the seed waits, the target stays the daytime one.
+		var unread = siteSchedule();
+		assertEquals(SUB, unread.targetFor(at(LocalTime.of(6, 0)), 80, null));
+		assertEquals(SBU, unread.targetFor(at(LocalTime.of(6, 1)), 80, SUB));
+		assertEquals(ModeScheduleReason.HIGH_SOC, unread.reason());
+	}
+
+	@Test
+	public void testSocRuleFromUnreadableSocBeforeSixWritesNothing() {
+		var sut = primedAt(siteSchedule(), LocalTime.of(3, 0), 80, SUB);
+		assertStep(step(sut, LocalTime.of(3, 1), null, SBU, true), ModeScheduleState.WAITING_FOR_DATA, SUB, null);
+		assertNull(sut.queuedTarget());
+	}
+
+	@Test
+	public void testSocRuleFromOverridesAtNightThenSwitchAtSix() {
+		var sut = primedAt(ruleFrom(50, 40, "06:00"), LocalTime.of(3, 0), 50, SUB);
+		// At night a WINDOW target: re-corrected without the dwell, capped per window.
+		assertEquals(1 + ModeSchedule.MAX_OVERRIDES_PER_WINDOW, fight(sut, LocalTime.of(3, 0), SUB, SBU, 2000).size());
+		assertStep(step(sut, LocalTime.of(3, 0), 50, SBU, true), ModeScheduleState.OVERRIDDEN, SUB, null);
+		// 06:00, device back in SUB at 55 %: the SoC switch to SBU gets a fresh
+		// per-window override budget (new target) and goes out.
+		assertStep(step(sut, LocalTime.of(6, 0), 55, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+	}
+
+	@Test
+	public void testSocRuleFromSixSwitchWaitsTheDwell() {
+		var sut = primedAt(ruleFrom(50, 40, "06:00"), LocalTime.of(5, 40), 45, SUB);
+		// 05:55: device found in SBU, the window target SUB is written at once.
+		var t = at(LocalTime.of(5, 55));
+		assertStep(socStep(sut, t, 45, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		verified(sut, t, SUB, 45);
+		// 06:00 at 55 %: SBU, but SoC-driven, so it waits the dwell from 05:55.
+		assertStep(step(sut, LocalTime.of(6, 0), 55, SUB, true), ModeScheduleState.MIN_DWELL, SBU, null);
+		assertStep(step(sut, LocalTime.of(6, 6), 55, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 	}
 
 	@Test

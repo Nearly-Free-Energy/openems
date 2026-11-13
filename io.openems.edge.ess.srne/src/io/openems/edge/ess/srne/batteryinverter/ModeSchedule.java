@@ -30,7 +30,8 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * SoC keeps the current target. The evening window is unchanged. With
  * {@code daytimeSocRuleFrom} set, the rule starts only at that time: from
  * daytimeStart until then the target is the daytime priority and SoC is not
- * evaluated, so a night grid charge is kept for the morning.
+ * evaluated, so a night grid charge is kept for the morning; at that time the
+ * rule is seeded from the device.
  *
  * <p>
  * Writes go through a {@link SafeWriteHandler} (one per write: a handler is
@@ -703,9 +704,11 @@ final class ModeSchedule {
 		}
 		if (this.isBeforeSocRule(time)) {
 			// Before daytimeSocRuleFrom: the daytime priority, SoC not evaluated, so the
-			// night charge is kept for the morning. The rule starts low at that time.
+			// night charge is kept for the morning. At daytimeSocRuleFrom the rule is
+			// seeded from the device as after a restart, so it never writes SUB over a
+			// running SBU in the band.
 			this.highSoc = false;
-			this.socStateSeeded = true;
+			this.socStateSeeded = false;
 			this.reason = ModeScheduleReason.WINDOW;
 			return this.daytimePriority;
 		}
@@ -906,8 +909,7 @@ final class ModeSchedule {
 	// The minimum dwell applies to SoC-driven switches only; the window switches at
 	// the boundaries happen on time. Before the first verified switch it runs from
 	// the activation, so a restart loop cannot switch faster than the dwell. A
-	// clock
-	// that moved backwards never holds.
+	// clock that moved backwards never holds.
 	private boolean isDwelling(LocalDateTime now, Integer target) {
 		if (this.reason == ModeScheduleReason.WINDOW) {
 			return false;
