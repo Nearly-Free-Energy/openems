@@ -565,8 +565,10 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
   cycle carries on (isolated), `ChargePrioritySafeValueMissing` is set `true` with the
   reason "reconcile failing" in the log, and `ChargePriorityScheduleState` and
   `ChargePriorityScheduleTarget` read unknown until it runs cleanly again. Its stack
-  trace is logged when a failure starts, at most once per 3600 cycles (about an hour),
-  so a flapping failure does not flood the log; the failure count is in the message.
+  trace and the "reconcile failing" warning are logged when a failure starts, at most
+  once per 3600 cycles (about an hour), and a clean cycle in between logs no state
+  change, so a flapping failure does not flood the log; the failure count is in the
+  message. The alarm channel is still set on every failing cycle.
   The startup hold does not advance while it throws.
 * Never-known clock: until the clock is first known, the per-day counters (day
   re-corrections, writes) share one bucket (`LocalDate.MIN`) that never rolls over.

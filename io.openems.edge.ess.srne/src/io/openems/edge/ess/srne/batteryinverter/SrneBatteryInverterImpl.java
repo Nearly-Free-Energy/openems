@@ -126,6 +126,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private Integer lastChargePriorityTarget;
 	private boolean chargePriorityNightLateLogged;
 	private boolean chargePrioritySafeMissingLogged;
+	// Log counters, for tests of the rate limiting.
+	private long chargePriorityFailingWarnings;
+	private long chargePriorityStateLogs;
 	private boolean deviceChargeTimerChecked;
 	// Each schedule runs isolated: a failure in one is logged and the rest of the
 	// cycle (the other schedule, every scalar setting, both TOU windows) carries
@@ -546,7 +549,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.reconcileCycles++;
 		this.reconcileIsolated(this.modeScheduleReconcile, this.modeScheduleFailures);
 		if (!this.reconcileIsolated(this.chargePriorityReconcile, this.chargePriorityFailures)) {
-			this.reportChargePriorityReconcileFailing();
+			this.reportChargePriorityReconcileFailing(this.chargePriorityFailures.onsetLoggedThisCycle);
 		}
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
@@ -598,7 +601,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		private final String name;
 		private boolean failing;
 		private boolean onsetLogged;
-		private int failures;
+		// Set only in the cycle whose failure onset logged its stack trace, so log
+		// lines that go with it are rate-limited the same way.
+		private boolean onsetLoggedThisCycle;
+		private long failures;
+		private long stackTracesLogged;
 		private long lastStackTraceCycle = Long.MIN_VALUE;
 
 		private IsolatedFailures(String name) {
@@ -620,6 +627,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	 * @return true if it ran cleanly, false if it threw
 	 */
 	private boolean reconcileIsolated(Runnable reconcile, IsolatedFailures failures) {
+		failures.onsetLoggedThisCycle = false;
 		try {
 			reconcile.run();
 		} catch (RuntimeException e) {
@@ -629,6 +637,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				failures.onsetLogged = failures.lastStackTraceCycle == Long.MIN_VALUE
 						|| this.reconcileCycles - failures.lastStackTraceCycle >= FAILURE_STACK_TRACE_INTERVAL_CYCLES;
 				if (failures.onsetLogged) {
+					failures.onsetLoggedThisCycle = true;
+					failures.stackTracesLogged++;
 					failures.lastStackTraceCycle = this.reconcileCycles;
 					this.log.error("[" + this.id() + "] " + failures.name + " failed (" + failures.failures
 							+ " failures since activation; next stack trace in " + FAILURE_STACK_TRACE_INTERVAL_CYCLES
@@ -647,14 +657,16 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	// A throwing charge-priority reconcile must never look healthy: the safe-value
-	// alarm is raised and the state and target read unknown until it runs cleanly.
-	private void reportChargePriorityReconcileFailing() {
-		if (!this.chargePrioritySafeMissingLogged) {
+	// alarm is raised and the state and target read unknown on every failing cycle.
+	// The warning goes with the rate-limited stack trace (logIt), so a flapping
+	// failure does not flood the log. lastChargePriorityState is kept, so a clean
+	// cycle in between does not log a state change either.
+	private void reportChargePriorityReconcileFailing(boolean logIt) {
+		if (logIt) {
+			this.chargePriorityFailingWarnings++;
 			this.logWarn(this.log, "Charge-priority schedule: reconcile failing; E20F is not managed, "
 					+ "the grid may charge the battery");
 		}
-		this.chargePrioritySafeMissingLogged = true;
-		this.lastChargePriorityState = null;
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING).setNextValue(true);
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE).setNextValue(null);
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(null);
@@ -738,6 +750,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 					+ step.write() + "]");
 		}
 		if (step.state() != this.lastChargePriorityState) {
+			this.chargePriorityStateLogs++;
 			var message = "Charge-priority schedule state [" + step.state() + "], target [" + step.target()
 					+ "], E20F [" + chargePriority + "]";
 			if (step.state() == ModeScheduleState.WRITE_FAILED || step.state() == ModeScheduleState.CONFIG_INVALID
@@ -852,8 +865,20 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.reconcileChargePrioritySchedule();
 	}
 
-	int chargePriorityFailuresForTest() {
+	long chargePriorityFailuresForTest() {
 		return this.chargePriorityFailures.failures;
+	}
+
+	long chargePriorityStackTracesForTest() {
+		return this.chargePriorityFailures.stackTracesLogged;
+	}
+
+	long chargePriorityFailingWarningsForTest() {
+		return this.chargePriorityFailingWarnings;
+	}
+
+	long chargePriorityStateLogsForTest() {
+		return this.chargePriorityStateLogs;
 	}
 
 	boolean takeChargePriorityWriteForTest() {

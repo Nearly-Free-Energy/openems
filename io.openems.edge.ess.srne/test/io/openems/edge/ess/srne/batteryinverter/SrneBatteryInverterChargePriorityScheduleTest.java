@@ -391,6 +391,9 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 		// Never silent: the safe-value alarm holds and the state reads unknown.
 		assertEquals(Boolean.TRUE, safeValueMissing(sut2));
 		assertEquals(ModeScheduleState.UNDEFINED, state(sut2));
+		// A continuous failure logs its stack trace and warning once.
+		assertEquals(1, sut2.chargePriorityStackTracesForTest());
+		assertEquals(1, sut2.chargePriorityFailingWarningsForTest());
 
 		// Once the schedule stops failing it picks up again (after its startup hold),
 		// and the state and alarm are its own again.
@@ -411,15 +414,33 @@ public class SrneBatteryInverterChargePriorityScheduleTest {
 			}
 			sut2.reconcileChargePriorityForTest();
 		});
-		test2.next(new TestCase());
-		assertEquals(Boolean.TRUE, safeValueMissing(sut2));
-		assertEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
-		test2.next(new TestCase());
-		assertEquals(Boolean.FALSE, safeValueMissing(sut2));
-		assertNotEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
-		// Counted, not reset by the clean cycles: START_CYCLES from activation plus
-		// one.
-		assertEquals(START_CYCLES + 1, sut2.chargePriorityFailuresForTest());
+		final var failuresBefore = sut2.chargePriorityFailuresForTest();
+		final var stateLogsBefore = sut2.chargePriorityStateLogsForTest();
+		final var flaps = 200;
+		for (var i = 0; i < flaps; i++) {
+			test2.next(new TestCase());
+			assertEquals(Boolean.TRUE, safeValueMissing(sut2), "failing cycle " + i);
+			assertEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
+			test2.next(new TestCase());
+			assertEquals(Boolean.FALSE, safeValueMissing(sut2), "clean cycle " + i);
+			assertNotEquals(ModeScheduleState.UNDEFINED, nextState(sut2));
+		}
+		// Counted, not reset by the clean cycles.
+		assertEquals(failuresBefore + flaps, sut2.chargePriorityFailuresForTest());
+		// Within the stack-trace interval of the first onset: no further stack trace,
+		// no further reconcile-failing warning, and no state-change log per clean
+		// cycle.
+		assertEquals(1, sut2.chargePriorityStackTracesForTest());
+		assertEquals(1, sut2.chargePriorityFailingWarningsForTest());
+		assertEquals(stateLogsBefore, sut2.chargePriorityStateLogsForTest());
+
+		// After the interval the next onset logs again, once.
+		sut2.setScheduleReconcilesForTest(null, null);
+		test2.next(new TestCase(), SrneBatteryInverterImpl.FAILURE_STACK_TRACE_INTERVAL_CYCLES);
+		sut2.setScheduleReconcilesForTest(null, failing);
+		test2.next(new TestCase(), 10);
+		assertEquals(2, sut2.chargePriorityStackTracesForTest());
+		assertEquals(2, sut2.chargePriorityFailingWarningsForTest());
 	}
 
 	@Test
