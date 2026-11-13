@@ -349,8 +349,7 @@ final class NightChargeStop {
 	}
 
 	// Tracks clock continuity and releases the latch once the re-arm time is
-	// passed. Idempotent for the same time, so the gate and step() may both call
-	// it.
+	// passed. Idempotent for one time: the gate and step() both call it.
 	private String observe(LocalDateTime now) {
 		var continuous = this.lastNow != null && !now.isBefore(this.lastNow)
 				&& Duration.between(this.lastNow, now).compareTo(MAX_CLOCK_STEP) <= 0;
