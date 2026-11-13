@@ -154,6 +154,49 @@ next night charge stops near 50%. If the state is FAILED but `ChargeWindow1StopS
 then reads `50` (a stale pre-write read-back), the value is applied; reactivate the
 component to clear the state.
 
+NOTE: Field finding (Sezibwa, gw-pi2, ASP48120SH3, 13 Nov 2026): E03B does *not* end
+the timed grid charge. With the window `00:00-06:00` and E03B = `50` the battery
+charged from 11 % to 99 % at 120 A. Use `nightChargeStopSoc` below to end it.
+
+*Night charge stop (`nightChargeStopSoc`)*: optional, default `-1` = off (no SoC read
+added, nothing written); valid `10..100`. Needs `controlEnabled=true`,
+`chargeScheduleEnable=1` and a valid charge window 1, otherwise it is inert with a
+warning. While the local time (`scheduleTimeZone`, edge clock) is inside charge window
+1 (start inclusive, stop exclusive) and the battery SoC (`0x0100`, the same register
+as the ESS SoC) is at or above `nightChargeStopSoc` for 3 consecutive fresh reads, the
+driver ends the charge for the rest of that window by disarming the charge schedule
+(`0xE02C` = 0). It re-arms it (`0xE02C` = 1) 15 minutes after the window stop time, so
+the next night charges again; the delay keeps a slightly late inverter clock from
+resuming the charge.
+
+* Path: both writes go through the charge `ScheduleWindow`, the same verified path as
+  the configured enable: one single-register FC16 to `0xE02C`, read-back verified,
+  only while the machine state is verified (state 2, mains). The window start/stop
+  registers are never written by the stop. The window invariant (start/stop are only
+  written while the enable reads 0) holds: the stop only lowers the enable, and the
+  re-arm first re-checks start/stop against the configuration; a mismatch goes
+  through the normal disarm, window write and verify before the enable is raised.
+* Hysteresis: once stopped, the charge is not re-armed inside the same window,
+  whatever the SoC does. The latch is not persisted; after a restart inside the window
+  (or the 15-minute re-arm delay) a device that reads disarmed is only armed again
+  after 3 fresh reads below `nightChargeStopSoc - 5`, otherwise it stays disarmed
+  (`HELD_DISARMED`) until the re-arm time. A window rewrite inside the window (config
+  change) therefore also stays disarmed until then, unless the battery is clearly low.
+* Budgets: a failed write (execute error, wrong or missing read-back) is retried after
+  60 cycles, at most 5 times per target change and local day. At most 4 enable writes
+  per local day are started to end a charge (`DAILY_WRITE_LIMIT`; the charge then goes
+  on as configured). A re-arm is never held by that ceiling, only by the failure
+  budget, which refills the next day, so a failed re-arm is retried and the night
+  charge is not lost for good. An unknown time (before 2026-11-01) holds the last
+  decision.
+* Channel `NightChargeStopState`: `OFF`, `OUTSIDE_WINDOW`, `CHARGING`, `STOPPED`,
+  `HELD_DISARMED`, `WAITING_FOR_DATA`, `WAITING_FOR_MAINS`, `DAILY_WRITE_LIMIT`,
+  `WRITE_FAILED`.
+* Commissioning: enable it on one gateway with the grid up and watch one night: the
+  state goes `CHARGING` -> `STOPPED` near the stop SoC, `ChargeScheduleEnable` reads
+  0, the battery current stops charging from the grid, and after the window plus 15
+  minutes `ChargeScheduleEnable` reads 1 again (`OUTSIDE_WINDOW`).
+
 *Automatic discharge start threshold and SoC floor*: two optional rules keep the
 discharge schedule (`0xE033`) in step with the battery without a manual
 disarm/re-arm deploy. They apply only when `dischargeScheduleEnable` is `1` and a
@@ -515,6 +558,7 @@ wants now).
 * settings targets (int, `-1` = leave unchanged): `dischargeCutoffSoc`, `stopChargeCurrent`, `stopChargeSoc`, `lowSocAlarm`, `switchToLineSoc`, `switchToBatterySoc`, `acChargeCurrentLimit`, `maxChargeCurrentLimit`
 * source-transfer targets (int, `-1` = leave unchanged): `outputPriority` (E204, source-priority mode e.g. SBU; range `0..3`) and `bmsCommunication` (E215, BMS-comms enable; range `0..2`). These enable "switch to battery at a SoC" (SBU + BMS-SoC) fully from OpenEMS. `outputPriority` is the output/source priority, distinct from charge priority. Two safety points: (1) `outputPriority` = SBU transfers the load onto the battery, so it is reconciled together with its reserve band (`switchToLineSoc`/`switchToBatterySoc`) and BMS mode (`bmsCommunication`) as ONE coherent, validated operation. When an arm is requested the whole set is validated - all three present, individually in range, and the band coherent (`switchToLineSoc` below `switchToBatterySoc`) - BEFORE any of them is written; on failure NOTHING is written (not the band, not BMS, not `E204`) and the operation reports terminal FAILED, so a rejected arm can never leave a bad reserve band on a unit already in SBU mode. Once the set is valid, `E204` arms only after each prerequisite is settled: its handler at rest (IDLE = already correct, or VERIFIED) AND the device currently reads the configured value - a queued, awaiting or failed write, or a post-verify drift, never counts as settled. When no arm is requested, BMS remains an independent setting; the reserve band is still refused if both thresholds are configured but inverted (`switchToLineSoc` at or above `switchToBatterySoc`), because a bad band is dangerous whenever the unit is in SBU (its normal backup posture, settable from the panel) - so an incoherent band is never written regardless of whether OpenEMS armed it. (2) The value-to-mode mapping is `0` SOL, `1` UTI, `2` SBU, `3` SUB: it is the SRNE manual's mapping and was confirmed on site (gw-pi2 v29, microgrid-gateway PR #97, 4 Nov 2026: E204=2 written, the unit ran SBU). Read-back verify still guards a mis-accepted value.
 * `chargeWindow1StopSoc` (int %, `-1` = leave unchanged and do not read; range `10..100`): target for `0xE03B`, the timed-charge stop SoC of charge window 1. Use with a `00:00-06:00` charge window and `50` so the night charge runs whenever the grid is present and stops at 50%. See "Night charge stop SoC" above.
+* `nightChargeStopSoc` (int %, `-1` = off; range `10..100`): end the timed grid charge of charge window 1 at this SoC by disarming `0xE02C` for the rest of the window and re-arming it after the window. Needs `controlEnabled`, `chargeScheduleEnable=1` and charge window 1. See "Night charge stop" above.
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
 * Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`), `eveningReserveSoc` (int %, default `-1` = off), `eveningReserveFrom` (String `HH:MM`, default `14:00`), `eveningReserveHold` (boolean, default `false`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.

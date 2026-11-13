@@ -44,6 +44,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int eveningReserveSoc = -1;
 		private String eveningReserveFrom = "14:00";
 		private boolean eveningReserveHold = false;
+		private int nightChargeStopSoc = -1;
 
 		private Builder() {
 		}
@@ -213,6 +214,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setEveningReserveHold(boolean value) {
 			this.eveningReserveHold = value;
+			return this;
+		}
+
+		public Builder setNightChargeStopSoc(int value) {
+			this.nightChargeStopSoc = value;
 			return this;
 		}
 
@@ -423,5 +429,10 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public boolean eveningReserveHold() {
 		return this.builder.eveningReserveHold;
+	}
+
+	@Override
+	public int nightChargeStopSoc() {
+		return this.builder.nightChargeStopSoc;
 	}
 }

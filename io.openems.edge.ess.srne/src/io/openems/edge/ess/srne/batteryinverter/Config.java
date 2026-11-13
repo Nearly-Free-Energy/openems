@@ -85,6 +85,12 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Charge window 1 stop SoC", description = "Target for E03B (timed-charge stop SoC of charge window 1) in percent; range 10..100; -1 leaves unchanged and does not read the register.")
 	int chargeWindow1StopSoc() default -1;
 
+	// E03B does not end the timed charge on the ASP48120SH3 (gw-pi2, 13 Nov 2026),
+	// so the driver ends it by disarming the charge schedule (E02C) inside the
+	// window and re-arms it after the window. -1 = off.
+	@AttributeDefinition(name = "Night charge stop SoC", description = "End the timed grid charge of charge window 1 once the battery SoC is at or above this percent (3 fresh reads): the charge schedule (E02C) is disarmed for the rest of that window and re-armed 15 minutes after the window stop time. Needs controlEnabled, chargeScheduleEnable=1 and charge window 1; range 10..100; -1 = off.")
+	int nightChargeStopSoc() default -1;
+
 	@AttributeDefinition(name = "Discharge window 1 start", description = "Target for E02D, encoded hour*256+min; -1 leaves unchanged.")
 	int dischargeWindow1Start() default -1;
 
