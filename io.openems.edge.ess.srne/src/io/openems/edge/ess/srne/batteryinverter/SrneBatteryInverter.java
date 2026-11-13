@@ -93,7 +93,7 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		OVER_DISCHARGE_DELAY(Doc.of(OpenemsType.INTEGER).unit(Unit.SECONDS) //
 				.text("Over-discharge delay (0xE010)")), //
 		BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
-				.text("Battery state of charge (0x0100); read only when a discharge SoC rule or the mode schedule is configured")), //
+				.text("Battery state of charge (0x0100); read only when a discharge SoC rule, the mode schedule or the night charge stop is configured")), //
 		DISCHARGE_SUPPRESSED(Doc.of(OpenemsType.BOOLEAN) //
 				.text("Discharge schedule held disabled by the start-threshold or floor rule")), //
 		DISCHARGE_SUPPRESSION_REASON(Doc.of(DischargeSuppressionReason.values()) //
@@ -111,7 +111,9 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		GRID_VOLTAGE_L3(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
 				.text("Grid-input voltage L3 (0x022B), for the mode schedule's grid-present check")), //
 		MODE_SCHEDULE_REASON(Doc.of(ModeScheduleReason.values()) //
-				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC or LOW_SOC")), //
+				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC, LOW_SOC, EVENING_RESERVE or EVENING_RESERVE_HOLD")), //
+		NIGHT_CHARGE_STOP_STATE(Doc.of(NightChargeStop.State.values()) //
+				.text("State of the night charge stop (nightChargeStopSoc) on the charge schedule enable (0xE02C)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 
