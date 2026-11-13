@@ -205,14 +205,21 @@ resuming the charge.
   failure budget, which refills the next day, so a failed re-arm is retried and the
   night charge is not lost for good. An unknown or unsettled time holds the last
   decision for at most 3600 evaluations (about an hour), then the configured enable is
-  restored (fail open).
+  restored (fail open). That re-arms the charge even inside the window (and over a
+  `HELD_DISARMED` hold): no stop is the behaviour without this feature, so that is the
+  default when the time cannot be trusted.
+* Overshoot: the stop needs 3 fresh reads of `0x0100` and then one verified write, so at
+  about 1 %/min the charge ends a few percent above `nightChargeStopSoc`.
 * Channel `NightChargeStopState` (`OFF` while configured but inert or invalid): `OFF`, `OUTSIDE_WINDOW`, `CHARGING`, `STOPPED`,
   `HELD_DISARMED`, `WAITING_FOR_DATA`, `WAITING_FOR_MAINS`, `DAILY_WRITE_LIMIT`,
   `WRITE_FAILED`.
-* Commissioning: enable it on one gateway with the grid up and watch one night: the
-  state goes `CHARGING` -> `STOPPED` near the stop SoC, `ChargeScheduleEnable` reads
-  0, the battery current stops charging from the grid, and after the window plus 15
-  minutes `ChargeScheduleEnable` reads 1 again (`OUTSIDE_WINDOW`).
+* Commissioning: it is not yet proven on the unit that writing `0xE02C` = 0 ends a timed
+  charge already in progress. Prove it first under a short window (e.g. `00:00-00:40`)
+  with a stop SoC the charge reaches before the window ends (e.g. `30` from a start near
+  10 %). Pass: the state goes `CHARGING` -> `STOPPED`, `ChargeScheduleEnable` reads 0,
+  the battery current stops charging from the grid within a minute, and 15 minutes after
+  the window end (`00:55`) `ChargeScheduleEnable` reads 1 again (`OUTSIDE_WINDOW`).
+  Only then widen the window (e.g. back to `06:00`).
 
 *Automatic discharge start threshold and SoC floor*: two optional rules keep the
 discharge schedule (`0xE033`) in step with the battery without a manual
@@ -542,7 +549,10 @@ charge window is not touched.
   override cap, failure budget, daily ceiling and write gates apply as for the reserve.
   Reason `EVENING_RESERVE_HOLD`. Note: while held, the daytime SoC rule is off, so with a
   full battery SUB curtails PV until `eveningStart` (the curtailment the SoC rule
-  avoids). That is the trade-off for keeping the reserve for the peak.
+  avoids). That is the trade-off for keeping the reserve for the peak. Keep it off until
+  the E20F charge-priority day value (PV only, #48) is live: with E20F = 2 (hybrid), SUB
+  also charges the battery from the grid in the afternoon (gw-pi2, 12 Nov 14:00-16:00,
+  116 A).
 * A failed write (error, wrong or missing read-back) leaves the device as it is.
   Retries back off exponentially (60, 120, 240, 480 cycles) and at most 5 failed writes
   are allowed per window (successful writes do not count); then `WRITE_FAILED` is
