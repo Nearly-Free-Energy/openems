@@ -674,8 +674,8 @@ final class ModeSchedule {
 			this.reserveHeld |= this.eveningReserveHold && !this.reserveActive;
 		}
 		if (this.reserveActive || this.reserveHeld) {
-			// Evening reserve: the daytime priority, so the sun charges the battery for
-			// the peak. The SoC rule has to reach its upper threshold again afterwards.
+			// Evening reserve: the daytime priority, so the sun charges the battery for the
+			// peak. The SoC rule has to reach its upper threshold again afterwards.
 			this.highSoc = false;
 			this.socStateSeeded = true;
 			this.reason = this.reserveActive ? ModeScheduleReason.EVENING_RESERVE
@@ -790,8 +790,8 @@ final class ModeSchedule {
 			return new Step(ModeScheduleState.WAITING_FOR_DATA, target, null);
 		}
 		if (outputPriority.intValue() == target.intValue()) {
-			// The last handler is kept, so the cooldown still limits a re-correction if
-			// the device is overridden again right after.
+			// The last handler is kept, so the cooldown still limits a re-correction if the
+			// device is overridden again right after.
 			return new Step(ModeScheduleState.IN_SYNC, target, null);
 		}
 		if (this.failures >= MAX_ATTEMPTS) {
