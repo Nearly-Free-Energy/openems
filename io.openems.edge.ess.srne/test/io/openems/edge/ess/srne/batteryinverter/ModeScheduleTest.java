@@ -22,8 +22,8 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 /**
  * Pure tests of the daily output-priority schedule: the time windows, the
  * configuration validation, the clock gate and the guarded write decisions. The
- * production defaults are SUB (3) from 00:30 to 18:00 and SBU (2) from 18:00
- * to 00:30.
+ * production defaults are SUB (3) from 00:30 to 18:00 and SBU (2) from 18:00 to
+ * 00:30.
  */
 public class ModeScheduleTest {
 
@@ -55,8 +55,7 @@ public class ModeScheduleTest {
 	}
 
 	// One cycle with one fresh machine-state read.
-	private static ModeSchedule.Step step(ModeSchedule sut, LocalTime now, Integer soc, Integer e204,
-			boolean mains) {
+	private static ModeSchedule.Step step(ModeSchedule sut, LocalTime now, Integer soc, Integer e204, boolean mains) {
 		sut.onMachineStateRead(mains);
 		return sut.step(at(now), soc, e204, true, mains, true, TIMEOUT, COOLDOWN);
 	}
@@ -113,7 +112,8 @@ public class ModeScheduleTest {
 		assertNull(ModeSchedule.fromConfig(true, SUB, SBU, " 18:00 ", "00:30", -1).getInvalidReason());
 		// The two times must differ.
 		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "18:00", -1).getInvalidReason());
-		// One owner of E204: a static outputPriority target conflicts with the schedule.
+		// One owner of E204: a static outputPriority target conflicts with the
+		// schedule.
 		var conflict = ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", SBU);
 		assertNotNull(conflict.getInvalidReason());
 		assertFalse(conflict.isActive());
@@ -307,7 +307,8 @@ public class ModeScheduleTest {
 	public void testFrameUsesTheArmedValue() {
 		var element = new GuardedWordElement(0xE204);
 		element.arm(SUB);
-		// Whatever value the bridge read outside the lock, the frame carries the armed one.
+		// Whatever value the bridge read outside the lock, the frame carries the armed
+		// one.
 		var raw = element.valueToRaw(SBU);
 		assertEquals(1, raw.length);
 		assertEquals(SUB, raw[0].getValue());
@@ -615,8 +616,7 @@ public class ModeScheduleTest {
 		assertEquals(SBU, socStep(sut, t, 96, SUB, true).target());
 		verified(sut, t, SBU, 96);
 		for (var soc : new Integer[] { null, -1, 101 }) {
-			assertStep(socStep(sut, t.plusMinutes(30), soc, SUB, true), ModeScheduleState.WAITING_FOR_DATA, SBU,
-					null);
+			assertStep(socStep(sut, t.plusMinutes(30), soc, SUB, true), ModeScheduleState.WAITING_FOR_DATA, SBU, null);
 			assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
 		}
 	}
@@ -745,7 +745,8 @@ public class ModeScheduleTest {
 		assertStep(socStep(sut, t.plusMinutes(10), 96, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 	}
 
-	// A device that reverts E204 to `other` right after every verified write. Returns
+	// A device that reverts E204 to `other` right after every verified write.
+	// Returns
 	// the cycle index of each write made in `cycles` cycles at a fixed time.
 	private static List<Integer> fight(ModeSchedule sut, LocalTime time, int target, int other, int cycles) {
 		List<Integer> writes = new ArrayList<>();
@@ -794,8 +795,8 @@ public class ModeScheduleTest {
 
 	private static final int GRID_UP = 230_000; // mV
 
-	private static ModeSchedule.Step batteryStep(ModeSchedule sut, LocalDateTime now, int soc, int e204,
-			int l1, int l2, int l3) {
+	private static ModeSchedule.Step batteryStep(ModeSchedule sut, LocalDateTime now, int soc, int e204, int l1, int l2,
+			int l3) {
 		sut.onMachineStateRead(Integer.valueOf(ModeSchedule.ON_BATTERY_STATE));
 		sut.onGridVoltageRead(1, l1);
 		sut.onGridVoltageRead(2, l2);
@@ -835,8 +836,8 @@ public class ModeScheduleTest {
 		for (var i = 0; i < 50; i++) {
 			assertStep(batteryStep(sut, later, 80, SBU, 0, 0, 0), ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
 			// One phase below the threshold is not "grid present" either.
-			assertStep(batteryStep(sut, later, 80, SBU, GRID_UP, GRID_UP, 150_000),
-					ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
+			assertStep(batteryStep(sut, later, 80, SBU, GRID_UP, GRID_UP, 150_000), ModeScheduleState.WAITING_FOR_MAINS,
+					SUB, null);
 		}
 		assertNull(sut.queuedTarget());
 	}
@@ -854,8 +855,10 @@ public class ModeScheduleTest {
 	@Test
 	public void testSubOnBatteryPathIsOffByDefault() {
 		assertFalse(defaults().isGridPresentPathEnabled());
-		assertFalse(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10).isGridPresentPathEnabled());
-		// Window switch to SUB while the unit runs on battery with the grid up: waits for
+		assertFalse(
+				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10).isGridPresentPathEnabled());
+		// Window switch to SUB while the unit runs on battery with the grid up: waits
+		// for
 		// mains as before.
 		var sut = defaults();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
@@ -890,13 +893,15 @@ public class ModeScheduleTest {
 				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, 261).getInvalidReason());
 	}
 
-	// ---- Evening reserve (SoC rule 95 / 85, reserve 90 % from 14:00 to 18:00) ----
+	// ---- Evening reserve (SoC rule 95 / 85, reserve 90 % from 14:00 to 18:00)
+	// ----
 
 	private static ModeSchedule reserveSchedule() {
 		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, "14:00");
 	}
 
-	// Past the startup hold and the dwell from activation (at 10:00), device in SBU at
+	// Past the startup hold and the dwell from activation (at 10:00), device in SBU
+	// at
 	// 88 % (seeded high).
 	private static ModeSchedule primedReserve() {
 		var sut = reserveSchedule();
@@ -993,8 +998,7 @@ public class ModeScheduleTest {
 		// 17:59: still below the reserve, SUB held.
 		assertStep(socStep(sut, at(LocalTime.of(17, 59)), 89, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
 		// 18:00: the evening switch goes out at once, not held by the dwell.
-		assertStep(socStep(sut, at(LocalTime.of(18, 0)), 89, SUB, true), ModeScheduleState.WRITE_PENDING, SBU,
-				SBU);
+		assertStep(socStep(sut, at(LocalTime.of(18, 0)), 89, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 		assertEquals(ModeScheduleReason.WINDOW, sut.reason());
 	}
 
