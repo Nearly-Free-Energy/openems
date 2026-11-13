@@ -28,9 +28,9 @@ import io.openems.edge.ess.srne.common.enums.MachineState;
  * controllable clock. Africa/Kampala is UTC+3: 07:00Z is 10:00 local (daytime,
  * SUB) and 16:00Z is 19:00 local (evening, SBU). The dummy bridge does not
  * execute writes, so a test plays the device by invoking the same execute
- * callback the write task uses and then presenting the register read-back.
- * The schedule writes nothing for {@link ModeSchedule#STARTUP_HOLD_CYCLES}
- * cycles after activation, and the clock gate needs
+ * callback the write task uses and then presenting the register read-back. The
+ * schedule writes nothing for {@link ModeSchedule#STARTUP_HOLD_CYCLES} cycles
+ * after activation, and the clock gate needs
  * {@link ModeSchedule#CLOCK_SETTLE_CYCLES} steady cycles after a jump.
  */
 public class SrneBatteryInverterModeScheduleTest {
@@ -405,7 +405,8 @@ public class SrneBatteryInverterModeScheduleTest {
 	@Test
 	public void testInvalidConfigValues() throws Exception {
 		for (var config : new MyConfig[] { config().setEveningStart("25:00").build(),
-				config().setDaytimePriority(SBU).setEveningPriority(SBU).build() }) {
+				config().setDaytimePriority(SBU).setEveningPriority(SBU).build(),
+				config().setDaytimeSbuAboveSoc(30).setDaytimeSbuBelowSoc(25).setDaytimeSocRuleFrom("19:00").build() }) {
 			var sut = new SrneBatteryInverterImpl();
 			start(sut, bridge(SBU, MachineState.RUNNING_MAINS_BYPASS), DAY, config) //
 					.next(new TestCase(), CYCLES);
@@ -467,9 +468,9 @@ public class SrneBatteryInverterModeScheduleTest {
 		assertFalse(sut.takeModeScheduleWriteForTest());
 	}
 
-	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3), SoC
-	// falls below daytimeSbuBelowSoc. With the grid present on all phases the SUB
-	// write goes out; with the grid absent it does not.
+	// Aaron's case: SBU written at high SoC, the unit leaves the line (state 3),
+	// SoC falls below daytimeSbuBelowSoc. With the grid present on all phases the
+	// SUB write goes out; with the grid absent it does not.
 	private static void sbuThenOnBatteryBelowThreshold(boolean gridPresent, int gridPresentMinVoltage)
 			throws Exception {
 		var sut = new SrneBatteryInverterImpl();
@@ -533,8 +534,8 @@ public class SrneBatteryInverterModeScheduleTest {
 		final var clock = clockAt("2026-11-10T12:00:00Z"); // 15:00 local, in the reserve window
 		final var bridge = bridge(SBU, MachineState.RUNNING_MAINS_BYPASS) //
 				.withRegisters(0x0100, 88);
-		final var test = start(sut, bridge, clock, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85)
-				.setEveningReserveSoc(90).build());
+		final var test = start(sut, bridge, clock,
+				config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85).setEveningReserveSoc(90).build());
 		assertEquals(SUB, target(sut));
 		assertEquals(ModeScheduleReason.EVENING_RESERVE, reason(sut));
 		for (var i = 0; i < 3; i++) {
@@ -554,5 +555,18 @@ public class SrneBatteryInverterModeScheduleTest {
 		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
 		assertEquals(SBU, target(sut));
 		assertEquals(ModeScheduleReason.HIGH_SOC, reason(sut));
+	}
+
+	@Test
+	public void testDaytimeSocRuleFromHoldsSubAtNight() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		// 02:00 local, after the night charge, device in SUB at 50 %.
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 50);
+		start(sut, bridge, "2026-11-10T23:00:00Z", config().setDaytimeStart("00:00").setDaytimeSbuAboveSoc(30)
+				.setDaytimeSbuBelowSoc(25).setDaytimeSocRuleFrom("06:00").build());
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertEquals(SUB, target(sut));
+		assertEquals(ModeScheduleReason.WINDOW, reason(sut));
 	}
 }
