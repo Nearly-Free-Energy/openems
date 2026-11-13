@@ -167,6 +167,9 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Evening reserve from", description = "Local time HH:MM (schedule time zone) when the evening-reserve window starts; it ends at eveningStart and must lie in the daytime window.")
 	String eveningReserveFrom() default "14:00";
 
+	@AttributeDefinition(name = "Evening reserve hold", description = "Mode schedule: once SoC reaches eveningReserveSoc in the reserve window, keep the daytime priority (SUB: houses on the grid, the sun still charges) until eveningStart instead of returning to the daytime SBU rule. Needs eveningReserveSoc; off by default.")
+	boolean eveningReserveHold() default false;
+
 	@AttributeDefinition(name = "Schedule time zone", description = "Time zone used to evaluate the discharge window and the mode schedule against the edge clock.")
 	String scheduleTimeZone() default "Africa/Kampala";
 

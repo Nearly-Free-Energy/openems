@@ -556,4 +556,25 @@ public class SrneBatteryInverterModeScheduleTest {
 		assertEquals(SBU, target(sut));
 		assertEquals(ModeScheduleReason.HIGH_SOC, reason(sut));
 	}
+
+	@Test
+	public void testEveningReserveHoldThroughConfigThenEveningSbu() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T13:00:00Z"); // 16:00 local, in the reserve window
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0x0100, 96);
+		final var test = start(sut, bridge, clock, config().setDaytimeSbuAboveSoc(95).setDaytimeSbuBelowSoc(85)
+				.setEveningReserveSoc(90).setEveningReserveHold(true).build());
+		// Above the reserve and above daytimeSbuAboveSoc: held in SUB, nothing written.
+		assertEquals(SUB, target(sut));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, reason(sut));
+		assertEquals(ModeScheduleState.IN_SYNC, state(sut));
+		assertFalse(sut.takeModeScheduleWriteForTest());
+		// 18:00 local: the evening SBU is written.
+		clock.leap(2, ChronoUnit.HOURS);
+		test.next(new TestCase(), SETTLE_CYCLES);
+		assertEquals(SBU, target(sut));
+		assertEquals(ModeScheduleReason.WINDOW, reason(sut));
+		assertEquals(SBU, sut.modeScheduleForTest().queuedTarget());
+	}
 }

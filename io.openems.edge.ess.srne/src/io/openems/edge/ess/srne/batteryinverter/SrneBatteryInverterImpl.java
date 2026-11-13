@@ -170,7 +170,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.modeSchedule = ModeSchedule.fromConfig(config.modeScheduleEnabled(), config.daytimePriority(),
 				config.eveningPriority(), config.eveningStart(), config.daytimeStart(), config.outputPriority(),
 				config.daytimeSbuAboveSoc(), config.daytimeSbuBelowSoc(), config.minDwellMinutes(),
-				config.gridPresentMinVoltage(), config.eveningReserveSoc(), config.eveningReserveFrom());
+				config.gridPresentMinVoltage(), config.eveningReserveSoc(), config.eveningReserveFrom(),
+				config.eveningReserveHold());
 		if (this.modeSchedule.getInvalidReason() != null) {
 			this.logError(this.log,
 					"Invalid mode schedule: " + this.modeSchedule.getInvalidReason() + "; the schedule stays off");
@@ -188,6 +189,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		if (this.dischargeGuard.isActive()) {
 			this.warnIfRulesInert(config);
+		}
+		if (this.modeSchedule.isActive() && config.eveningReserveHold()
+				&& !this.modeSchedule.isEveningReserveHoldActive()) {
+			this.logWarn(this.log, "eveningReserveHold is set but inert: it needs eveningReserveSoc");
 		}
 		if (this.modeSchedule.isActive() && !config.controlEnabled()) {
 			this.logWarn(this.log, "Mode schedule is enabled but inert: it needs controlEnabled=true");

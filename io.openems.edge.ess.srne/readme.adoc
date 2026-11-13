@@ -455,7 +455,7 @@ charge window is not touched.
   current target and writes nothing. The SBU preconditions apply to these writes too.
   A SoC-driven switch waits `minDwellMinutes` (default 10) after the last verified
   switch (`MIN_DWELL`); the window switches at the boundaries do not wait. The evening
-  window is unchanged. Channel `ModeScheduleReason`: `WINDOW` / `HIGH_SOC` / `LOW_SOC` / `EVENING_RESERVE`.
+  window is unchanged. Channel `ModeScheduleReason`: `WINDOW` / `HIGH_SOC` / `LOW_SOC` / `EVENING_RESERVE` / `EVENING_RESERVE_HOLD`.
 * Evening reserve (optional, `eveningReserveSoc`, default `-1` = off; valid 20..100;
   `eveningReserveFrom`, `HH:MM` local, default `14:00`, must lie in the daytime window):
   from `eveningReserveFrom` until `eveningStart`, while SoC is below
@@ -468,6 +468,19 @@ charge window is not touched.
   present), dwell, budgets, ceiling and override handling; it is a SoC-driven switch,
   so the dwell applies, while the 18:00 evening switch still goes out on time. Reason
   `EVENING_RESERVE`.
+* Evening reserve hold (optional, `eveningReserveHold`, default `false`; needs
+  `eveningReserveSoc`, otherwise inert with a warning): once SoC is at or above
+  `eveningReserveSoc` in the reserve window (also when it already is at
+  `eveningReserveFrom`), the daytime priority (SUB: the houses run on the grid, the sun
+  still charges the battery) is held until `eveningStart` instead of returning to the
+  daytime SoC rule. Without it the SoC rule switches back to SBU at
+  `daytimeSbuAboveSoc` and the houses drain the reserve before the peak (Sezibwa,
+  12 Nov 2026: 85 % at 16:00, 66 % at 18:18). Below the reserve again the reason is
+  `EVENING_RESERVE` (same target); an unreadable SoC keeps the hold. At `eveningStart`
+  the evening priority (SBU) is written on time; the hold is reset every evening and
+  outside the reserve window. Switching into the hold is SoC-driven, so the dwell,
+  override cap, failure budget, daily ceiling and write gates apply as for the reserve.
+  Reason `EVENING_RESERVE_HOLD`.
 * A failed write (error, wrong or missing read-back) leaves the device as it is.
   Retries back off exponentially (60, 120, 240, 480 cycles) and at most 5 failed writes
   are allowed per window (successful writes do not count); then `WRITE_FAILED` is
@@ -504,7 +517,7 @@ wants now).
 * `chargeWindow1StopSoc` (int %, `-1` = leave unchanged and do not read; range `10..100`): target for `0xE03B`, the timed-charge stop SoC of charge window 1. Use with a `00:00-06:00` charge window and `50` so the night charge runs whenever the grid is present and stops at 50%. See "Night charge stop SoC" above.
 * TOU schedule windows (int, encoded `hour*256+min`, `-1` = leave unchanged): `chargeWindow1Start`, `chargeWindow1Stop`, `dischargeWindow1Start`, `dischargeWindow1Stop`. Start and stop must be set together; end-of-day is `23:59` (5947).
 * Discharge rules (int %, `-1` = off, default): `dischargeStartMinSoc` (skip the window if SoC is below this during the first 10 minutes of it) and `dischargeFloorSoc` (stop for the rest of the window at or below this SoC). `scheduleTimeZone` (String, default `Africa/Kampala`): time zone for evaluating the window against the edge clock.
-* Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`), `eveningReserveSoc` (int %, default `-1` = off), `eveningReserveFrom` (String `HH:MM`, default `14:00`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
+* Mode schedule: `modeScheduleEnabled` (boolean, default `false`), `daytimePriority` (int `2`/`3`, default `3` = SUB), `eveningPriority` (int `2`/`3`, default `2` = SBU, must differ from `daytimePriority`), `eveningStart` (String `HH:MM`, default `18:00`), `daytimeStart` (String `HH:MM`, default `00:30`), `daytimeSbuAboveSoc` / `daytimeSbuBelowSoc` (int %, default `-1` = off), `minDwellMinutes` (int, default `10`), `eveningReserveSoc` (int %, default `-1` = off), `eveningReserveFrom` (String `HH:MM`, default `14:00`), `eveningReserveHold` (boolean, default `false`). Needs `controlEnabled=true` and `outputPriority=-1`; SBU also needs `switchToLineSoc`, `switchToBatterySoc` and `bmsCommunication`; see "Daily output-priority schedule" above.
 * TOU schedule enables (int `0`/`1`, `-1` = leave unchanged): `chargeScheduleEnable`, `dischargeScheduleEnable`. Written last, only after the matching window verifies; `enable=1` requires a configured window.
 
 https://github.com/OpenEMS/openems/tree/develop/io.openems.edge.ess.srne[Source Code icon:github[]]

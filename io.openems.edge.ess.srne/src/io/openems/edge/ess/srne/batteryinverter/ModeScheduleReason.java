@@ -18,7 +18,12 @@ public enum ModeScheduleReason implements OptionsEnum {
 	 * Daytime, between eveningReserveFrom and eveningStart, SoC below
 	 * eveningReserveSoc: the daytime priority so the battery charges for the peak.
 	 */
-	EVENING_RESERVE(3);
+	EVENING_RESERVE(3), //
+	/**
+	 * Daytime, eveningReserveHold on, the reserve was reached in the reserve
+	 * window: the daytime priority is held until eveningStart.
+	 */
+	EVENING_RESERVE_HOLD(4);
 
 	private final int value;
 
