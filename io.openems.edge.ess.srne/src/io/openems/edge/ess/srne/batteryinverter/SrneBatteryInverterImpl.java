@@ -8,7 +8,9 @@ import static org.osgi.service.component.annotations.ReferencePolicyOption.GREED
 import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -78,6 +80,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private static final int SUPPRESS_RETRY_COOLDOWN_CYCLES = 8;
 	private static final int MAX_FAST_SUPPRESS_RETRIES = 3;
 	private static final int MAX_RULE_SOC = 99;
+	// A failed charge-window write (runtime failure, never a rejected config) is
+	// retried with backoff: 60, 120, 240, then every 480 cycles, at most
+	// MAX_CHARGE_RETRIES_PER_DAY times per local day so a broken device is not
+	// hammered. The count resets at local midnight.
+	static final int MAX_CHARGE_RETRIES_PER_DAY = 6;
+	private static final int MAX_CHARGE_RETRY_BACKOFF_SHIFT = 3;
 	private final Logger log = LoggerFactory.getLogger(SrneBatteryInverterImpl.class);
 
 	private final AtomicReference<TargetGridMode> targetGridMode = new AtomicReference<>(TargetGridMode.GO_ON_GRID);
@@ -122,6 +130,24 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null, null,
 			-1);
 	private ModeScheduleState lastModeScheduleState;
+	private ChargePrioritySchedule chargePrioritySchedule = ChargePrioritySchedule.fromConfig(false,
+			ChargePrioritySchedule.DEFAULT_NIGHT_PRIORITY, ChargePrioritySchedule.DEFAULT_DAY_PRIORITY, null, null);
+	private ModeScheduleState lastChargePriorityState;
+	private Integer lastChargePriorityTarget;
+	private boolean chargePriorityNightLateLogged;
+	private boolean chargePrioritySafeMissingLogged;
+	// Log counters, for tests of the rate limiting.
+	private long chargePriorityFailingWarnings;
+	private long chargePriorityStateLogs;
+	private boolean deviceChargeTimerChecked;
+	// Each schedule runs isolated: a failure in one is logged and the rest of the
+	// cycle (the other schedule, every scalar setting, both TOU windows) carries
+	// on. The fields are a seam so tests can make one schedule throw.
+	private Runnable modeScheduleReconcile = this::reconcileModeSchedule;
+	private Runnable chargePriorityReconcile = this::reconcileChargePrioritySchedule;
+	private final IsolatedFailures modeScheduleFailures = new IsolatedFailures("Mode schedule");
+	private final IsolatedFailures chargePriorityFailures = new IsolatedFailures("Charge-priority schedule");
+	private long reconcileCycles;
 	private ZoneId scheduleZone = ZoneId.of(DEFAULT_SCHEDULE_ZONE);
 	private Integer appliedDischargeEnable;
 	private int failedCycles;
@@ -129,6 +155,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private boolean driftCorrectedUnsuppressed;
 	private int driftCooldown;
 	private boolean mismatchLogged;
+	private ScheduleWindow.State lastChargeWindowState;
+	private LocalDate chargeRetryDay;
+	private int chargeRetriesToday;
+	private int chargeFailedCycles;
+	private boolean chargeRetryCapLogged;
+	private int chargeEnableMismatchCycles;
+	private boolean chargeEnableMismatchLogged;
 	// One-shot audit flag: log at most once that the output-priority write is held
 	// pending its prerequisites (reconcile runs every cycle).
 	private boolean outputPriorityHeldLogged;
@@ -178,6 +211,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.logError(this.log,
 					"Invalid mode schedule: " + this.modeSchedule.getInvalidReason() + "; the schedule stays off");
 		}
+		this.chargePrioritySchedule = ChargePrioritySchedule.fromConfig(config.chargePrioritySchedule(),
+				config.nightChargePriority(), config.dayChargePriority(), config.nightChargeFrom(),
+				config.nightChargeTo(), config.chargePriorityRestoreWhenOff());
+		if (this.chargePrioritySchedule.getInvalidReason() != null) {
+			this.logError(this.log,
+					"Invalid charge-priority schedule: " + this.chargePrioritySchedule.getInvalidReason()
+							+ "; the schedule stays off and holds E20F at [" + this.chargePrioritySchedule.holdValue()
+							+ "] (PV only)");
+		}
 		/*
 		 * There is intentionally no @Modified method. A settings configuration update
 		 * causes DS to replace this component instance, giving every setting a fresh
@@ -186,7 +228,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		 * same activation.
 		 */
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
-		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive() || this.nightChargeStop.isActive()) {
+		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive() || this.nightChargeStop.isActive()
+				|| this.chargePrioritySchedule.managesRegister()) {
 			this.scheduleZone = this.parseScheduleZone(config.scheduleTimeZone());
 		}
 		if (this.dischargeGuard.isActive()) {
@@ -199,13 +242,20 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		if (this.modeSchedule.isActive() && !config.controlEnabled()) {
 			this.logWarn(this.log, "Mode schedule is enabled but inert: it needs controlEnabled=true");
 		}
+		if (this.chargePrioritySchedule.isActive()) {
+			this.warnIfChargePriorityScheduleMismatched(config);
+		} else if (this.chargePrioritySchedule.managesRegister() && !this.chargePrioritySchedule.isEnabled()) {
+			this.logInfo(this.log, "Charge-priority schedule is off; holding E20F at ["
+					+ this.chargePrioritySchedule.holdValue() + "] (chargePriorityRestoreWhenOff)");
+		}
 		this._setMaxApparentPower(config.maxApparentPower());
 		this.getMachineStateChannel().onSetNextValue(ignore -> this.updateLifecycle());
-		// Fresh machine-state reads for the mode schedule's mains confirmation.
+		// Fresh machine-state reads for the schedules' mains confirmation.
 		this.getMachineStateChannel().onSetNextValue(ignore -> {
 			MachineState read = this.getMachineStateChannel().getNextValue().asEnum();
-			this.modeSchedule.onMachineStateRead(
-					read == null || read == MachineState.UNDEFINED ? null : Integer.valueOf(read.getValue()));
+			var raw = read == null || read == MachineState.UNDEFINED ? null : Integer.valueOf(read.getValue());
+			this.modeSchedule.onMachineStateRead(raw);
+			this.chargePrioritySchedule.onMachineStateRead(raw);
 		});
 		// Fresh SoC reads for the night charge stop confirmation.
 		((IntegerReadChannel) this.channel(SrneBatteryInverter.ChannelId.BATTERY_SOC))
@@ -245,6 +295,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.registerReadback(10, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP_SOC);
 		((IntegerReadChannel) this.channel(SrneBatteryInverter.ChannelId.OUTPUT_PRIORITY))
 				.onSetNextValue(value -> this.modeSchedule.verify(value.get()));
+		((IntegerReadChannel) this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY))
+				.onSetNextValue(value -> this.chargePrioritySchedule.verify(value.get()));
 		this.registerWindowReadback(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
@@ -276,7 +328,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// JUSTIFICATION-A3: coherent-window read-back wiring for the TOU schedule
 	// feature (#67, PR #24). The window start/stop/enable each verify a distinct
 	// register of one ScheduleWindow, so a single indexed registerReadback cannot
-	// express it; this mirrors that helper for the three-register unit.
+	// express it; this mirrors that helper for the three-register unit. The verify*
+	// callbacks must stay on onSetNextValue (one call per actual bus read): the
+	// fresh-read gate of ScheduleWindow.retry() relies on it.
 	private void registerWindowReadback(ScheduleWindow window, SrneBatteryInverter.ChannelId startChannel,
 			SrneBatteryInverter.ChannelId stopChannel, SrneBatteryInverter.ChannelId enableChannel) {
 		((IntegerReadChannel) this.channel(startChannel)).onSetNextValue(value -> {
@@ -472,6 +526,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			protocol.addTask(
 					new FC16WriteRegistersTask(this.modeSchedule::onExecute, 0xE204, this.modeSchedule.writeElement()));
 		}
+		// Charge priority (E20F): read and written only while the charge-priority
+		// schedule is active, or holds the safe value because it is invalid or off
+		// with chargePriorityRestoreWhenOff, so the default task list is unchanged.
+		if (this.chargePrioritySchedule.managesRegister()) {
+			protocol.addTask(new FC3ReadRegistersTask(0xE20F, Priority.LOW, //
+					m(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY, new UnsignedWordElement(0xE20F))));
+			protocol.addTask(new FC16WriteRegistersTask(this.chargePrioritySchedule::onExecute, 0xE20F,
+					this.chargePrioritySchedule.writeElement()));
+		}
 		return protocol;
 	}
 
@@ -502,14 +565,22 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		for (var handler : this.writeHandlers) {
 			handler.onCycle(READBACK_TIMEOUT_CYCLES);
 		}
+		// A retried window may give up on a write that stays queued; the retry then
+		// queues it again. A window that is never retried keeps a queued write.
+		this.chargeWindow.setQueuedTimeout(this.chargeRetryApplies());
 		this.chargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
-		// Only the rules-managed discharge window is retried, so only it may give up on
-		// a write that stays queued; every other window behaves as without the rules.
+		this.monitorChargeWindow();
 		this.dischargeWindow.setQueuedTimeout(this.config != null && this.dischargeRulesApply());
 		this.dischargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
 		this.updateDischargeSuppression();
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
-		this.reconcileModeSchedule();
+		// The two daily schedules are independent: neither relies on the other's
+		// write landing first at a shared boundary (E20F waits for its own gate).
+		this.reconcileCycles++;
+		this.reconcileIsolated(this.modeScheduleReconcile, this.modeScheduleFailures);
+		if (!this.reconcileIsolated(this.chargePriorityReconcile, this.chargePriorityFailures)) {
+			this.reportChargePriorityReconcileFailing(this.chargePriorityFailures.onsetLoggedThisCycle);
+		}
 		this.updateNightChargeClock();
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
@@ -542,6 +613,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// Source transfer: the reserve band (E01F/E020), BMS mode (E215) and output
 		// priority (E204) are reconciled together as one coherent, validated operation.
 		this.reconcileSourceTransfer();
+		this.retryChargeWindow();
 		// Evaluated here, behind the machine-state gate, right before the window.
 		final var chargeEnable = this.effectiveChargeEnable();
 		this.reconcileWindow(this.chargeWindow, //
@@ -556,6 +628,189 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				this.config.dischargeWindow1Start(), this.config.dischargeWindow1Stop(),
 				this.effectiveDischargeEnable());
 		this.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE).setNextValue(this.aggregateWriteState());
+	}
+
+	/**
+	 * Failure log of one isolated schedule reconcile. Counts failures instead of a
+	 * flag that one clean cycle resets, so a flapping failure logs its stack trace
+	 * at most once per {@link #FAILURE_STACK_TRACE_INTERVAL_CYCLES}.
+	 */
+	private static final class IsolatedFailures {
+		private final String name;
+		private boolean failing;
+		private boolean onsetLogged;
+		// Set only in the cycle whose failure onset logged its stack trace, so log
+		// lines that go with it are rate-limited the same way.
+		private boolean onsetLoggedThisCycle;
+		private long failures;
+		private long stackTracesLogged;
+		private long lastStackTraceCycle = Long.MIN_VALUE;
+
+		private IsolatedFailures(String name) {
+			this.name = name;
+		}
+	}
+
+	/** Minimum cycles between two logged stack traces of one schedule (~1 h). */
+	static final int FAILURE_STACK_TRACE_INTERVAL_CYCLES = 3600;
+
+	/**
+	 * Runs one schedule's reconcile so that an exception in it cannot skip the rest
+	 * of {@link #reconcileSafeSettings()}. The stack trace is logged at the start
+	 * of a failure, at most once per {@link #FAILURE_STACK_TRACE_INTERVAL_CYCLES};
+	 * a recovery is logged only after a logged start.
+	 *
+	 * @param reconcile the schedule's reconcile
+	 * @param failures  the schedule's failure log
+	 * @return true if it ran cleanly, false if it threw
+	 */
+	private boolean reconcileIsolated(Runnable reconcile, IsolatedFailures failures) {
+		failures.onsetLoggedThisCycle = false;
+		try {
+			reconcile.run();
+		} catch (RuntimeException e) {
+			failures.failures++;
+			if (!failures.failing) {
+				failures.failing = true;
+				failures.onsetLogged = failures.lastStackTraceCycle == Long.MIN_VALUE
+						|| this.reconcileCycles - failures.lastStackTraceCycle >= FAILURE_STACK_TRACE_INTERVAL_CYCLES;
+				if (failures.onsetLogged) {
+					failures.onsetLoggedThisCycle = true;
+					failures.stackTracesLogged++;
+					failures.lastStackTraceCycle = this.reconcileCycles;
+					this.log.error("[" + this.id() + "] " + failures.name + " failed (" + failures.failures
+							+ " failures since activation; next stack trace in " + FAILURE_STACK_TRACE_INTERVAL_CYCLES
+							+ " cycles at the earliest), the other settings carry on", e);
+				}
+			}
+			return false;
+		}
+		if (failures.failing) {
+			failures.failing = false;
+			if (failures.onsetLogged) {
+				this.logInfo(this.log, failures.name + " recovered");
+			}
+		}
+		return true;
+	}
+
+	// A throwing charge-priority reconcile must never look healthy: the safe-value
+	// alarm is raised and the state and target read unknown on every failing cycle.
+	// The warning goes with the rate-limited stack trace (logIt), so a flapping
+	// failure does not flood the log. lastChargePriorityState is kept, so a clean
+	// cycle in between does not log a state change either.
+	private void reportChargePriorityReconcileFailing(boolean logIt) {
+		if (logIt) {
+			this.chargePriorityFailingWarnings++;
+			this.logWarn(this.log, "Charge-priority schedule: reconcile failing; E20F is not managed, "
+					+ "the grid may charge the battery");
+		}
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING).setNextValue(true);
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE).setNextValue(null);
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(null);
+	}
+
+	/**
+	 * Whether the charge window is retried after a runtime failure: only with an
+	 * explicit enable target (0 or 1). With {@code -1} the end state is captured
+	 * from the device, and after a failed disarm that would be the 0 the failure
+	 * left behind, so a retry could not restore the original armed state.
+	 *
+	 * @return true if the charge window is retried
+	 */
+	private boolean chargeRetryApplies() {
+		return this.config != null && this.config.controlEnabled()
+				&& (this.config.chargeScheduleEnable() == 0 || this.config.chargeScheduleEnable() == 1);
+	}
+
+	/**
+	 * Publishes the charge-window state and warns when it needs attention: once on
+	 * each runtime failure (the bridge-side transitions to FAILED are otherwise
+	 * silent; the state named is the last one this cycle saw, which may not be the
+	 * one the bridge failed from), and once when the config wants the schedule
+	 * armed but the device has read 0 while the window made no progress for longer
+	 * than the timeout.
+	 */
+	private void monitorChargeWindow() {
+		var state = this.chargeWindow.getState();
+		var previous = this.lastChargeWindowState;
+		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_STATE, state);
+		if (state == ScheduleWindow.State.FAILED && previous != ScheduleWindow.State.FAILED
+				&& this.chargeWindow.isRetryableFailure()) {
+			this.logWarn(this.log,
+					"Charge schedule write FAILED (last state seen by the cycle [" + previous + "]); device enable ["
+							+ this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE) + "], window ["
+							+ this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START) + ","
+							+ this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP) + "]"
+							+ (this.chargeRetryApplies() ? "; will retry" : "; not retried (chargeScheduleEnable=-1)"));
+		}
+		this.lastChargeWindowState = state;
+
+		var wantsArmed = this.config != null && this.config.controlEnabled() && this.config.chargeScheduleEnable() == 1;
+		var deviceDisarmed = Integer.valueOf(0)
+				.equals(this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE));
+		if (!wantsArmed || !deviceDisarmed) {
+			this.chargeEnableMismatchCycles = 0;
+			this.chargeEnableMismatchLogged = false;
+			return;
+		}
+		// A healthy sequence changes state at least once per read-back; only a window
+		// that sits in one state while disarmed counts.
+		if (state != previous) {
+			this.chargeEnableMismatchCycles = 0;
+			return;
+		}
+		if (++this.chargeEnableMismatchCycles > READBACK_TIMEOUT_CYCLES && !this.chargeEnableMismatchLogged) {
+			this.chargeEnableMismatchLogged = true;
+			this.logWarn(this.log, "Charge schedule is configured enabled but the device reads enable=0 for more than "
+					+ READBACK_TIMEOUT_CYCLES + " cycles; charge window state [" + state + "]");
+		}
+	}
+
+	/**
+	 * Retries a charge window that failed at runtime, with backoff and a daily cap.
+	 * The retry only re-opens the window; the next sequence still writes the window
+	 * registers only while the enable reads 0 (from a read taken after the retry)
+	 * and arms only after the window reads back correctly.
+	 */
+	private void retryChargeWindow() {
+		if (!this.chargeRetryApplies() || !this.chargeWindow.isRetryableFailure()) {
+			this.chargeFailedCycles = 0;
+			return;
+		}
+		var today = LocalDate.now(this.clock().withZone(this.scheduleZone));
+		if (!today.equals(this.chargeRetryDay)) {
+			this.chargeRetryDay = today;
+			this.chargeRetriesToday = 0;
+			this.chargeRetryCapLogged = false;
+		}
+		if (this.chargeRetriesToday >= MAX_CHARGE_RETRIES_PER_DAY) {
+			if (!this.chargeRetryCapLogged) {
+				this.chargeRetryCapLogged = true;
+				this.logWarn(this.log, "Charge schedule write still FAILED after " + MAX_CHARGE_RETRIES_PER_DAY
+						+ " retries today; no further retry before local midnight");
+			}
+			return;
+		}
+		if (++this.chargeFailedCycles < chargeRetryCooldownCycles(this.chargeRetriesToday)) {
+			return;
+		}
+		if (this.chargeWindow.retry()) {
+			this.chargeFailedCycles = 0;
+			this.chargeRetriesToday++;
+			this.logWarn(this.log, "Retrying failed charge schedule write (" + this.chargeRetriesToday + " of "
+					+ MAX_CHARGE_RETRIES_PER_DAY + " today)");
+		}
+	}
+
+	/**
+	 * Cycles to wait in FAILED before the next charge-window retry.
+	 *
+	 * @param retriesSoFar retries already made today
+	 * @return the cooldown in cycles
+	 */
+	static int chargeRetryCooldownCycles(int retriesSoFar) {
+		return FAILED_RETRY_COOLDOWN_CYCLES << Math.min(retriesSoFar, MAX_CHARGE_RETRY_BACKOFF_SHIFT);
 	}
 
 	/**
@@ -601,6 +856,176 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				.setNextValue(active ? this.modeSchedule.reason() : null);
 	}
 
+	/**
+	 * Daily charge-priority schedule (E20F, decision D138). Runs every cycle so its
+	 * state channel stays current. A write is queued only with controlEnabled and a
+	 * readable E20F: the night value needs a plausible clock and machine state 2
+	 * (mains); the day value (or the value held while the schedule is off or
+	 * invalid) also goes out on battery (state 3). See ChargePrioritySchedule.
+	 */
+	private void reconcileChargePrioritySchedule() {
+		if (this.config == null) {
+			return;
+		}
+		final var managed = this.chargePrioritySchedule.managesRegister();
+		final LocalDateTime now = managed
+				? this.chargePrioritySchedule.plausibleTime(this.instantOrNull(), this.scheduleZone)
+				: null;
+		final var chargePriority = managed ? this.readValue(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY) : null;
+		final var mains = managed && this.isMachineStateVerified();
+		final var running = managed && this.isMachineStateRunning();
+		var step = this.chargePrioritySchedule.step(now, chargePriority, this.config.controlEnabled(), mains, running,
+				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES);
+		if (step.withdraw()) {
+			this.logInfo(this.log,
+					"Charge-priority schedule: machine-state gate closed, withdrew the queued E20F write");
+		}
+		if (step.target() != null && !step.target().equals(this.lastChargePriorityTarget)) {
+			this.logInfo(this.log, "Charge-priority schedule: target [" + step.target() + "] ("
+					+ this.describeChargePriorityTarget(now) + "), E20F [" + chargePriority + "]");
+			this.lastChargePriorityTarget = step.target();
+		}
+		this.checkDeviceChargeTimer();
+		if (step.write() != null) {
+			this.logInfo(this.log, "Charge-priority schedule: queued E20F write from [" + chargePriority + "] to ["
+					+ step.write() + "]");
+		}
+		if (step.state() != this.lastChargePriorityState) {
+			this.chargePriorityStateLogs++;
+			var message = "Charge-priority schedule state [" + step.state() + "], target [" + step.target()
+					+ "], E20F [" + chargePriority + "]";
+			if (step.state() == ModeScheduleState.WRITE_FAILED || step.state() == ModeScheduleState.CONFIG_INVALID
+					|| step.state() == ModeScheduleState.OVERRIDDEN
+					|| step.state() == ModeScheduleState.DAILY_WRITE_LIMIT) {
+				this.logWarn(this.log, message);
+			} else {
+				this.logInfo(this.log, message);
+			}
+			this.lastChargePriorityState = step.state();
+		}
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE).setNextValue(step.state());
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(step.target());
+		var safeMissing = managed && this.chargePrioritySchedule.isSafeValueMissing();
+		if (safeMissing && !this.chargePrioritySafeMissingLogged) {
+			this.logWarn(this.log,
+					"Charge-priority schedule: " + this.chargePrioritySchedule.safeValueMissingReason() + "; E20F ["
+							+ chargePriority + "], safe value [" + step.target()
+							+ "]; the grid may charge the battery. State [" + step.state() + "]");
+		}
+		this.chargePrioritySafeMissingLogged = safeMissing;
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING).setNextValue(safeMissing);
+		var active = this.chargePrioritySchedule.isActive();
+		var nightLate = active && this.chargePrioritySchedule.isNightLate();
+		if (nightLate && !this.chargePriorityNightLateLogged) {
+			this.logWarn(this.log,
+					"Charge-priority schedule: the night value is not set " + ChargePrioritySchedule.NIGHT_LATE_MINUTES
+							+ " minutes into the night window; E20F [" + chargePriority + "], state [" + step.state()
+							+ "]");
+		}
+		this.chargePriorityNightLateLogged = nightLate;
+		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_NIGHT_LATE).setNextValue(active ? nightLate : null);
+	}
+
+	private String describeChargePriorityTarget(LocalDateTime now) {
+		if (!this.chargePrioritySchedule.isActive()) {
+			return this.chargePrioritySchedule.isEnabled() ? "invalid configuration, held" : "schedule off, held";
+		}
+		if (now == null) {
+			return "unknown time, fallback";
+		}
+		return this.chargePrioritySchedule.isNight(now.toLocalTime()) ? "night window" : "day window";
+	}
+
+	// Once per activation, the charge window 1 the device actually has (it may be
+	// left unmanaged in the config, -1) is checked against the night window.
+	private void checkDeviceChargeTimer() {
+		if (this.deviceChargeTimerChecked || !this.chargePrioritySchedule.isActive()) {
+			return;
+		}
+		var start = this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START);
+		var stop = this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP);
+		if (start == null || stop == null) {
+			return;
+		}
+		this.deviceChargeTimerChecked = true;
+		var problem = this.chargeTimerProblem(start, stop);
+		if (problem != null) {
+			this.logWarn(this.log, "Device " + problem);
+		}
+	}
+
+	// Startup warnings only; the schedule itself still runs. The night-charge timer
+	// (charge window 1) needs the night value while it runs; a timer outside the
+	// night window would not get it.
+	private void warnIfChargePriorityScheduleMismatched(Config config) {
+		if (!config.controlEnabled()) {
+			this.logWarn(this.log, "Charge-priority schedule is enabled but inert: it needs controlEnabled=true");
+		}
+		var start = config.chargeWindow1Start();
+		var stop = config.chargeWindow1Stop();
+		if (start < 0 || stop < 0) {
+			return;
+		}
+		var problem = this.chargeTimerProblem(start, stop);
+		if (problem != null) {
+			this.logWarn(this.log, "Configured " + problem);
+		}
+	}
+
+	private String chargeTimerProblem(int start, int stop) {
+		if (!ScheduleWindow.isValidEncodedTime(start) || !ScheduleWindow.isValidEncodedTime(stop)) {
+			return null;
+		}
+		var timerStart = LocalTime.of(start / 256, start % 256);
+		var timerStop = LocalTime.of(stop / 256, stop % 256);
+		var night = "[" + this.chargePrioritySchedule.nightFrom() + "-" + this.chargePrioritySchedule.nightTo() + "]";
+		if (!this.chargePrioritySchedule.coversTimer(timerStart, timerStop)) {
+			return "charge window 1 [" + timerStart + "-" + timerStop
+					+ "] is not inside the charge-priority night window " + night;
+		}
+		if (!this.chargePrioritySchedule.timerStartHasMargin(timerStart)) {
+			return "charge window 1 starts at [" + timerStart + "], less than "
+					+ ChargePrioritySchedule.TIMER_START_MARGIN_MINUTES + " minutes after nightChargeFrom ["
+					+ this.chargePrioritySchedule.nightFrom() + "]: the timer may start before the night value is "
+					+ "written; start it at least that much later";
+		}
+		return null;
+	}
+
+	// Package-private for tests: the dummy bridge does not execute writes.
+	ChargePrioritySchedule chargePriorityScheduleForTest() {
+		return this.chargePrioritySchedule;
+	}
+
+	void setScheduleReconcilesForTest(Runnable modeSchedule, Runnable chargePriority) {
+		this.modeScheduleReconcile = modeSchedule != null ? modeSchedule : this::reconcileModeSchedule;
+		this.chargePriorityReconcile = chargePriority != null ? chargePriority : this::reconcileChargePrioritySchedule;
+	}
+
+	void reconcileChargePriorityForTest() {
+		this.reconcileChargePrioritySchedule();
+	}
+
+	long chargePriorityFailuresForTest() {
+		return this.chargePriorityFailures.failures;
+	}
+
+	long chargePriorityStackTracesForTest() {
+		return this.chargePriorityFailures.stackTracesLogged;
+	}
+
+	long chargePriorityFailingWarningsForTest() {
+		return this.chargePriorityFailingWarnings;
+	}
+
+	long chargePriorityStateLogsForTest() {
+		return this.chargePriorityStateLogs;
+	}
+
+	boolean takeChargePriorityWriteForTest() {
+		return this.chargePrioritySchedule.writeElement().getNextWriteValueAndReset() != null;
+	}
+
 	// The plausibility of the time is judged by ModeSchedule.plausibleTime; this
 	// only guards a missing component manager.
 	private Instant instantOrNull() {
@@ -620,6 +1045,18 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private boolean isMachineStateVerified() {
 		MachineState machineState = this.getMachineStateChannel().value().asEnum();
 		return machineState != null && machineState.isVerified();
+	}
+
+	/**
+	 * Whether the inverter is running: state 2 (mains) or
+	 * {@link ModeSchedule#ON_BATTERY_STATE} (on battery). The charge-priority
+	 * schedule writes its day value (the safe direction) in either.
+	 *
+	 * @return true if running
+	 */
+	private boolean isMachineStateRunning() {
+		MachineState machineState = this.getMachineStateChannel().value().asEnum();
+		return machineState != null && ChargePrioritySchedule.isRunningState(machineState.getValue());
 	}
 
 	/**
@@ -1066,6 +1503,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	boolean driftCorrectedUnsuppressedForTest() {
 		return this.driftCorrectedUnsuppressed;
+	}
+
+	int chargeRetriesTodayForTest() {
+		return this.chargeRetriesToday;
 	}
 
 	ScheduleWindow chargeWindowForTest() {

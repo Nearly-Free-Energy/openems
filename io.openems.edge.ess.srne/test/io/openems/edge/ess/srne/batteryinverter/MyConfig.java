@@ -45,6 +45,12 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private String eveningReserveFrom = "14:00";
 		private boolean eveningReserveHold = false;
 		private int nightChargeStopSoc = -1;
+		private boolean chargePrioritySchedule = false;
+		private boolean chargePriorityRestoreWhenOff = false;
+		private int nightChargePriority = 2;
+		private int dayChargePriority = 3;
+		private String nightChargeFrom = "00:00";
+		private String nightChargeTo = "06:00";
 
 		private Builder() {
 		}
@@ -219,6 +225,36 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setNightChargeStopSoc(int value) {
 			this.nightChargeStopSoc = value;
+			return this;
+		}
+
+		public Builder setChargePrioritySchedule(boolean value) {
+			this.chargePrioritySchedule = value;
+			return this;
+		}
+
+		public Builder setChargePriorityRestoreWhenOff(boolean value) {
+			this.chargePriorityRestoreWhenOff = value;
+			return this;
+		}
+
+		public Builder setNightChargePriority(int value) {
+			this.nightChargePriority = value;
+			return this;
+		}
+
+		public Builder setDayChargePriority(int value) {
+			this.dayChargePriority = value;
+			return this;
+		}
+
+		public Builder setNightChargeFrom(String value) {
+			this.nightChargeFrom = value;
+			return this;
+		}
+
+		public Builder setNightChargeTo(String value) {
+			this.nightChargeTo = value;
 			return this;
 		}
 
@@ -434,5 +470,35 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int nightChargeStopSoc() {
 		return this.builder.nightChargeStopSoc;
+	}
+
+	@Override
+	public boolean chargePrioritySchedule() {
+		return this.builder.chargePrioritySchedule;
+	}
+
+	@Override
+	public boolean chargePriorityRestoreWhenOff() {
+		return this.builder.chargePriorityRestoreWhenOff;
+	}
+
+	@Override
+	public int nightChargePriority() {
+		return this.builder.nightChargePriority;
+	}
+
+	@Override
+	public int dayChargePriority() {
+		return this.builder.dayChargePriority;
+	}
+
+	@Override
+	public String nightChargeFrom() {
+		return this.builder.nightChargeFrom;
+	}
+
+	@Override
+	public String nightChargeTo() {
+		return this.builder.nightChargeTo;
 	}
 }
