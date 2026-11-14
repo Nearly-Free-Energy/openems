@@ -1,5 +1,6 @@
 package io.openems.edge.ess.srne.batteryinverter;
 
+import io.openems.common.channel.Level;
 import io.openems.common.channel.Unit;
 import io.openems.common.types.OpenemsType;
 import io.openems.edge.batteryinverter.api.OffGridBatteryInverter;
@@ -93,7 +94,7 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		OVER_DISCHARGE_DELAY(Doc.of(OpenemsType.INTEGER).unit(Unit.SECONDS) //
 				.text("Over-discharge delay (0xE010)")), //
 		BATTERY_SOC(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
-				.text("Battery state of charge (0x0100); read only when a discharge SoC rule or the mode schedule is configured")), //
+				.text("Battery state of charge (0x0100); read only when a discharge SoC rule, the mode schedule or the night charge stop is configured")), //
 		DISCHARGE_SUPPRESSED(Doc.of(OpenemsType.BOOLEAN) //
 				.text("Discharge schedule held disabled by the start-threshold or floor rule")), //
 		DISCHARGE_SUPPRESSION_REASON(Doc.of(DischargeSuppressionReason.values()) //
@@ -111,7 +112,24 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		GRID_VOLTAGE_L3(Doc.of(OpenemsType.INTEGER).unit(Unit.MILLIVOLT) //
 				.text("Grid-input voltage L3 (0x022B), for the mode schedule's grid-present check")), //
 		MODE_SCHEDULE_REASON(Doc.of(ModeScheduleReason.values()) //
-				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC or LOW_SOC")), //
+				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC, LOW_SOC, EVENING_RESERVE or EVENING_RESERVE_HOLD")), //
+		NIGHT_CHARGE_STOP_STATE(Doc.of(NightChargeStop.State.values()) //
+				.text("State of the night charge stop (nightChargeStopSoc) on the charge schedule enable (0xE02C)")), //
+		// Charge priority (E20F): 0 PV preferred, 1 mains preferred, 2 hybrid, 3 PV
+		// only. Read only while the charge-priority schedule is active.
+		CHARGE_PRIORITY(Doc.of(OpenemsType.INTEGER) //
+				.text("Charge priority (0xE20F): 0 PV preferred, 1 mains preferred, 2 hybrid, 3 PV only")), //
+		CHARGE_PRIORITY_SCHEDULE_STATE(Doc.of(ModeScheduleState.values()) //
+				.text("State of the daily charge-priority schedule (0xE20F)")), //
+		CHARGE_PRIORITY_SCHEDULE_TARGET(Doc.of(OpenemsType.INTEGER) //
+				.text("Charge priority the daily schedule wants now (night or day value)")), //
+		CHARGE_PRIORITY_SAFE_VALUE_MISSING(Doc.of(Level.WARNING) //
+				.text("E20F is due at the safe value (PV only) but has not read it for 10 minutes, "
+						+ "or was overridden 3 times today: the grid may charge the battery")), //
+		CHARGE_PRIORITY_NIGHT_LATE(Doc.of(OpenemsType.BOOLEAN) //
+				.text("Night charge priority not set 10 minutes into the night window (night charge being lost)")), //
+		CHARGE_WINDOW_STATE(Doc.of(ScheduleWindow.State.values()) //
+				.text("State of the charge time-of-use window write (0xE026/0xE027, enable 0xE02C)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 
