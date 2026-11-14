@@ -126,6 +126,8 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 						+ "or was overridden 3 times today: the grid may charge the battery")), //
 		CHARGE_PRIORITY_NIGHT_LATE(Doc.of(OpenemsType.BOOLEAN) //
 				.text("Night charge priority not set 10 minutes into the night window (night charge being lost)")), //
+		CHARGE_WINDOW_STATE(Doc.of(ScheduleWindow.State.values()) //
+				.text("State of the charge time-of-use window write (0xE026/0xE027, enable 0xE02C)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 

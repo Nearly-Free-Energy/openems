@@ -7,43 +7,52 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 /**
  * Coordinates one coherent time-of-use schedule-window write.
  *
- * <p>A schedule window is the (start, stop) time pair plus its enable flag. The
+ * <p>
+ * A schedule window is the (start, stop) time pair plus its enable flag. The
  * start and stop registers are written as two separate single-register FC16
  * requests, never as one multi-register block. Observed once on gw-pi2
  * (2026-09-24): the single frame {@code E02D <- [4608, 5947]} read back as
- * E02D=5947, E02E=0 (both were 0 before). Interpretation: only the last word was
- * stored, at the start address. Single-register writes are known-good on this
- * unit. A half-updated window is harmless because the window is only ever
- * written while the enable register reads 0, and the enable is only raised after
- * both registers read back correctly.
+ * E02D=5947, E02E=0 (both were 0 before). Interpretation: only the last word
+ * was stored, at the start address. Single-register writes are known-good on
+ * this unit. A half-updated window is harmless because the window is only ever
+ * written while the enable register reads 0, and the enable is only raised
+ * after both registers read back correctly.
  *
- * <p>The whole operation is governed by one safety invariant: <b>the enable
+ * <p>
+ * The whole operation is governed by one safety invariant: <b>the enable
  * register must read 0 on the device whenever the window registers are
- * written</b>. So any change to a currently-armed window is sequenced as
- * disarm &rarr; verify-disabled &rarr; window write &rarr; verify-window
- * &rarr; re-arm. A live enabled window is never mutated in place; a failed or
+ * written</b>. So any change to a currently-armed window is sequenced as disarm
+ * &rarr; verify-disabled &rarr; window write &rarr; verify-window &rarr;
+ * re-arm. A live enabled window is never mutated in place; a failed or
  * mismatched write leaves the schedule disabled (the safe resting state) and is
- * never retried by this class itself; only an explicit {@link #reopen()} by the
- * caller (the discharge rules, see the component) starts a new attempt.
+ * never retried by this class itself; only an explicit {@link #reopen()} or
+ * {@link #retry()} by the caller (the discharge rules and the charge-window
+ * retry, see the component) starts a new attempt.
  *
- * <p>The desired end enable state is captured when a sequence starts and, for an
- * explicit {@code enable=0}/{@code 1}, refreshed from config at each later step of
- * that sequence; {@code enable=-1} (unmanaged) keeps whatever
- * the device read at the start, so a window change on an armed device is disarmed,
+ * <p>
+ * The desired end enable state is captured when a sequence starts and, for an
+ * explicit {@code enable=0}/{@code 1}, refreshed from config at each later step
+ * of that sequence; {@code enable=-1} (unmanaged) keeps whatever the device
+ * read at the start, so a window change on an armed device is disarmed,
  * rewritten and then restored to its original armed state. {@code enable=1}
- * requires a complete configured window; {@code enable} outside 0/1 is rejected.
+ * requires a complete configured window; {@code enable} outside 0/1 is
+ * rejected.
  *
- * <p>Cross-midnight windows (start &gt;= stop) are rejected: the SRNE encodes
- * time as hour*256+min with a maximum of 23:59 (5947) and no defined midnight
- * wrap, so "to midnight" must be expressed as 23:59.
+ * <p>
+ * Cross-midnight windows (start &gt;= stop) are rejected: the SRNE encodes time
+ * as hour*256+min with a maximum of 23:59 (5947) and no defined midnight wrap,
+ * so "to midnight" must be expressed as 23:59.
  *
- * <p>A fresh instance is created on every component activation, exactly like
+ * <p>
+ * A fresh instance is created on every component activation, exactly like
  * {@link SafeWriteHandler}.
  *
- * <p>Thread-safety: {@code reconcile} runs on the Edge cycle thread while
- * {@code onStartExecute}/{@code onStopExecute}/{@code onEnableExecute} and the {@code verify*}
- * callbacks run on the Modbus bridge worker thread. All mutable state is guarded
- * by intrinsic locking so transitions are atomic and visible across threads.
+ * <p>
+ * Thread-safety: {@code reconcile} runs on the Edge cycle thread while
+ * {@code onStartExecute}/{@code onStopExecute}/{@code onEnableExecute} and the
+ * {@code verify*} callbacks run on the Modbus bridge worker thread. All mutable
+ * state is guarded by intrinsic locking so transitions are atomic and visible
+ * across threads.
  */
 final class ScheduleWindow {
 
@@ -101,6 +110,13 @@ final class ScheduleWindow {
 	private boolean rejected;
 	private boolean queuedTimeout;
 	private boolean staleEnableExecutePending;
+	// Set by retry(): the next sequence may only start from an enable value that
+	// was read after the retry, never from a read taken before the failure. Sound
+	// only because verifyEnable() is called for actual bus reads (the enable
+	// channel's onSetNextValue in the component), never from the cached channel
+	// value each cycle; calling it per cycle would make this gate vacuous.
+	private boolean awaitingFreshEnable;
+	private Integer freshEnable;
 
 	ScheduleWindow(int startAddress, int enableAddress, String label) {
 		this.label = label;
@@ -112,8 +128,9 @@ final class ScheduleWindow {
 	/**
 	 * Enables or disables the bound on how long a write may stay queued. Off by
 	 * default: a write queued while the link is down then executes when it returns,
-	 * exactly as before the discharge rules existed. Only the rules-managed
-	 * discharge window turns it on, because only it is retried after a failure.
+	 * exactly as before the discharge rules existed. Only a window that is retried
+	 * after a failure turns it on (the rules-managed discharge window and the
+	 * explicitly enabled or disabled charge window).
 	 *
 	 * @param enabled true to fail and withdraw a write that stays queued too long
 	 */
@@ -153,8 +170,8 @@ final class ScheduleWindow {
 	}
 
 	/**
-	 * Drives the coherent window write forward by one reconcile step. Acts only from
-	 * the actionable states ({@code IDLE}, {@code DISABLE_VERIFIED},
+	 * Drives the coherent window write forward by one reconcile step. Acts only
+	 * from the actionable states ({@code IDLE}, {@code DISABLE_VERIFIED},
 	 * {@code WINDOW_VERIFIED}); all other states are transient or terminal and
 	 * ignored. Each step performs at most one register write and the whole
 	 * operation converges toward the desired (window, enable) end state while never
@@ -165,7 +182,8 @@ final class ScheduleWindow {
 	 * @param actualEnable the read-back enable register, or null if unknown
 	 * @param cfgStart     the configured start time, or -1 to leave unchanged
 	 * @param cfgStop      the configured stop time, or -1 to leave unchanged
-	 * @param cfgEnable    the configured enable flag (0/1), or -1 to leave unchanged
+	 * @param cfgEnable    the configured enable flag (0/1), or -1 to leave
+	 *                     unchanged
 	 * @return a one-shot audit message for the transition just made, or null
 	 */
 	public synchronized String reconcile(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart,
@@ -185,9 +203,10 @@ final class ScheduleWindow {
 		};
 	}
 
-	// A suppression that latches while the arm is queued but not yet executed turns it
-	// into a disarm (or nothing, if the device already reads 0). An arm the bridge has
-	// already picked up cannot be recalled; the caller's drift correction disarms it.
+	// A suppression that latches while the arm is queued but not yet executed turns
+	// it into a disarm (or nothing, if the device already reads 0). An arm the
+	// bridge has already picked up cannot be recalled; the caller's drift
+	// correction disarms it.
 	private String withdrawQueuedArm(Integer actualEnable, int cfgEnable) {
 		if (cfgEnable != 0 || !Integer.valueOf(1).equals(this.targetEnable)) {
 			return null;
@@ -196,8 +215,8 @@ final class ScheduleWindow {
 		// An already taken value means the bridge has the 1 in flight: its execute
 		// callback will still arrive and must not be taken for the disarm's.
 		var inFlight = this.enableWrite.getNextWriteValueAndReset() == null;
-		// Only a 1 the bridge never took is certainly gone; one in flight may still land
-		// on a device that reads 0 now, so the disarm is queued anyway.
+		// Only a 1 the bridge never took is certainly gone; one in flight may still
+		// land on a device that reads 0 now, so the disarm is queued anyway.
 		if (Integer.valueOf(0).equals(actualEnable) && !inFlight) {
 			this.state = State.DONE;
 			return "Withdrew queued [" + this.label + "] schedule enable=1; the target is now 0";
@@ -247,6 +266,15 @@ final class ScheduleWindow {
 		if (actualEnable == null || (windowManaged && (actualStart == null || actualStop == null))) {
 			return null;
 		}
+		// After a retry, wait until the enable has been read again and the cycle sees
+		// that read, so a pre-failure value can never let the window be written.
+		if (this.awaitingFreshEnable) {
+			if (this.freshEnable == null || !this.freshEnable.equals(actualEnable)) {
+				return null;
+			}
+			this.awaitingFreshEnable = false;
+			this.freshEnable = null;
+		}
 		// Capture the desired end enable state ONCE: an explicit 0/1 is the target;
 		// -1 (unmanaged) keeps whatever the device currently is, so a window change on
 		// an armed device is disarmed, rewritten and restored to armed.
@@ -254,9 +282,9 @@ final class ScheduleWindow {
 		return this.advance(actualStart, actualStop, actualEnable, cfgStart, cfgStop);
 	}
 
-	// Takes the single next convergence step toward the desired (window, enable) end
-	// state, enforcing the invariant that the window is written only while the device
-	// reads enable == 0.
+	// Takes the single next convergence step toward the desired (window, enable)
+	// end state, enforcing the invariant that the window is written only while the
+	// device reads enable == 0.
 	private String advance(Integer actualStart, Integer actualStop, Integer actualEnable, int cfgStart, int cfgStop) {
 		if (actualEnable == null) {
 			return null;
@@ -393,6 +421,9 @@ final class ScheduleWindow {
 		if (actual == null) {
 			return;
 		}
+		if (this.awaitingFreshEnable) {
+			this.freshEnable = actual;
+		}
 		switch (this.state) {
 		case DISABLE_AWAITING_READBACK ->
 			// disarm verified -> re-enter convergence (window write / re-arm / done)
@@ -407,8 +438,8 @@ final class ScheduleWindow {
 	/**
 	 * Advances the bounded waits without ever retrying a write. A read-back that
 	 * never arrives ends in {@code FAILED}; so does a queued write the bridge never
-	 * executes, but only if {@link #setQueuedTimeout(boolean)} is on, and it is then
-	 * withdrawn so it cannot fire late.
+	 * executes, but only if {@link #setQueuedTimeout(boolean)} is on, and it is
+	 * then withdrawn so it cannot fire late.
 	 *
 	 * @param timeoutCycles number of Edge cycles allowed for an execute or a fresh
 	 *                      read-back
@@ -450,9 +481,9 @@ final class ScheduleWindow {
 		if (this.state == State.ENABLE_QUEUED) {
 			return this.withdrawQueuedArm(actualEnable, 0);
 		}
-		// DISABLE_VERIFIED and WINDOW_VERIFIED are settled steps waiting for the verified
-		// machine state to continue the sequence; if the register drifted back to armed it
-		// is disarmed again, still without advancing any window write.
+		// DISABLE_VERIFIED and WINDOW_VERIFIED are settled steps waiting for the
+		// verified machine state to continue the sequence; if the register drifted back
+		// to armed it is disarmed again, still without advancing any window write.
 		if ((this.state != State.IDLE && !this.isSettledStep()) || actualEnable == null || actualEnable.equals(0)) {
 			return null;
 		}
@@ -498,6 +529,24 @@ final class ScheduleWindow {
 	}
 
 	/**
+	 * Re-opens a window that failed at runtime (never a configuration rejection),
+	 * like {@link #reopen()}, and holds the next sequence until the enable register
+	 * has been read again. The retried sequence therefore decides from a read taken
+	 * after the failure: the window is still only written while that read is 0.
+	 *
+	 * @return true if the failed window was re-opened
+	 */
+	public synchronized boolean retry() {
+		if (!this.isRetryableFailure()) {
+			return false;
+		}
+		this.reopen();
+		this.awaitingFreshEnable = true;
+		this.freshEnable = null;
+		return true;
+	}
+
+	/**
 	 * Whether the window is in a runtime failure that {@link #reopen()} can retry.
 	 *
 	 * @return true if failed but not because of a rejected configuration
@@ -538,10 +587,10 @@ final class ScheduleWindow {
 	}
 
 	/**
-	 * Whether (start, stop) is a valid within-day window: both valid times and start
-	 * strictly before stop. Cross-midnight (start &gt;= stop) is rejected because the
-	 * SRNE has no defined midnight wrap and cannot encode 24:00, so a window that
-	 * must run to midnight has to stop at 23:59.
+	 * Whether (start, stop) is a valid within-day window: both valid times and
+	 * start strictly before stop. Cross-midnight (start &gt;= stop) is rejected
+	 * because the SRNE has no defined midnight wrap and cannot encode 24:00, so a
+	 * window that must run to midnight has to stop at 23:59.
 	 *
 	 * @param start the encoded start time
 	 * @param stop  the encoded stop time

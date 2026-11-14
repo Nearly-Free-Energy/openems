@@ -8,6 +8,7 @@ import static org.osgi.service.component.annotations.ReferencePolicyOption.GREED
 import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -42,6 +43,7 @@ import io.openems.edge.bridge.modbus.api.element.SignedWordElement;
 import io.openems.edge.bridge.modbus.api.element.UnsignedWordElement;
 import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
 import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
+import io.openems.edge.common.channel.ChannelUtils;
 import io.openems.edge.common.channel.IntegerReadChannel;
 import io.openems.edge.common.channel.value.Value;
 import io.openems.edge.common.component.ComponentManager;
@@ -78,6 +80,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private static final int SUPPRESS_RETRY_COOLDOWN_CYCLES = 8;
 	private static final int MAX_FAST_SUPPRESS_RETRIES = 3;
 	private static final int MAX_RULE_SOC = 99;
+	// A failed charge-window write (runtime failure, never a rejected config) is
+	// retried with backoff: 60, 120, 240, then every 480 cycles, at most
+	// MAX_CHARGE_RETRIES_PER_DAY times per local day so a broken device is not
+	// hammered. The count resets at local midnight.
+	static final int MAX_CHARGE_RETRIES_PER_DAY = 6;
+	private static final int MAX_CHARGE_RETRY_BACKOFF_SHIFT = 3;
 	private final Logger log = LoggerFactory.getLogger(SrneBatteryInverterImpl.class);
 
 	private final AtomicReference<TargetGridMode> targetGridMode = new AtomicReference<>(TargetGridMode.GO_ON_GRID);
@@ -145,6 +153,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private boolean driftCorrectedUnsuppressed;
 	private int driftCooldown;
 	private boolean mismatchLogged;
+	private ScheduleWindow.State lastChargeWindowState;
+	private LocalDate chargeRetryDay;
+	private int chargeRetriesToday;
+	private int chargeFailedCycles;
+	private boolean chargeRetryCapLogged;
+	private int chargeEnableMismatchCycles;
+	private boolean chargeEnableMismatchLogged;
 	// One-shot audit flag: log at most once that the output-priority write is held
 	// pending its prerequisites (reconcile runs every cycle).
 	private boolean outputPriorityHeldLogged;
@@ -302,7 +317,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// JUSTIFICATION-A3: coherent-window read-back wiring for the TOU schedule
 	// feature (#67, PR #24). The window start/stop/enable each verify a distinct
 	// register of one ScheduleWindow, so a single indexed registerReadback cannot
-	// express it; this mirrors that helper for the three-register unit.
+	// express it; this mirrors that helper for the three-register unit. The verify*
+	// callbacks must stay on onSetNextValue (one call per actual bus read): the
+	// fresh-read gate of ScheduleWindow.retry() relies on it.
 	private void registerWindowReadback(ScheduleWindow window, SrneBatteryInverter.ChannelId startChannel,
 			SrneBatteryInverter.ChannelId stopChannel, SrneBatteryInverter.ChannelId enableChannel) {
 		((IntegerReadChannel) this.channel(startChannel)).onSetNextValue(value -> {
@@ -537,9 +554,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		for (var handler : this.writeHandlers) {
 			handler.onCycle(READBACK_TIMEOUT_CYCLES);
 		}
+		// A retried window may give up on a write that stays queued; the retry then
+		// queues it again. A window that is never retried keeps a queued write.
+		this.chargeWindow.setQueuedTimeout(this.chargeRetryApplies());
 		this.chargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
-		// Only the rules-managed discharge window is retried, so only it may give up on
-		// a write that stays queued; every other window behaves as without the rules.
+		this.monitorChargeWindow();
 		this.dischargeWindow.setQueuedTimeout(this.config != null && this.dischargeRulesApply());
 		this.dischargeWindow.onCycle(READBACK_TIMEOUT_CYCLES);
 		this.updateDischargeSuppression();
@@ -578,6 +597,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// Source transfer: the reserve band (E01F/E020), BMS mode (E215) and output
 		// priority (E204) are reconciled together as one coherent, validated operation.
 		this.reconcileSourceTransfer();
+		this.retryChargeWindow();
 		this.reconcileWindow(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
@@ -670,6 +690,109 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SAFE_VALUE_MISSING).setNextValue(true);
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_STATE).setNextValue(null);
 		this.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET).setNextValue(null);
+	}
+
+	/**
+	 * Whether the charge window is retried after a runtime failure: only with an
+	 * explicit enable target (0 or 1). With {@code -1} the end state is captured
+	 * from the device, and after a failed disarm that would be the 0 the failure
+	 * left behind, so a retry could not restore the original armed state.
+	 *
+	 * @return true if the charge window is retried
+	 */
+	private boolean chargeRetryApplies() {
+		return this.config != null && this.config.controlEnabled()
+				&& (this.config.chargeScheduleEnable() == 0 || this.config.chargeScheduleEnable() == 1);
+	}
+
+	/**
+	 * Publishes the charge-window state and warns when it needs attention: once on
+	 * each runtime failure (the bridge-side transitions to FAILED are otherwise
+	 * silent; the state named is the last one this cycle saw, which may not be the
+	 * one the bridge failed from), and once when the config wants the schedule
+	 * armed but the device has read 0 while the window made no progress for longer
+	 * than the timeout.
+	 */
+	private void monitorChargeWindow() {
+		var state = this.chargeWindow.getState();
+		var previous = this.lastChargeWindowState;
+		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.CHARGE_WINDOW_STATE, state);
+		if (state == ScheduleWindow.State.FAILED && previous != ScheduleWindow.State.FAILED
+				&& this.chargeWindow.isRetryableFailure()) {
+			this.logWarn(this.log,
+					"Charge schedule write FAILED (last state seen by the cycle [" + previous + "]); device enable ["
+							+ this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE) + "], window ["
+							+ this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START) + ","
+							+ this.readValue(SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP) + "]"
+							+ (this.chargeRetryApplies() ? "; will retry" : "; not retried (chargeScheduleEnable=-1)"));
+		}
+		this.lastChargeWindowState = state;
+
+		var wantsArmed = this.config != null && this.config.controlEnabled() && this.config.chargeScheduleEnable() == 1;
+		var deviceDisarmed = Integer.valueOf(0)
+				.equals(this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE));
+		if (!wantsArmed || !deviceDisarmed) {
+			this.chargeEnableMismatchCycles = 0;
+			this.chargeEnableMismatchLogged = false;
+			return;
+		}
+		// A healthy sequence changes state at least once per read-back; only a window
+		// that sits in one state while disarmed counts.
+		if (state != previous) {
+			this.chargeEnableMismatchCycles = 0;
+			return;
+		}
+		if (++this.chargeEnableMismatchCycles > READBACK_TIMEOUT_CYCLES && !this.chargeEnableMismatchLogged) {
+			this.chargeEnableMismatchLogged = true;
+			this.logWarn(this.log, "Charge schedule is configured enabled but the device reads enable=0 for more than "
+					+ READBACK_TIMEOUT_CYCLES + " cycles; charge window state [" + state + "]");
+		}
+	}
+
+	/**
+	 * Retries a charge window that failed at runtime, with backoff and a daily cap.
+	 * The retry only re-opens the window; the next sequence still writes the window
+	 * registers only while the enable reads 0 (from a read taken after the retry)
+	 * and arms only after the window reads back correctly.
+	 */
+	private void retryChargeWindow() {
+		if (!this.chargeRetryApplies() || !this.chargeWindow.isRetryableFailure()) {
+			this.chargeFailedCycles = 0;
+			return;
+		}
+		var today = LocalDate.now(this.clock().withZone(this.scheduleZone));
+		if (!today.equals(this.chargeRetryDay)) {
+			this.chargeRetryDay = today;
+			this.chargeRetriesToday = 0;
+			this.chargeRetryCapLogged = false;
+		}
+		if (this.chargeRetriesToday >= MAX_CHARGE_RETRIES_PER_DAY) {
+			if (!this.chargeRetryCapLogged) {
+				this.chargeRetryCapLogged = true;
+				this.logWarn(this.log, "Charge schedule write still FAILED after " + MAX_CHARGE_RETRIES_PER_DAY
+						+ " retries today; no further retry before local midnight");
+			}
+			return;
+		}
+		if (++this.chargeFailedCycles < chargeRetryCooldownCycles(this.chargeRetriesToday)) {
+			return;
+		}
+		if (this.chargeWindow.retry()) {
+			this.chargeFailedCycles = 0;
+			this.chargeRetriesToday++;
+			this.logWarn(this.log, "Retrying failed charge schedule write (" + this.chargeRetriesToday + " of "
+					+ MAX_CHARGE_RETRIES_PER_DAY + " today)");
+		}
+	}
+
+	/**
+	 * Cycles to wait in FAILED before the next charge-window retry.
+	 *
+	 * @param retriesSoFar retries already made today
+	 * @return the cooldown in cycles
+	 */
+	static int chargeRetryCooldownCycles(int retriesSoFar) {
+		return FAILED_RETRY_COOLDOWN_CYCLES << Math.min(retriesSoFar, MAX_CHARGE_RETRY_BACKOFF_SHIFT);
 	}
 
 	/**
@@ -1304,6 +1427,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	boolean driftCorrectedUnsuppressedForTest() {
 		return this.driftCorrectedUnsuppressed;
+	}
+
+	int chargeRetriesTodayForTest() {
+		return this.chargeRetriesToday;
 	}
 
 	ScheduleWindow chargeWindowForTest() {
