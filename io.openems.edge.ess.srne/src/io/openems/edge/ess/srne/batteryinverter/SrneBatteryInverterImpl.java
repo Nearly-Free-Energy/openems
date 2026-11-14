@@ -206,7 +206,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 				config.eveningPriority(), config.eveningStart(), config.daytimeStart(), config.outputPriority(),
 				config.daytimeSbuAboveSoc(), config.daytimeSbuBelowSoc(), config.minDwellMinutes(),
 				config.gridPresentMinVoltage(), config.eveningReserveSoc(), config.eveningReserveFrom(),
-				config.eveningReserveHold());
+				config.eveningReserveHold(), config.daytimeSocRuleFrom());
 		if (this.modeSchedule.getInvalidReason() != null) {
 			this.logError(this.log,
 					"Invalid mode schedule: " + this.modeSchedule.getInvalidReason() + "; the schedule stays off");

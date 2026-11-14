@@ -43,6 +43,7 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private int gridPresentMinVoltage = -1;
 		private int eveningReserveSoc = -1;
 		private String eveningReserveFrom = "14:00";
+		private String daytimeSocRuleFrom = "";
 		private boolean eveningReserveHold = false;
 		private int nightChargeStopSoc = -1;
 		private boolean chargePrioritySchedule = false;
@@ -215,6 +216,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setEveningReserveFrom(String value) {
 			this.eveningReserveFrom = value;
+			return this;
+		}
+
+		public Builder setDaytimeSocRuleFrom(String value) {
+			this.daytimeSocRuleFrom = value;
 			return this;
 		}
 
@@ -460,6 +466,11 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public String eveningReserveFrom() {
 		return this.builder.eveningReserveFrom;
+	}
+
+	@Override
+	public String daytimeSocRuleFrom() {
+		return this.builder.daytimeSocRuleFrom;
 	}
 
 	@Override
