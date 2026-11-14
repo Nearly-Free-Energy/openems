@@ -15,11 +15,13 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 /**
  * Daily output-priority schedule for E204 (0 SOL, 1 UTI, 2 SBU, 3 SUB).
  *
- * <p>The evening priority applies from {@code eveningStart} (inclusive) until
+ * <p>
+ * The evening priority applies from {@code eveningStart} (inclusive) until
  * {@code daytimeStart} (exclusive), crossing midnight when needed; the daytime
  * priority applies the rest of the day.
  *
- * <p>Optional daytime SoC rule ({@code daytimeSbuAboveSoc} /
+ * <p>
+ * Optional daytime SoC rule ({@code daytimeSbuAboveSoc} /
  * {@code daytimeSbuBelowSoc}): in the daytime window the target becomes the
  * evening priority (SBU) once SoC is at or above the upper threshold, and the
  * daytime priority (SUB) again once SoC is below the lower one (hysteresis,
@@ -27,10 +29,12 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * the battery is nearly full, so a full battery should run SBU. An unreadable
  * SoC keeps the current target. The evening window is unchanged.
  *
- * <p>Writes go through a {@link SafeWriteHandler} (one per write: a handler is
+ * <p>
+ * Writes go through a {@link SafeWriteHandler} (one per write: a handler is
  * one-shot), so each write is read-back verified.
  *
- * <p>Fail-safe:
+ * <p>
+ * Fail-safe:
  * <ul>
  * <li>nothing is written while the SoC, E204 or the local time is unknown; the
  * time counts as known only once it is plausible (see
@@ -41,8 +45,8 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * has not taken it yet ({@link GuardedWordElement}), otherwise it stays in
  * flight and counts as an attempt,</li>
  * <li>no write in the first {@link #STARTUP_HOLD_CYCLES} cycles after
- * activation, so a crash/restart loop cannot spend more than one write per
- * hold period,</li>
+ * activation, so a crash/restart loop cannot spend more than one write per hold
+ * period,</li>
  * <li>SBU is written only when the caller confirms the SBU preconditions (the
  * same reserve-band / BMS checks as a static outputPriority arm); SUB needs
  * none,</li>
@@ -64,8 +68,9 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * <li>an invalid configuration turns the schedule off.</li>
  * </ul>
  *
- * <p>Thread-safety: {@link #step} and {@link #plausibleTime} run on the Edge
- * cycle thread; {@link #onExecute} and {@link #verify} run on the Modbus bridge
+ * <p>
+ * Thread-safety: {@link #step} and {@link #plausibleTime} run on the Edge cycle
+ * thread; {@link #onExecute} and {@link #verify} run on the Modbus bridge
  * thread and only touch the (synchronized) current handler.
  */
 final class ModeSchedule {
@@ -103,22 +108,15 @@ final class ModeSchedule {
 	static final String DEFAULT_EVENING_RESERVE_FROM = "14:00";
 	/** Cycles after activation without any schedule write (about 5 minutes). */
 	static final int STARTUP_HOLD_CYCLES = 300;
+	/** Earliest plausible wall-clock time, see {@link ClockGate}. */
+	static final Instant MIN_PLAUSIBLE_TIME = ClockGate.MIN_PLAUSIBLE_TIME;
 	/**
-	 * Earliest plausible wall-clock time (build-time floor). gw-pi2 has no RTC: a
-	 * time before this is an unset clock.
+	 * Steady clock cycles needed before the time is used, see {@link ClockGate}.
 	 */
-	static final Instant MIN_PLAUSIBLE_TIME = Instant.parse("2026-11-01T00:00:00Z");
-	/**
-	 * Cycles the clock must run steadily (no backward step, no forward jump of
-	 * more than {@link DischargeGuard#CLOCK_STEP_MINUTES} minutes) after start or
-	 * after a step before its time is used. An NTP correction after a reboot is
-	 * such a step and restarts the count.
-	 */
-	static final int CLOCK_SETTLE_CYCLES = 60;
+	static final int CLOCK_SETTLE_CYCLES = ClockGate.CLOCK_SETTLE_CYCLES;
 
 	private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm")
 			.withResolverStyle(ResolverStyle.STRICT);
-	private static final Duration MAX_CLOCK_STEP = Duration.ofMinutes(DischargeGuard.CLOCK_STEP_MINUTES);
 
 	/**
 	 * One evaluation result.
@@ -176,8 +174,7 @@ final class ModeSchedule {
 	private volatile int gridAboveL3;
 	private int cycles;
 	private LocalTime lastNow;
-	private Instant lastInstant;
-	private int steadyClockCycles;
+	private final ClockGate clockGate = new ClockGate();
 
 	private ModeSchedule(boolean enabled, String invalidReason, int daytimePriority, int eveningPriority,
 			LocalTime eveningStart, LocalTime daytimeStart, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
@@ -208,8 +205,8 @@ final class ModeSchedule {
 	 */
 	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
 			String daytimeStart, int staticOutputPriority) {
-		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart,
-				staticOutputPriority, -1, -1, DEFAULT_MIN_DWELL_MINUTES);
+		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart, staticOutputPriority,
+				-1, -1, DEFAULT_MIN_DWELL_MINUTES);
 	}
 
 	/**
@@ -229,8 +226,8 @@ final class ModeSchedule {
 	 */
 	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
 			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes) {
-		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart,
-				staticOutputPriority, sbuAboveSoc, sbuBelowSoc, minDwellMinutes, DEFAULT_GRID_PRESENT_MIN_VOLTAGE);
+		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart, staticOutputPriority,
+				sbuAboveSoc, sbuBelowSoc, minDwellMinutes, DEFAULT_GRID_PRESENT_MIN_VOLTAGE);
 	}
 
 	/**
@@ -254,9 +251,8 @@ final class ModeSchedule {
 	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
 			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
 			int gridPresentMinVoltage) {
-		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart,
-				staticOutputPriority, sbuAboveSoc, sbuBelowSoc, minDwellMinutes, gridPresentMinVoltage, -1,
-				DEFAULT_EVENING_RESERVE_FROM);
+		return fromConfig(enabled, daytimePriority, eveningPriority, eveningStart, daytimeStart, staticOutputPriority,
+				sbuAboveSoc, sbuBelowSoc, minDwellMinutes, gridPresentMinVoltage, -1, DEFAULT_EVENING_RESERVE_FROM);
 	}
 
 	/**
@@ -273,11 +269,11 @@ final class ModeSchedule {
 	 * @param sbuAboveSoc           daytimeSbuAboveSoc (-1 = SoC rule off)
 	 * @param sbuBelowSoc           daytimeSbuBelowSoc (-1 = SoC rule off)
 	 * @param minDwellMinutes       minimum dwell after a verified switch
-	 * @param gridPresentMinVoltage grid voltage (V) for a SUB write on battery;
-	 *                              -1 = SUB writes only in state 2
+	 * @param gridPresentMinVoltage grid voltage (V) for a SUB write on battery; -1
+	 *                              = SUB writes only in state 2
 	 * @param eveningReserveSoc     eveningReserveSoc (-1 = off, else 20..100)
-	 * @param eveningReserveFrom    "HH:MM" start of the reserve window, which
-	 *                              ends at eveningStart
+	 * @param eveningReserveFrom    "HH:MM" start of the reserve window, which ends
+	 *                              at eveningStart
 	 * @return the schedule; check {@link #getInvalidReason()}
 	 */
 	static ModeSchedule fromConfig(boolean enabled, int daytimePriority, int eveningPriority, String eveningStart,
@@ -307,8 +303,8 @@ final class ModeSchedule {
 			String daytimeStart, int staticOutputPriority, int sbuAboveSoc, int sbuBelowSoc, int minDwellMinutes,
 			int gridPresentMinVoltage) {
 		if (!enabled) {
-			return new ModeSchedule(false, null, daytimePriority, eveningPriority, null, null, -1, -1,
-					minDwellMinutes, -1);
+			return new ModeSchedule(false, null, daytimePriority, eveningPriority, null, null, -1, -1, minDwellMinutes,
+					-1);
 		}
 		var evening = parseTime(eveningStart);
 		var daytime = parseTime(daytimeStart);
@@ -482,33 +478,15 @@ final class ModeSchedule {
 	}
 
 	/**
-	 * Whether the local time moved forward across a boundary since the last
-	 * cycle, in a step no larger than the clock-step limit.
+	 * Whether the local time moved forward across a boundary since the last cycle,
+	 * in a step no larger than the clock-step limit.
 	 *
 	 * @param previous the previous local time, or null
 	 * @param now      the current local time
 	 * @return true on a forward boundary crossing
 	 */
 	boolean crossedBoundaryForward(LocalTime previous, LocalTime now) {
-		if (previous == null) {
-			return false;
-		}
-		var step = forwardNanos(previous, now);
-		if (step == 0 || step > MAX_CLOCK_STEP.toNanos()) {
-			return false;
-		}
-		for (var boundary : new LocalTime[] { this.eveningStart, this.daytimeStart }) {
-			var toBoundary = forwardNanos(previous, boundary);
-			if (toBoundary > 0 && toBoundary <= step) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private static long forwardNanos(LocalTime from, LocalTime to) {
-		var day = Duration.ofDays(1).toNanos();
-		return ((to.toNanoOfDay() - from.toNanoOfDay()) % day + day) % day;
+		return ClockGate.crossedForward(previous, now, this.eveningStart, this.daytimeStart);
 	}
 
 	/**
@@ -521,24 +499,7 @@ final class ModeSchedule {
 	 * @return the plausible local date-time, or null
 	 */
 	LocalDateTime plausibleTime(Instant instant, ZoneId zone) {
-		if (instant == null || instant.isBefore(MIN_PLAUSIBLE_TIME)) {
-			this.lastInstant = null;
-			this.steadyClockCycles = 0;
-			return null;
-		}
-		if (this.lastInstant != null) {
-			var delta = Duration.between(this.lastInstant, instant);
-			if (delta.isNegative() || delta.compareTo(MAX_CLOCK_STEP) > 0) {
-				this.steadyClockCycles = 0;
-			} else if (this.steadyClockCycles < CLOCK_SETTLE_CYCLES) {
-				this.steadyClockCycles++;
-			}
-		}
-		this.lastInstant = instant;
-		if (this.steadyClockCycles < CLOCK_SETTLE_CYCLES) {
-			return null;
-		}
-		return LocalDateTime.ofInstant(instant, zone);
+		return this.clockGate.plausibleTime(instant, zone);
 	}
 
 	/**
@@ -581,14 +542,15 @@ final class ModeSchedule {
 	}
 
 	/**
-	 * The target for this cycle, applying the daytime SoC rule (with hysteresis)
-	 * on top of the window. Updates {@link #reason()}.
+	 * The target for this cycle, applying the daytime SoC rule (with hysteresis) on
+	 * top of the window. Updates {@link #reason()}.
 	 *
-	 * <p>The hysteresis state is not persisted, so after an activation in the
-	 * daytime it is seeded once from the device: a device already in the evening
-	 * priority (SBU) with SoC at or above the lower threshold stays high, otherwise
-	 * the upper threshold decides. A restart in the band therefore never writes
-	 * SUB over a running SBU.
+	 * <p>
+	 * The hysteresis state is not persisted, so after an activation in the daytime
+	 * it is seeded once from the device: a device already in the evening priority
+	 * (SBU) with SoC at or above the lower threshold stays high, otherwise the
+	 * upper threshold decides. A restart in the band therefore never writes SUB
+	 * over a running SBU.
 	 *
 	 * @param now            the local date-time, or null if unknown
 	 * @param soc            the battery SoC, or null if unreadable
@@ -617,8 +579,8 @@ final class ModeSchedule {
 			this.reserveActive = soc < this.eveningReserveSoc;
 		}
 		if (this.reserveActive) {
-			// Evening reserve: the daytime priority, so the sun charges the battery for
-			// the peak. The SoC rule has to reach its upper threshold again afterwards.
+			// Evening reserve: the daytime priority, so the sun charges the battery for the
+			// peak. The SoC rule has to reach its upper threshold again afterwards.
 			this.highSoc = false;
 			this.socStateSeeded = true;
 			this.reason = ModeScheduleReason.EVENING_RESERVE;
@@ -646,21 +608,19 @@ final class ModeSchedule {
 
 	/**
 	 * Evaluates one cycle. A write is armed on {@link #writeElement()} here; the
-	 * returned write is informational. The outcome of a write reaches this
-	 * schedule through {@link #onExecute} and {@link #verify}.
+	 * returned write is informational. The outcome of a write reaches this schedule
+	 * through {@link #onExecute} and {@link #verify}.
 	 *
 	 * @param now             plausible local date-time, or null if unknown
 	 * @param soc             battery SoC, or null if unreadable
 	 * @param outputPriority  E204 read-back, or null if unreadable
 	 * @param controlEnabled  the settings-write safety gate
 	 * @param mains           whether the verified machine-state gate holds now;
-	 *                        fresh reads are counted by
-	 *                        {@link #onMachineStateRead}
-	 * @param sbuAllowed      whether the SBU preconditions (reserve band, BMS)
-	 *                        are met
+	 *                        fresh reads are counted by {@link #onMachineStateRead}
+	 * @param sbuAllowed      whether the SBU preconditions (reserve band, BMS) are
+	 *                        met
 	 * @param readbackTimeout cycles allowed for a fresh read-back
-	 * @param cooldown        base cycles to wait after a failed or overridden
-	 *                        write
+	 * @param cooldown        base cycles to wait after a failed or overridden write
 	 * @return the result for this cycle
 	 */
 	Step step(LocalDateTime now, Integer soc, Integer outputPriority, boolean controlEnabled, boolean mains,
@@ -712,15 +672,14 @@ final class ModeSchedule {
 			this.handler = null;
 			return new Step(ModeScheduleState.WAITING_FOR_MAINS, target, null, true);
 		}
-		if (handlerState == SafeWriteHandler.State.QUEUED
-				&& (target == null || !target.equals(this.handlerTarget)) && this.writeElement.withdraw()) {
+		if (handlerState == SafeWriteHandler.State.QUEUED && (target == null || !target.equals(this.handlerTarget))
+				&& this.writeElement.withdraw()) {
 			// The time became unknown or the target changed before the bridge took the
 			// write: withdraw it and evaluate the current target in this cycle.
 			this.handler = null;
 			handlerState = null;
 		}
-		if (handlerState == SafeWriteHandler.State.QUEUED
-				|| handlerState == SafeWriteHandler.State.AWAITING_READBACK) {
+		if (handlerState == SafeWriteHandler.State.QUEUED || handlerState == SafeWriteHandler.State.AWAITING_READBACK) {
 			return new Step(ModeScheduleState.WRITE_PENDING, target, null);
 		}
 		if (target == null) {
@@ -735,8 +694,8 @@ final class ModeSchedule {
 			return new Step(ModeScheduleState.WAITING_FOR_DATA, target, null);
 		}
 		if (outputPriority.intValue() == target.intValue()) {
-			// The last handler is kept, so the cooldown still limits a re-correction if
-			// the device is overridden again right after.
+			// The last handler is kept, so the cooldown still limits a re-correction if the
+			// device is overridden again right after.
 			return new Step(ModeScheduleState.IN_SYNC, target, null);
 		}
 		if (this.failures >= MAX_ATTEMPTS) {
@@ -827,8 +786,8 @@ final class ModeSchedule {
 
 	// The minimum dwell applies to SoC-driven switches only; the window switches at
 	// the boundaries happen on time. Before the first verified switch it runs from
-	// the activation, so a restart loop cannot switch faster than the dwell. A clock
-	// that moved backwards never holds.
+	// the activation, so a restart loop cannot switch faster than the dwell. A
+	// clock that moved backwards never holds.
 	private boolean isDwelling(LocalDateTime now, Integer target) {
 		if (this.reason == ModeScheduleReason.WINDOW) {
 			return false;

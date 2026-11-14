@@ -60,8 +60,8 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Maximum charge-current limit", description = "Target for E20A in amperes; -1 leaves unchanged.")
 	int maxChargeCurrentLimit() default -1;
 
-	// Output priority (source transfer) and BMS-comms enable. Raw mode numbers. E204:
-	// 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual; confirmed on gw-pi2 v29,
+	// Output priority (source transfer) and BMS-comms enable. Raw mode numbers.
+	// E204: 0 SOL, 1 UTI, 2 SBU, 3 SUB (SRNE manual; confirmed on gw-pi2 v29,
 	// microgrid-gateway #97, 4 Nov 2026). -1 leaves unchanged. See #71.
 	@AttributeDefinition(name = "Output priority mode", description = "Raw target for E204 (source transfer): 0 SOL, 1 UTI, 2 SBU, 3 SUB; -1 leaves unchanged. Must be -1 when the daily mode schedule is enabled (one owner of E204), otherwise the schedule reports CONFIG_INVALID and stays off.")
 	int outputPriority() default -1;
@@ -79,9 +79,9 @@ import io.openems.edge.ess.srne.SrneConstants;
 	int chargeWindow1Stop() default -1;
 
 	// Timed-charge stop SoC for charge window 1 (E03B, protocol V1.94+). The night
-	// charge in window 1 stops once the battery reaches this SoC, so a wide off-peak
-	// window (e.g. 00:00-06:00) charges in whatever minutes the grid is present.
-	// -1 leaves the register unmanaged (and unread). Valid 10..100.
+	// charge in window 1 stops once the battery reaches this SoC, so a wide
+	// off-peak window (e.g. 00:00-06:00) charges in whatever minutes the grid is
+	// present. -1 leaves the register unmanaged (and unread). Valid 10..100.
 	@AttributeDefinition(name = "Charge window 1 stop SoC", description = "Target for E03B (timed-charge stop SoC of charge window 1) in percent; range 10..100; -1 leaves unchanged and does not read the register.")
 	int chargeWindow1StopSoc() default -1;
 
@@ -93,7 +93,8 @@ import io.openems.edge.ess.srne.SrneConstants;
 
 	// Schedule enable flags. Written last, only after the matching window pair is
 	// read-back verified, so a mis-set window can never leave a schedule armed. 0
-	// disables, 1 enables, -1 leaves unchanged. enable=1 requires a configured window.
+	// disables, 1 enables, -1 leaves unchanged. enable=1 requires a configured
+	// window.
 	@AttributeDefinition(name = "Charge schedule enable", description = "Target for E02C; enables the charge time-schedule; leave unchanged by default.", options = {
 			@Option(label = "Leave unchanged", value = "-1"), //
 			@Option(label = "Disabled", value = "0"), //
@@ -137,9 +138,9 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Daytime start", description = "Local time HH:MM when the daytime output priority starts; must differ from eveningStart.")
 	String daytimeStart() default "00:30";
 
-	// Daytime SoC rule: in SUB the SRNE curtails PV once the battery is nearly full,
-	// so the daytime target becomes SBU above an upper SoC and SUB again below a
-	// lower one (hysteresis). Both -1 = off (default).
+	// Daytime SoC rule: in SUB the SRNE curtails PV once the battery is nearly
+	// full, so the daytime target becomes SBU above an upper SoC and SUB again
+	// below a lower one (hysteresis). Both -1 = off (default).
 	@AttributeDefinition(name = "Daytime SBU above SoC", description = "In the daytime window, switch to the evening priority (SBU) once SoC is at or above this percent; 10..100 and above daytimeSbuBelowSoc; -1 = off (set both or neither).")
 	int daytimeSbuAboveSoc() default -1;
 
@@ -152,16 +153,49 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Grid present min voltage", description = "Mode schedule: a SUB write (back to the grid) is also allowed while the unit runs on battery (machine state 3) if the grid-input voltage is above this on all three phases for 3 fresh reads; 100..260 V (e.g. 180). Default -1 = off: SUB writes only in state 2 and no grid-voltage reads. Enable only after one supervised live state-3 SUB write. SBU writes always need state 2.")
 	int gridPresentMinVoltage() default -1;
 
-	// Evening reserve: from eveningReserveFrom until eveningStart, while SoC is below
-	// eveningReserveSoc the daytime target is the daytime priority (SUB), overriding
-	// the daytime SoC rule, so the sun charges the battery for the peak. -1 = off.
+	// Evening reserve: from eveningReserveFrom until eveningStart, while SoC is
+	// below eveningReserveSoc the daytime target is the daytime priority (SUB),
+	// overriding the daytime SoC rule, so the sun charges the battery for the peak.
+	// -1 = off.
 	@AttributeDefinition(name = "Evening reserve SoC", description = "Mode schedule: from eveningReserveFrom until eveningStart, while SoC is below this percent the target is the daytime priority (SUB), overriding the daytime SBU rule; 20..100; -1 = off.")
 	int eveningReserveSoc() default -1;
 
 	@AttributeDefinition(name = "Evening reserve from", description = "Local time HH:MM (schedule time zone) when the evening-reserve window starts; it ends at eveningStart and must lie in the daytime window.")
 	String eveningReserveFrom() default "14:00";
 
-	@AttributeDefinition(name = "Schedule time zone", description = "Time zone used to evaluate the discharge window and the mode schedule against the edge clock.")
+	// Charge-priority schedule (E20F: 0 PV preferred, 1 mains preferred, 2 hybrid,
+	// 3 PV only). Decision D138: the grid may charge the battery only inside the
+	// night window. Night value from nightChargeFrom until nightChargeTo, day value
+	// otherwise. Writes are read-back verified and need controlEnabled; the night
+	// value needs machine state 2 (mains), the day value also goes out on battery
+	// (state 3). Off by default.
+	@AttributeDefinition(name = "Charge-priority schedule", description = "Switch E20F (charge priority) between a night and a day value every day, so the grid charges the battery only in the night window. Needs controlEnabled. Off by default. Needs chargePriorityRestoreWhenOff=true. An invalid configuration holds E20F at 3 (PV only); turning the schedule off holds it at 3 too; removing the component leaves the last value.")
+	boolean chargePrioritySchedule() default false;
+
+	@AttributeDefinition(name = "Charge-priority restore when off", description = "Required true while chargePrioritySchedule is true (otherwise the schedule is CONFIG_INVALID and holds E20F at 3). While the schedule is false, hold E20F at 3 (PV only), so turning the schedule off in the night window cannot leave the night value. False with the schedule off (the default) neither reads nor writes E20F.")
+	boolean chargePriorityRestoreWhenOff() default false;
+
+	@AttributeDefinition(name = "Night charge priority", description = "E20F value from nightChargeFrom to nightChargeTo: 0 PV preferred, 1 mains preferred, 2 hybrid (mains and PV, PV preferred), 3 PV only. Must differ from the day value.", options = {
+			@Option(label = "PV preferred", value = "0"), //
+			@Option(label = "Mains preferred", value = "1"), //
+			@Option(label = "Hybrid", value = "2"), //
+			@Option(label = "PV only", value = "3") })
+	int nightChargePriority() default 2;
+
+	@AttributeDefinition(name = "Day charge priority", description = "E20F value outside the night window; must be 3 = PV only (mains does not charge the battery), otherwise the schedule is CONFIG_INVALID. Written as the safe direction: also on battery (state 3), never latched, and used when the clock stays unknown.", options = {
+			@Option(label = "PV preferred", value = "0"), //
+			@Option(label = "Mains preferred", value = "1"), //
+			@Option(label = "Hybrid", value = "2"), //
+			@Option(label = "PV only", value = "3") })
+	int dayChargePriority() default 3;
+
+	@AttributeDefinition(name = "Night charge from", description = "Local time HH:MM (schedule time zone) when the night charge priority starts; at least 5 minutes before the charge window 1 start (e.g. 00:00 with the timer at 00:05).")
+	String nightChargeFrom() default "00:00";
+
+	@AttributeDefinition(name = "Night charge to", description = "Local time HH:MM (schedule time zone) when the day charge priority starts again; should be at or after the charge window 1 stop; must differ from nightChargeFrom.")
+	String nightChargeTo() default "06:00";
+
+	@AttributeDefinition(name = "Schedule time zone", description = "Time zone used to evaluate the discharge window, the mode schedule and the charge-priority schedule against the edge clock.")
 	String scheduleTimeZone() default "Africa/Kampala";
 
 	String webconsole_configurationFactory_nameHint() default "SRNE Battery-Inverter [{id}]";
