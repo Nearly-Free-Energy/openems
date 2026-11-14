@@ -85,6 +85,12 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Charge window 1 stop SoC", description = "Target for E03B (timed-charge stop SoC of charge window 1) in percent; range 10..100; -1 leaves unchanged and does not read the register.")
 	int chargeWindow1StopSoc() default -1;
 
+	// E03B does not end the timed charge on the ASP48120SH3 (gw-pi2, 13 Nov 2026),
+	// so the driver ends it by disarming the charge schedule (E02C) inside the
+	// window and re-arms it after the window. -1 = off.
+	@AttributeDefinition(name = "Night charge stop SoC", description = "End the timed grid charge of charge window 1 once the battery SoC is at or above this percent (3 fresh reads): the charge schedule (E02C) is disarmed for the rest of that window and re-armed 15 minutes after the window stop time. Needs controlEnabled, chargeScheduleEnable=1 and charge window 1; range 10..100; -1 = off.")
+	int nightChargeStopSoc() default -1;
+
 	@AttributeDefinition(name = "Discharge window 1 start", description = "Target for E02D, encoded hour*256+min; -1 leaves unchanged.")
 	int dischargeWindow1Start() default -1;
 
@@ -162,6 +168,9 @@ import io.openems.edge.ess.srne.SrneConstants;
 
 	@AttributeDefinition(name = "Evening reserve from", description = "Local time HH:MM (schedule time zone) when the evening-reserve window starts; it ends at eveningStart and must lie in the daytime window.")
 	String eveningReserveFrom() default "14:00";
+
+	@AttributeDefinition(name = "Evening reserve hold", description = "Mode schedule: once SoC reaches eveningReserveSoc in the reserve window, keep the daytime priority (SUB: houses on the grid, the sun still charges) until eveningStart instead of returning to the daytime SBU rule. Needs eveningReserveSoc; off by default.")
+	boolean eveningReserveHold() default false;
 
 	// Charge-priority schedule (E20F: 0 PV preferred, 1 mains preferred, 2 hybrid,
 	// 3 PV only). Decision D138: the grid may charge the battery only inside the

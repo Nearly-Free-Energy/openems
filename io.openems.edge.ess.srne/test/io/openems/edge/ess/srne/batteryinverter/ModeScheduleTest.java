@@ -22,8 +22,8 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 /**
  * Pure tests of the daily output-priority schedule: the time windows, the
  * configuration validation, the clock gate and the guarded write decisions. The
- * production defaults are SUB (3) from 00:30 to 18:00 and SBU (2) from 18:00
- * to 00:30.
+ * production defaults are SUB (3) from 00:30 to 18:00 and SBU (2) from 18:00 to
+ * 00:30.
  */
 public class ModeScheduleTest {
 
@@ -55,8 +55,7 @@ public class ModeScheduleTest {
 	}
 
 	// One cycle with one fresh machine-state read.
-	private static ModeSchedule.Step step(ModeSchedule sut, LocalTime now, Integer soc, Integer e204,
-			boolean mains) {
+	private static ModeSchedule.Step step(ModeSchedule sut, LocalTime now, Integer soc, Integer e204, boolean mains) {
 		sut.onMachineStateRead(mains);
 		return sut.step(at(now), soc, e204, true, mains, true, TIMEOUT, COOLDOWN);
 	}
@@ -113,7 +112,8 @@ public class ModeScheduleTest {
 		assertNull(ModeSchedule.fromConfig(true, SUB, SBU, " 18:00 ", "00:30", -1).getInvalidReason());
 		// The two times must differ.
 		assertNotNull(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "18:00", -1).getInvalidReason());
-		// One owner of E204: a static outputPriority target conflicts with the schedule.
+		// One owner of E204: a static outputPriority target conflicts with the
+		// schedule.
 		var conflict = ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", SBU);
 		assertNotNull(conflict.getInvalidReason());
 		assertFalse(conflict.isActive());
@@ -307,7 +307,8 @@ public class ModeScheduleTest {
 	public void testFrameUsesTheArmedValue() {
 		var element = new GuardedWordElement(0xE204);
 		element.arm(SUB);
-		// Whatever value the bridge read outside the lock, the frame carries the armed one.
+		// Whatever value the bridge read outside the lock, the frame carries the armed
+		// one.
 		var raw = element.valueToRaw(SBU);
 		assertEquals(1, raw.length);
 		assertEquals(SUB, raw[0].getValue());
@@ -615,8 +616,7 @@ public class ModeScheduleTest {
 		assertEquals(SBU, socStep(sut, t, 96, SUB, true).target());
 		verified(sut, t, SBU, 96);
 		for (var soc : new Integer[] { null, -1, 101 }) {
-			assertStep(socStep(sut, t.plusMinutes(30), soc, SUB, true), ModeScheduleState.WAITING_FOR_DATA, SBU,
-					null);
+			assertStep(socStep(sut, t.plusMinutes(30), soc, SUB, true), ModeScheduleState.WAITING_FOR_DATA, SBU, null);
 			assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
 		}
 	}
@@ -745,8 +745,9 @@ public class ModeScheduleTest {
 		assertStep(socStep(sut, t.plusMinutes(10), 96, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 	}
 
-	// A device that reverts E204 to `other` right after every verified write. Returns
-	// the cycle index of each write made in `cycles` cycles at a fixed time.
+	// A device that reverts E204 to `other` right after every verified write.
+	// Returns the cycle index of each write made in `cycles` cycles at a fixed
+	// time.
 	private static List<Integer> fight(ModeSchedule sut, LocalTime time, int target, int other, int cycles) {
 		List<Integer> writes = new ArrayList<>();
 		for (var i = 0; i < cycles; i++) {
@@ -794,8 +795,8 @@ public class ModeScheduleTest {
 
 	private static final int GRID_UP = 230_000; // mV
 
-	private static ModeSchedule.Step batteryStep(ModeSchedule sut, LocalDateTime now, int soc, int e204,
-			int l1, int l2, int l3) {
+	private static ModeSchedule.Step batteryStep(ModeSchedule sut, LocalDateTime now, int soc, int e204, int l1, int l2,
+			int l3) {
 		sut.onMachineStateRead(Integer.valueOf(ModeSchedule.ON_BATTERY_STATE));
 		sut.onGridVoltageRead(1, l1);
 		sut.onGridVoltageRead(2, l2);
@@ -835,8 +836,8 @@ public class ModeScheduleTest {
 		for (var i = 0; i < 50; i++) {
 			assertStep(batteryStep(sut, later, 80, SBU, 0, 0, 0), ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
 			// One phase below the threshold is not "grid present" either.
-			assertStep(batteryStep(sut, later, 80, SBU, GRID_UP, GRID_UP, 150_000),
-					ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
+			assertStep(batteryStep(sut, later, 80, SBU, GRID_UP, GRID_UP, 150_000), ModeScheduleState.WAITING_FOR_MAINS,
+					SUB, null);
 		}
 		assertNull(sut.queuedTarget());
 	}
@@ -854,9 +855,10 @@ public class ModeScheduleTest {
 	@Test
 	public void testSubOnBatteryPathIsOffByDefault() {
 		assertFalse(defaults().isGridPresentPathEnabled());
-		assertFalse(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10).isGridPresentPathEnabled());
-		// Window switch to SUB while the unit runs on battery with the grid up: waits for
-		// mains as before.
+		assertFalse(
+				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10).isGridPresentPathEnabled());
+		// Window switch to SUB while the unit runs on battery with the grid up: waits
+		// for mains as before.
 		var sut = defaults();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
 			step(sut, DAY, 50, SUB, true);
@@ -890,14 +892,15 @@ public class ModeScheduleTest {
 				ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, -1, -1, 10, 261).getInvalidReason());
 	}
 
-	// ---- Evening reserve (SoC rule 95 / 85, reserve 90 % from 14:00 to 18:00) ----
+	// ---- Evening reserve (SoC rule 95 / 85, reserve 90 % from 14:00 to 18:00)
+	// ----
 
 	private static ModeSchedule reserveSchedule() {
 		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, "14:00");
 	}
 
-	// Past the startup hold and the dwell from activation (at 10:00), device in SBU at
-	// 88 % (seeded high).
+	// Past the startup hold and the dwell from activation (at 10:00), device in SBU
+	// at 88 % (seeded high).
 	private static ModeSchedule primedReserve() {
 		var sut = reserveSchedule();
 		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
@@ -993,8 +996,7 @@ public class ModeScheduleTest {
 		// 17:59: still below the reserve, SUB held.
 		assertStep(socStep(sut, at(LocalTime.of(17, 59)), 89, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
 		// 18:00: the evening switch goes out at once, not held by the dwell.
-		assertStep(socStep(sut, at(LocalTime.of(18, 0)), 89, SUB, true), ModeScheduleState.WRITE_PENDING, SBU,
-				SBU);
+		assertStep(socStep(sut, at(LocalTime.of(18, 0)), 89, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
 		assertEquals(ModeScheduleReason.WINDOW, sut.reason());
 	}
 
@@ -1009,5 +1011,119 @@ public class ModeScheduleTest {
 		assertStep(socStep(sut, t.plusMinutes(5), 89, SBU, true), ModeScheduleState.MIN_DWELL, SUB, null);
 		assertEquals(ModeScheduleReason.EVENING_RESERVE, sut.reason());
 		assertStep(socStep(sut, t.plusMinutes(11), 89, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+	}
+
+	// ---- Evening reserve hold (reserve 90 % from 14:00, hold on) ----
+
+	private static ModeSchedule holdSchedule() {
+		return ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, "14:00", true);
+	}
+
+	private static ModeSchedule primedHold() {
+		var sut = holdSchedule();
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			assertEquals(ModeScheduleState.IN_SYNC, step(sut, DAY, 88, SBU, true).state());
+		}
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		return sut;
+	}
+
+	@Test
+	public void testReserveHoldValidationAndDefaults() {
+		assertNull(holdSchedule().getInvalidReason());
+		assertTrue(holdSchedule().isEveningReserveHoldActive());
+		// Off by default, also through the overload without the flag.
+		assertFalse(reserveSchedule().isEveningReserveHoldActive());
+		assertFalse(ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, "14:00", false)
+				.isEveningReserveHoldActive());
+		// Without a reserve the hold is inert, never invalid.
+		var inert = ModeSchedule.fromConfig(true, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, -1, "14:00", true);
+		assertNull(inert.getInvalidReason());
+		assertFalse(inert.isEveningReserveHoldActive());
+		var disabled = ModeSchedule.fromConfig(false, SUB, SBU, "18:00", "00:30", -1, 95, 85, 10, -1, 90, "14:00",
+				true);
+		assertFalse(disabled.isActive());
+		assertFalse(disabled.isEveningReserveHoldActive());
+	}
+
+	@Test
+	public void testReserveHoldKeepsSubUntilEveningStartThenEveningSbu() {
+		var sut = primedHold();
+		// 12 Nov at Sezibwa: the reserve was reached in the afternoon. Without the hold
+		// the SoC rule went back to SBU at 95 % and the battery drained before 18:00.
+		assertEquals(SBU, sut.targetFor(at(LocalTime.of(13, 59, 59)), 88, SBU));
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		assertEquals(SUB, sut.targetFor(at(LocalTime.of(14, 0)), 88, SBU));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, sut.reason());
+		// Reserve reached (boundary: exactly 90 %): held, not the SoC rule.
+		assertEquals(SUB, sut.targetFor(at(LocalTime.of(15, 0)), 90, SUB));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+		for (var soc : new int[] { 95, 100, 91 }) {
+			assertEquals(SUB, sut.targetFor(at(LocalTime.of(16, 0)), soc, SUB), "soc " + soc);
+			assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+		}
+		// An unreadable SoC keeps the hold.
+		assertEquals(SUB, sut.targetFor(at(LocalTime.of(16, 30)), null, SUB));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+		// Below the reserve again: the reserve itself (same target); above: still held.
+		assertEquals(SUB, sut.targetFor(at(LocalTime.of(17, 0)), 89, SUB));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE, sut.reason());
+		assertEquals(SUB, sut.targetFor(at(LocalTime.of(17, 30)), 96, SUB));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+		assertEquals(SUB, sut.targetFor(at(LocalTime.of(17, 59, 59)), 96, SUB));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+		// eveningStart: the evening priority.
+		assertEquals(SBU, sut.targetFor(at(LocalTime.of(18, 0)), 96, SUB));
+		assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+		// Next day before the reserve window: the SoC rule again, the hold is reset.
+		var nextDay = LocalDateTime.of(DATE.plusDays(1), LocalTime.of(13, 0));
+		assertEquals(SBU, sut.targetFor(nextDay, 96, SBU));
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		assertEquals(SBU, sut.targetFor(nextDay.plusMinutes(30), 90, SBU));
+		assertEquals(ModeScheduleReason.HIGH_SOC, sut.reason());
+		// Entering the reserve window already at the reserve: held at once.
+		assertEquals(SUB, sut.targetFor(nextDay.plusHours(1), 96, SBU));
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+	}
+
+	@Test
+	public void testReserveHoldWritesNothingWhenReachedAndEveningSwitchIsNotHeld() {
+		var sut = primedHold();
+		var two = at(LocalTime.of(14, 0));
+		assertStep(socStep(sut, two, 88, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		verified(sut, two, SUB, 88);
+		// Reserve reached at 16:00 and full at 17:00: SUB stays, no write.
+		assertStep(socStep(sut, at(LocalTime.of(16, 0)), 90, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+		assertStep(socStep(sut, at(LocalTime.of(17, 0)), 100, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
+		assertStep(socStep(sut, at(LocalTime.of(17, 59)), 100, SUB, true), ModeScheduleState.IN_SYNC, SUB, null);
+		// 18:00: the evening SBU goes out at once, not held by the dwell.
+		assertStep(socStep(sut, at(LocalTime.of(18, 0)), 100, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
+		assertEquals(ModeScheduleReason.WINDOW, sut.reason());
+	}
+
+	@Test
+	public void testReserveHoldSwitchRespectsDwellAndMainsGate() {
+		var sut = primedHold();
+		// 13:55 at 96 %: SBU by the SoC rule, verified.
+		var t = at(LocalTime.of(13, 55));
+		assertStep(socStep(sut, t, 96, SUB, true), ModeScheduleState.WRITE_PENDING, SBU, SBU);
+		verified(sut, t, SBU, 96);
+		// 14:00: the hold wants SUB, but the switch is SoC-driven and waits the dwell.
+		assertStep(socStep(sut, at(LocalTime.of(14, 0)), 96, SBU, true), ModeScheduleState.MIN_DWELL, SUB, null);
+		assertEquals(ModeScheduleReason.EVENING_RESERVE_HOLD, sut.reason());
+		// After the dwell, without mains: no write.
+		sut.onMachineStateRead(false);
+		assertStep(sut.step(at(LocalTime.of(14, 6)), 96, SBU, true, false, true, TIMEOUT, COOLDOWN),
+				ModeScheduleState.WAITING_FOR_MAINS, SUB, null);
+		// Mains confirmed again: the SUB write goes out.
+		for (var i = 0; i < ModeSchedule.MAINS_CONFIRM_READS - 1; i++) {
+			socStep(sut, at(LocalTime.of(14, 7)), 96, SBU, true);
+		}
+		assertStep(socStep(sut, at(LocalTime.of(14, 7)), 96, SBU, true), ModeScheduleState.WRITE_PENDING, SUB, SUB);
+		// Control disabled: never a write.
+		var off = primedHold();
+		assertStep(off.step(at(LocalTime.of(15, 0)), 96, SBU, false, true, true, TIMEOUT, COOLDOWN),
+				ModeScheduleState.DISABLED, SUB, null);
 	}
 }

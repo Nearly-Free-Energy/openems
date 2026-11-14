@@ -125,6 +125,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private final ScheduleWindow dischargeWindow = new ScheduleWindow(0xE02D, 0xE033, "DISCHARGE");
 	private Config config;
 	private DischargeGuard dischargeGuard = new DischargeGuard(-1, -1);
+	private NightChargeStop nightChargeStop = NightChargeStop.OFF;
+	private LocalDateTime nightChargeNow;
 	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null, null,
 			-1);
 	private ModeScheduleState lastModeScheduleState;
@@ -199,10 +201,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private void activate(ComponentContext context, Config config) throws OpenemsException {
 		this.config = config;
 		this.dischargeGuard = this.createDischargeGuard(config);
+		this.nightChargeStop = this.createNightChargeStop(config);
 		this.modeSchedule = ModeSchedule.fromConfig(config.modeScheduleEnabled(), config.daytimePriority(),
 				config.eveningPriority(), config.eveningStart(), config.daytimeStart(), config.outputPriority(),
 				config.daytimeSbuAboveSoc(), config.daytimeSbuBelowSoc(), config.minDwellMinutes(),
-				config.gridPresentMinVoltage(), config.eveningReserveSoc(), config.eveningReserveFrom());
+				config.gridPresentMinVoltage(), config.eveningReserveSoc(), config.eveningReserveFrom(),
+				config.eveningReserveHold());
 		if (this.modeSchedule.getInvalidReason() != null) {
 			this.logError(this.log,
 					"Invalid mode schedule: " + this.modeSchedule.getInvalidReason() + "; the schedule stays off");
@@ -224,12 +228,16 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		 * same activation.
 		 */
 		super.activate(context, config.id(), config.alias(), config.enabled(), config.modbusUnitId());
-		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive()
+		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive() || this.nightChargeStop.isActive()
 				|| this.chargePrioritySchedule.managesRegister()) {
 			this.scheduleZone = this.parseScheduleZone(config.scheduleTimeZone());
 		}
 		if (this.dischargeGuard.isActive()) {
 			this.warnIfRulesInert(config);
+		}
+		if (this.modeSchedule.isActive() && config.eveningReserveHold()
+				&& !this.modeSchedule.isEveningReserveHoldActive()) {
+			this.logWarn(this.log, "eveningReserveHold is set but inert: it needs eveningReserveSoc");
 		}
 		if (this.modeSchedule.isActive() && !config.controlEnabled()) {
 			this.logWarn(this.log, "Mode schedule is enabled but inert: it needs controlEnabled=true");
@@ -249,6 +257,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.modeSchedule.onMachineStateRead(raw);
 			this.chargePrioritySchedule.onMachineStateRead(raw);
 		});
+		// Fresh SoC reads for the night charge stop confirmation.
+		((IntegerReadChannel) this.channel(SrneBatteryInverter.ChannelId.BATTERY_SOC))
+				.onSetNextValue(value -> this.nightChargeStop.onSocRead(value.get()));
 		// Fresh grid-input voltage reads for the on-battery SUB path.
 		this.registerGridVoltage(1, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L1);
 		this.registerGridVoltage(2, SrneBatteryInverter.ChannelId.GRID_VOLTAGE_L2);
@@ -481,10 +492,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 						this.dischargeWindow.stopWriteElement()), //
 				new FC16WriteRegistersTask(this.dischargeWindow::onEnableExecute, 0xE033,
 						this.dischargeWindow.enableWriteElement()));
-		// SoC for the discharge rules and the mode schedule: the same register 0x0100
-		// that SrneEss maps to SymmetricEss.SOC. Only read when one of them is
-		// configured, so the default bus traffic is unchanged.
-		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive()) {
+		// SoC for the discharge rules, the mode schedule and the night charge stop: the
+		// same register 0x0100 that SrneEss maps to SymmetricEss.SOC. Only read when
+		// one of them is configured, so the default bus traffic is unchanged.
+		if (this.dischargeGuard.isActive() || this.modeSchedule.isActive() || this.nightChargeStop.isActive()) {
 			protocol.addTask(new FC3ReadRegistersTask(0x0100, Priority.HIGH, //
 					m(SrneBatteryInverter.ChannelId.BATTERY_SOC, new UnsignedWordElement(0x0100))));
 		}
@@ -570,10 +581,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		if (!this.reconcileIsolated(this.chargePriorityReconcile, this.chargePriorityFailures)) {
 			this.reportChargePriorityReconcileFailing(this.chargePriorityFailures.onsetLoggedThisCycle);
 		}
+		this.updateNightChargeClock();
 		if (this.config == null || !this.config.controlEnabled()) {
 			return;
 		}
 		if (!this.isMachineStateVerified()) {
+			if (this.nightChargeStop.isActive()) {
+				ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE,
+						NightChargeStop.State.WAITING_FOR_MAINS);
+			}
 			this.reconcileDisarmUnverified();
 			return;
 		}
@@ -598,11 +614,13 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// priority (E204) are reconciled together as one coherent, validated operation.
 		this.reconcileSourceTransfer();
 		this.retryChargeWindow();
+		// Evaluated here, behind the machine-state gate, right before the window.
+		final var chargeEnable = this.effectiveChargeEnable();
 		this.reconcileWindow(this.chargeWindow, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
 				SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, //
-				this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), this.config.chargeScheduleEnable());
+				this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), chargeEnable);
 		this.reconcileWindow(this.dischargeWindow, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
@@ -1093,6 +1111,64 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			}
 			this.logWarn(this.log, message + "; machine state is not verified, disarm only");
 		}
+	}
+
+	// Off unless valid and able to act; an invalid or inert setting is logged once.
+	private NightChargeStop createNightChargeStop(Config config) {
+		var stopSoc = config.nightChargeStopSoc();
+		if (stopSoc == -1) {
+			return NightChargeStop.OFF;
+		}
+		var invalid = NightChargeStop.invalidReason(stopSoc);
+		if (invalid != null) {
+			this.logError(this.log, "Invalid " + invalid + "; the night charge stop is off");
+			return NightChargeStop.OFF;
+		}
+		var inert = NightChargeStop.inertReason(config.controlEnabled(), config.chargeScheduleEnable(),
+				config.chargeWindow1Start(), config.chargeWindow1Stop());
+		if (inert != null) {
+			this.logWarn(this.log, "Night charge stop is configured but inert: " + inert);
+			return NightChargeStop.OFF;
+		}
+		return NightChargeStop.fromConfig(stopSoc, config.controlEnabled(), config.chargeScheduleEnable(),
+				config.chargeWindow1Start(), config.chargeWindow1Stop());
+	}
+
+	/**
+	 * The enable target handed to the charge window: the configured value, or 0
+	 * while the night charge stop holds the charge ended. Called only behind the
+	 * verified machine-state gate, right before the window is reconciled.
+	 *
+	 * @return the enable target for the charge window
+	 */
+	private int effectiveChargeEnable() {
+		if (!this.nightChargeStop.isActive()) {
+			return this.config.chargeScheduleEnable();
+		}
+		var step = this.nightChargeStop.step(this.nightChargeNow,
+				this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE), this.chargeWindow);
+		if (step.message() != null) {
+			this.logInfo(this.log, step.message());
+		}
+		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE, step.state());
+		return step.enable();
+	}
+
+	// The clock gate is fed every cycle, also while the machine-state gate is
+	// closed, so a clock step is seen whenever it happens. A configured rule that
+	// cannot act reports OFF.
+	private void updateNightChargeClock() {
+		if (this.nightChargeStop.isActive()) {
+			this.nightChargeNow = this.nightChargeStop.plausibleTime(this.instantOrNull(), this.scheduleZone);
+		} else if (this.config != null && this.config.nightChargeStopSoc() != -1) {
+			ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE,
+					NightChargeStop.State.OFF);
+		}
+	}
+
+	// Package-private for tests.
+	NightChargeStop nightChargeStopForTest() {
+		return this.nightChargeStop;
 	}
 
 	// Fail open: an out-of-range threshold or an incoherent pair turns the affected
