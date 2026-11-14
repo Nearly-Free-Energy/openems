@@ -112,6 +112,8 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Grid-input voltage L3 (0x022B), for the mode schedule's grid-present check")), //
 		MODE_SCHEDULE_REASON(Doc.of(ModeScheduleReason.values()) //
 				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC or LOW_SOC")), //
+		CHARGE_WINDOW_STATE(Doc.of(ScheduleWindow.State.values()) //
+				.text("State of the charge time-of-use window write (0xE026/0xE027, enable 0xE02C)")), //
 		SAFE_WRITE_STATE(Doc.of(SafeWriteHandler.State.values()) //
 				.text("Aggregate state of the guarded settings write operation")); //
 
