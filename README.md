@@ -97,3 +97,4 @@ Copyright (C) 2016-2026 OpenEMS Association e.V.
 
 This product includes software developed at FENECON GmbH: you can
 redistribute it and/or modify it under the terms of the [GNU Affero General Public License version 3](LICENSE-AGPL-3.0).
+
