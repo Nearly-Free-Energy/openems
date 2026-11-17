@@ -418,17 +418,22 @@ public class SrneBatteryInverterImplTest {
 
 	@Test
 	public void testOutputPriorityPrerequisiteGate() {
-		// Settled: at rest (IDLE = already correct, or VERIFIED) AND the device CURRENTLY
-		// reads the configured target.
+		// Settled: at rest (IDLE = already correct, VERIFIED, or FAILED) AND the device
+		// CURRENTLY reads the configured target.
 		assertTrue(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.IDLE, 50));
 		assertTrue(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.VERIFIED, 50));
-		// Not settled: an in-flight or failed write never settles, even if the read
-		// momentarily matches the target.
+		// gw-pi2 17 Nov 2026: a failed read-back of a write the device did apply must
+		// not hold SBU off until the Edge restarts.
+		assertTrue(SrneBatteryInverterImpl.isPrerequisiteSettled(18, SafeWriteHandler.State.FAILED, 18));
+		// Not settled: an in-flight write never settles, even if the read momentarily
+		// matches the target.
 		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.QUEUED, 50));
 		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.AWAITING_READBACK, 50));
-		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.FAILED, 50));
 		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.UNDEFINED, 50));
-		// Not settled: verified/at-rest but the device has drifted away or is unknown.
+		// Not settled: at rest but the device is not at the target, has drifted away,
+		// or is unknown.
+		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.FAILED, 40));
+		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.FAILED, null));
 		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.VERIFIED, 40));
 		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.VERIFIED, null));
 		assertFalse(SrneBatteryInverterImpl.isPrerequisiteSettled(50, SafeWriteHandler.State.IDLE, 40));

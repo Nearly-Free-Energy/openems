@@ -339,6 +339,31 @@ public class SrneBatteryInverterModeScheduleTest {
 	}
 
 	@Test
+	public void testSbuProceedsWhenFailedBandWriteReadsBackTheTarget() throws Exception {
+		// gw-pi2, 17 Nov 2026: the E01F write ended FAILED although the device took
+		// it, and SBU stayed blocked until the Edge restarted.
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = bridge(SUB, MachineState.RUNNING_MAINS_BYPASS) //
+				.withRegisters(0xE01C, 20, 95, 15, LINE_SOC - 5, BATTERY_SOC);
+		final var test = start(sut, bridge, EVENING, config().build());
+		assertEquals(SafeWriteHandler.State.QUEUED, sut.writeHandlerStateForTest(4));
+		sut.writeHandlerForTest(4).onExecute(new ExecuteState.Error(new Exception("timeout")));
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.writeHandlerStateForTest(4));
+		// Still at the old value: blocked, nothing queued.
+		assertEquals(ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, state(sut));
+		assertFalse(sut.takeModeScheduleWriteForTest());
+
+		// The device did apply it: the band now reads the configured value.
+		bridge.withRegisters(0xE01C, 20, 95, 15, LINE_SOC, BATTERY_SOC);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.writeHandlerStateForTest(4));
+		assertEquals(ModeScheduleState.WRITE_PENDING, state(sut));
+		assertEquals(SBU, sut.modeScheduleForTest().queuedTarget());
+		test.deactivate();
+	}
+
+	@Test
 	public void testSubNeedsNoPreconditions() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var config = config() //
