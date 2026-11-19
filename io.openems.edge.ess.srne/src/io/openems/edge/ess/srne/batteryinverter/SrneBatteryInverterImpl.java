@@ -878,9 +878,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		// latches, as it is evaluated later in the cycle, behind the settings gate),
 		// and holds it back until it has decided after an activation.
 		var nightStop = ChargePrioritySchedule.NightStop.NONE;
-		if (this.nightChargeStop.hasEndedCharge()) {
+		if (this.nightChargeStop.hasEndedCharge(now)) {
 			nightStop = ChargePrioritySchedule.NightStop.ENDED;
-		} else if (this.nightChargeStop.isNightChargePending()) {
+		} else if (this.nightChargeStop.isNightChargePending(now)) {
 			nightStop = ChargePrioritySchedule.NightStop.PENDING;
 		}
 		var step = this.chargePrioritySchedule.step(now, chargePriority, this.config.controlEnabled(), mains, running,

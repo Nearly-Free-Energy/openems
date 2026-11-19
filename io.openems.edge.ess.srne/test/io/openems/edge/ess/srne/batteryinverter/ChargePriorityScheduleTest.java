@@ -934,9 +934,26 @@ public class ChargePriorityScheduleTest {
 		stepStop(sut, nextNight(1, 1, 5), HYBRID, 2, true);
 		device(sut, PV_ONLY);
 		assertTrue(sut.isNightEnded(nextNight(1, 1, 20)));
-		// The clock steps back to 00:30: the stop is forgotten, the night value is the
-		// target again (the stop itself would report again if it still holds).
-		var step = stepStop(sut, nextNight(1, 0, 30), PV_ONLY, 2, false);
+		// The clock gate has settled at 01:20.
+		var t = nextNight(1, 1, 20).atZone(KAMPALA).toInstant();
+		for (var i = 0; i <= ModeSchedule.CLOCK_SETTLE_CYCLES; i++) {
+			sut.plausibleTime(t = t.plusSeconds(1), KAMPALA);
+		}
+		// The clock steps back to 00:30: the gate closes, so no E20F write goes out
+		// in the cycle of the step.
+		t = nextNight(1, 0, 30).atZone(KAMPALA).toInstant();
+		var now = sut.plausibleTime(t, KAMPALA);
+		assertNull(now);
+		var step = stepStop(sut, now, PV_ONLY, 2, false);
+		assertNull(step.write());
+		assertNull(sut.writeElement().getNextWriteValueAndReset());
+		// Once settled at 00:30: the stop is forgotten, the night value is the target
+		// again (the stop itself would report again if it still holds).
+		for (var i = 0; now == null && i <= ModeSchedule.CLOCK_SETTLE_CYCLES; i++) {
+			now = sut.plausibleTime(t = t.plusMillis(100), KAMPALA);
+		}
+		assertEquals(nextNight(1, 0, 30), now.withSecond(0).withNano(0));
+		step = stepStop(sut, now, PV_ONLY, 2, false);
 		assertEquals(HYBRID, step.target());
 		assertFalse(sut.isNightEnded(nextNight(1, 1, 20)));
 	}

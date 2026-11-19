@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 
@@ -468,7 +470,8 @@ public class SrneBatteryInverterNightChargeStopTest {
 		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
 		test.next(new TestCase(), CYCLES);
 		assertEquals(NightChargeStop.State.STOPPED, state(sut));
-		assertFalse(sut.nightChargeStopForTest().hasEndedCharge());
+		assertFalse(sut.nightChargeStopForTest()
+				.hasEndedCharge(LocalDateTime.ofInstant(clock.instant(), ZoneId.of("Africa/Kampala"))));
 		assertEquals(2, chargePriorityTarget(sut));
 		assertEquals(2, takeE20fWrite(sut));
 		test.deactivate();

@@ -44,6 +44,7 @@ public class NightChargeStopTest {
 		private final NightChargeStop sut;
 		private final ScheduleWindow window = new ScheduleWindow(0xE026, 0xE02C, "CHARGE");
 		private Integer enable;
+		private LocalDateTime last;
 		private int writes;
 		private boolean failReadback;
 
@@ -76,6 +77,7 @@ public class NightChargeStopTest {
 		// One cycle: the rule, then the window reconcile with the rule's target, then
 		// the bus executes a queued enable write and reads the register back.
 		private NightChargeStop.Step cycle(LocalDateTime now) {
+			this.last = now;
 			var step = this.sut.step(now, this.enable, this.window);
 			this.window.reconcile(this.start, this.stop, this.enable, this.start, this.stop, step.enable());
 			this.window.onCycle(30);
@@ -88,6 +90,15 @@ public class NightChargeStopTest {
 				this.window.verifyEnable(this.enable);
 			}
 			return step;
+		}
+
+		// What the charge-priority schedule sees at the time of the last cycle.
+		private boolean ended() {
+			return this.sut.hasEndedCharge(this.last);
+		}
+
+		private boolean pending() {
+			return this.sut.isNightChargePending(this.last);
 		}
 
 		private NightChargeStop.Step cycles(LocalDateTime now, int count) {
@@ -539,29 +550,46 @@ public class NightChargeStopTest {
 	@Test
 	public void testHasEndedChargeInTheWindowOfTheStop() {
 		var device = new Device(1);
-		assertFalse(NightChargeStop.OFF.hasEndedCharge());
-		assertFalse(NightChargeStop.OFF.isNightChargePending());
+		assertFalse(NightChargeStop.OFF.hasEndedCharge(at(1, 5)));
+		assertFalse(NightChargeStop.OFF.isNightChargePending(at(1, 5)));
 		// Not evaluated since activation: pending.
-		assertTrue(device.sut.isNightChargePending());
+		assertTrue(device.pending());
 		device.soc(30, 3);
 		device.cycles(at(1, 0), 3);
-		assertFalse(device.sut.hasEndedCharge());
-		assertFalse(device.sut.isNightChargePending());
+		assertFalse(device.ended());
+		assertFalse(device.pending());
 		device.soc(50, 3);
 		assertEquals(State.STOPPED, device.cycle(at(1, 5)).state());
-		assertTrue(device.sut.hasEndedCharge());
+		assertTrue(device.ended());
 		// Below the stop minus the hysteresis: still ended for this window.
 		device.soc(STOP_SOC - NightChargeStop.REARM_HYSTERESIS - 10, 3);
 		assertEquals(State.STOPPED, device.walk(at(1, 6), at(5, 59)).state());
-		assertTrue(device.sut.hasEndedCharge());
+		assertTrue(device.ended());
 		// After the window (still latched until the re-arm): nothing left to end.
 		assertEquals(State.STOPPED, device.walk(at(6, 0), at(6, 14)).state());
-		assertFalse(device.sut.hasEndedCharge());
+		assertFalse(device.ended());
 		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(6, 15)).state());
 		device.soc(30, 3);
 		assertEquals(State.CHARGING, device.cycles(at(NIGHT.plusDays(1), 0, 30), 3).state());
-		assertFalse(device.sut.hasEndedCharge());
-		assertFalse(device.sut.isNightChargePending());
+		assertFalse(device.ended());
+		assertFalse(device.pending());
+	}
+
+	@Test
+	public void testHasEndedChargeUsesTheCallersTime() {
+		var device = new Device(1);
+		device.soc(60, 3);
+		assertEquals(State.STOPPED, device.cycles(at(1, 5), 3).state());
+		// The rule last saw 01:05; the caller's time decides.
+		assertTrue(device.sut.hasEndedCharge(at(1, 10)));
+		assertFalse(device.sut.hasEndedCharge(at(6, 0)));
+		assertFalse(device.sut.hasEndedCharge(at(NIGHT.plusDays(1), 1, 10)));
+		assertFalse(device.sut.hasEndedCharge(null));
+		assertFalse(device.sut.isNightChargePending(null));
+		// Off: never ended, never pending, whatever the time.
+		var off = NightChargeStop.fromConfig(-1, true, 1, START, STOP);
+		assertFalse(off.hasEndedCharge(at(1, 10)));
+		assertFalse(off.isNightChargePending(at(1, 10)));
 	}
 
 	@Test
@@ -569,7 +597,7 @@ public class NightChargeStopTest {
 		var device = new Device(1);
 		device.soc(60, 3);
 		assertEquals(State.STOPPED, device.cycles(at(2, 0), 3).state());
-		assertTrue(device.sut.hasEndedCharge());
+		assertTrue(device.ended());
 		// Grid down from the morning, the clock jumps (no small steps) into the next
 		// night: the latch still holds until the re-arm confirmation, but it belongs
 		// to the last window. (At the stop SoC it would latch this window again, see
@@ -577,8 +605,8 @@ public class NightChargeStopTest {
 		device.soc(30, 3);
 		var step = device.cycles(at(NIGHT.plusDays(1), 0, 30), 3);
 		assertEquals(State.STOPPED, step.state());
-		assertFalse(device.sut.hasEndedCharge());
-		assertFalse(device.sut.isNightChargePending());
+		assertFalse(device.ended());
+		assertFalse(device.pending());
 	}
 
 	@Test
@@ -587,32 +615,32 @@ public class NightChargeStopTest {
 		var inBand = new Device(0);
 		inBand.soc(48, 3);
 		assertEquals(State.HELD_DISARMED, inBand.cycles(at(3, 0), 3).state());
-		assertFalse(inBand.sut.hasEndedCharge());
-		assertTrue(inBand.sut.isNightChargePending());
+		assertFalse(inBand.ended());
+		assertTrue(inBand.pending());
 		inBand.cycles(at(3, 0), NightChargeStop.HELD_CONFIRM_CYCLES - 3);
-		assertTrue(inBand.sut.hasEndedCharge());
-		assertFalse(inBand.sut.isNightChargePending());
+		assertTrue(inBand.ended());
+		assertFalse(inBand.pending());
 
 		// SoC unknown: held, never counted as a stop, the night value stays back.
 		var unknown = new Device(0);
 		assertEquals(State.HELD_DISARMED, unknown.cycles(at(3, 0), 2 * NightChargeStop.HELD_CONFIRM_CYCLES).state());
-		assertFalse(unknown.sut.hasEndedCharge());
-		assertTrue(unknown.sut.isNightChargePending());
+		assertFalse(unknown.ended());
+		assertTrue(unknown.pending());
 
 		// SoC clearly low (a restart at 15 % after an earlier stop): re-armed, the
 		// night charge goes on.
 		var low = new Device(0);
 		low.soc(15, 3);
 		assertEquals(State.CHARGING, low.cycles(at(3, 0), NightChargeStop.HELD_CONFIRM_CYCLES).state());
-		assertFalse(low.sut.hasEndedCharge());
-		assertFalse(low.sut.isNightChargePending());
+		assertFalse(low.ended());
+		assertFalse(low.pending());
 
 		// Held after the window (re-arm delay): no night charge left to end.
 		var after = new Device(0);
 		after.soc(60, 3);
 		assertEquals(State.HELD_DISARMED, after.cycles(at(6, 5), NightChargeStop.HELD_CONFIRM_CYCLES).state());
-		assertFalse(after.sut.hasEndedCharge());
-		assertFalse(after.sut.isNightChargePending());
+		assertFalse(after.ended());
+		assertFalse(after.pending());
 	}
 
 	@Test
@@ -626,11 +654,11 @@ public class NightChargeStopTest {
 		device.soc(30, 3);
 		var next = NIGHT.plusDays(1);
 		assertEquals(State.STOPPED, device.walk(at(next, 0, 10), at(next, 1, 0)).state());
-		assertFalse(device.sut.hasEndedCharge());
+		assertFalse(device.ended());
 		// The stop SoC confirmed in this window: latched for this window.
 		device.soc(60, 3);
 		assertEquals(State.STOPPED, device.cycle(at(next, 1, 1)).state());
-		assertTrue(device.sut.hasEndedCharge());
+		assertTrue(device.ended());
 		assertEquals(State.STOPPED, device.walk(at(next, 1, 2), at(next, 6, 14)).state());
 		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(next, 6, 15)).state());
 	}

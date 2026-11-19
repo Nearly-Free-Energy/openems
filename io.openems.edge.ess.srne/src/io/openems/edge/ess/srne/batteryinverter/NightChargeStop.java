@@ -484,11 +484,12 @@ final class NightChargeStop {
 	 * charge-priority schedule then ends its night value too, so the unit does not
 	 * charge from mains outside the disarmed timer. Edge cycle thread only.
 	 *
+	 * @param now the caller's plausible local date-time (the charge-priority
+	 *            schedule's), or null if unknown
 	 * @return true while the night charge is ended
 	 */
-	boolean hasEndedCharge() {
-		var now = this.lastNow;
-		if (now == null || !this.isInsideWindow(now.toLocalTime())) {
+	boolean hasEndedCharge(LocalDateTime now) {
+		if (!this.isActive() || now == null || !this.isInsideWindow(now.toLocalTime())) {
 			return false;
 		}
 		var date = now.toLocalDate();
@@ -501,16 +502,17 @@ final class NightChargeStop {
 	 * holds a disarmed device inside the window that does not yet count as an ended
 	 * charge ({@link #hasEndedCharge}). Edge cycle thread only.
 	 *
+	 * @param now the caller's plausible local date-time (the charge-priority
+	 *            schedule's), or null if unknown
 	 * @return true while the night value is held back
 	 */
-	boolean isNightChargePending() {
+	boolean isNightChargePending(LocalDateTime now) {
 		if (!this.isActive()) {
 			return false;
 		}
 		if (!this.decided) {
 			return true;
 		}
-		var now = this.lastNow;
 		if (now == null || !this.isInsideWindow(now.toLocalTime())) {
 			return false;
 		}
