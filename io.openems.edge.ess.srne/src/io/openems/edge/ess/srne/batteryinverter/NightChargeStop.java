@@ -43,8 +43,12 @@ import io.openems.common.types.OptionsEnum;
  * fresh reads below the stop SoC minus {@link #REARM_HYSTERESIS}, so a restart
  * after a stop does not resume the charge. The same holds for the first
  * {@link #ARM_HOLD_CYCLES} evaluations after activation, so a restart on a
- * stale clock (gw-pi2 has no RTC) cannot arm before the clock is
- * corrected.</li>
+ * stale clock (gw-pi2 has no RTC) cannot arm before the clock is corrected.
+ * Before the first decision (the time not known yet) the window gets
+ * {@link #NO_TARGET} and is left as the device has it, so a restart after a
+ * stop, on battery or on mains, neither arms the timer nor lets the
+ * charge-priority schedule raise its night value before the rule has decided;
+ * only a clearly low SoC resumes the charge afterwards.</li>
  * <li>Clock: the time comes through {@link #plausibleTime} (the mode schedule's
  * plausibility and settle rule). The latch is released at once only when the
  * clock crossed the re-arm time forward in small steps; after a clock step or a
@@ -128,13 +132,20 @@ final class NightChargeStop {
 	/**
 	 * One evaluation result.
 	 *
-	 * @param enable  the charge-schedule enable to hand to the window this cycle
+	 * @param enable  the charge-schedule enable to hand to the window this cycle,
+	 *                or {@link #NO_TARGET} to leave the window untouched
 	 * @param state   the rule state for this cycle
 	 * @param message a one-shot audit message, or null
 	 */
 	record Step(int enable, State state, String message) {
 	}
 
+	/**
+	 * {@link Step#enable} before the rule has decided after an activation: the
+	 * charge window is not reconciled at all, so it neither arms nor disarms the
+	 * device.
+	 */
+	static final int NO_TARGET = -1;
 	/** Consecutive fresh SoC reads needed before a stop or an in-window arm. */
 	static final int CONFIRM_READS = 3;
 	/** SoC points below the stop SoC needed to arm a disarmed device in-window. */
@@ -196,7 +207,7 @@ final class NightChargeStop {
 	private int unknownCycles;
 	private int evaluations;
 	private boolean latchedThisActivation;
-	private boolean socUnknownReported;
+	private LocalDate socUnknownReportedOn;
 	private String pendingMessage;
 	private Instant lastInstant;
 	private int steadyClockCycles;
@@ -418,7 +429,10 @@ final class NightChargeStop {
 			this.beyondSince = null;
 			if (this.unknownCycles < UNKNOWN_TIME_CAP_CYCLES) {
 				this.unknownCycles++;
-				return new Step(this.applied == null ? 1 : this.applied, State.WAITING_FOR_DATA, null);
+				// Before the first decision the window gets no target at all, so a restart
+				// after a stop cannot arm a disarmed device before the rule has seen the
+				// time; later the last decision is held.
+				return new Step(this.decided ? this.applied : NO_TARGET, State.WAITING_FOR_DATA, null);
 			}
 			// Fail open: an unknown time must not hold the charge off for good.
 			String message = Integer.valueOf(0).equals(this.applied)
@@ -474,15 +488,18 @@ final class NightChargeStop {
 			this.heldCycles = heldInside ? 1 : 0;
 		}
 		var socUnknownHeld = heldInside && !this.socKnown && this.heldCycles >= HELD_CONFIRM_CYCLES;
+		if (this.heldOn == null || !this.heldOn.equals(this.socUnknownReportedOn)) {
+			// Reported once per held window and date: a flaky SoC register that comes and
+			// goes while the hold lasts does not log again.
+			this.socUnknownReportedOn = null;
+		}
 		if (socUnknownHeld) {
 			state = State.HELD_SOC_UNKNOWN;
-			if (!this.socUnknownReported && message == null) {
+			if (this.socUnknownReportedOn == null && message == null) {
 				message = "Night charge stop: the device reads disarmed in the window and the SoC is unknown;"
 						+ " the night charge is blocked until the SoC reads again or the re-arm time";
-				this.socUnknownReported = true;
+				this.socUnknownReportedOn = this.heldOn;
 			}
-		} else {
-			this.socUnknownReported = false;
 		}
 		if (limit) {
 			state = State.DAILY_WRITE_LIMIT;

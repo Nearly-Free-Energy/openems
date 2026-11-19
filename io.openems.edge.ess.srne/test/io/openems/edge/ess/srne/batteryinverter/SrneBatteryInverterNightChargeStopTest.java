@@ -15,6 +15,8 @@ import java.time.temporal.ChronoUnit;
 
 import org.junit.jupiter.api.Test;
 
+import com.ghgande.j2mod.modbus.procimg.Register;
+
 import io.openems.common.test.TimeLeapClock;
 import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 import io.openems.edge.bridge.modbus.api.task.WriteTask;
@@ -329,6 +331,13 @@ public class SrneBatteryInverterNightChargeStopTest {
 	// 00:55 local (21:55Z), SoC 30 %, hybrid on the device, past the startup holds.
 	private static ComponentTest startShortNight(SrneBatteryInverterImpl sut, DummyModbusBridge bridge,
 			TimeLeapClock clock, int nightChargeStopSoc) throws Exception {
+		return activateShortNight(sut, bridge, clock, nightChargeStopSoc) //
+				.next(new TestCase(), ModeSchedule.STARTUP_HOLD_CYCLES + CYCLES);
+	}
+
+	// Activated, no cycle run yet.
+	private static ComponentTest activateShortNight(SrneBatteryInverterImpl sut, DummyModbusBridge bridge,
+			TimeLeapClock clock, int nightChargeStopSoc) throws Exception {
 		return new ComponentTest(sut) //
 				.addReference("setModbus", bridge) //
 				.addReference("componentManager", new DummyComponentManager(clock)) //
@@ -346,8 +355,7 @@ public class SrneBatteryInverterNightChargeStopTest {
 						.setChargePriorityRestoreWhenOff(true) //
 						.setNightChargeFrom("00:00") //
 						.setNightChargeTo("01:35") //
-						.build()) //
-				.next(new TestCase(), ModeSchedule.STARTUP_HOLD_CYCLES + CYCLES);
+						.build());
 	}
 
 	private static DummyModbusBridge shortNightBridge() {
@@ -450,6 +458,52 @@ public class SrneBatteryInverterNightChargeStopTest {
 		}
 		assertEquals(NightChargeStop.State.HELD_DISARMED, state(sut));
 		assertEquals(3, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testRestartOnMainsAfterTheStopDoesNotArmBeforeTheRuleDecides() throws Exception {
+		// Restart at 01:10 local on mains after a stop: E02C reads 0, E20F reads 3, the
+		// SoC is in the hysteresis band just below the stop. Neither E02C=1 nor E20F=2
+		// is queued, before or after the rule has decided.
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var bridge = shortNightBridge(0, 3, 48, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = activateShortNight(sut, bridge, clock, 50);
+		for (var i = 0; i < NightChargeStop.HELD_CONFIRM_CYCLES + SETTLE_CYCLES; i++) {
+			test.next(new TestCase());
+			assertNull(sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset(), "cycle " + i);
+			assertFalse(sut.takeChargePriorityWriteForTest(), "cycle " + i);
+		}
+		assertEquals(NightChargeStop.State.HELD_DISARMED, state(sut));
+		assertEquals(3, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testRestartOnMainsWithALowSocArmsOnlyAfterTheRuleDecides() throws Exception {
+		// The same restart with the battery clearly low (SoC 20, stop 50): the rule may
+		// arm once it has decided (its hysteresis lets a clearly low battery charge),
+		// but nothing is queued while it is still waiting for the time.
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var bridge = shortNightBridge(0, 3, 20, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = activateShortNight(sut, bridge, clock, 50);
+		Register[] armed = null;
+		var i = 0;
+		for (; i < NightChargeStop.HELD_CONFIRM_CYCLES + SETTLE_CYCLES && armed == null; i++) {
+			test.next(new TestCase());
+			armed = sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset();
+			if (armed == null) {
+				continue;
+			}
+			// This cycle's rule state (the channel value lags one cycle).
+			Channel<NightChargeStop.State> channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE);
+			assertEquals(NightChargeStop.State.CHARGING, channel.getNextValue().asEnum(), "cycle " + i);
+		}
+		assertTrue(armed != null && armed.length == 1 && Integer.valueOf(1).equals(armed[0].getValue()),
+				"armed after the rule decided");
+		assertTrue(i > ModeSchedule.CLOCK_SETTLE_CYCLES, "not before the clock settled: cycle " + i);
 		test.deactivate();
 	}
 

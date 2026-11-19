@@ -662,6 +662,63 @@ public class NightChargeStopTest {
 	}
 
 	@Test
+	public void testFlakySocWarnsOncePerHeldWindow() {
+		var device = new Device(0);
+		device.sut.onSocRead(null);
+		device.cycles(at(3, 0), NightChargeStop.HELD_CONFIRM_CYCLES - 1);
+		assertNotNull(device.cycle(at(3, 1)).message());
+		// The SoC register comes and goes: HELD_SOC_UNKNOWN again, but no new warning.
+		for (var minute = 2; minute < 30; minute++) {
+			if (minute % 2 == 0) {
+				device.soc(48, 1);
+			} else {
+				device.sut.onSocRead(null);
+			}
+			assertNull(device.cycle(at(3, minute)).message(), "03:" + minute);
+		}
+		assertEquals(State.HELD_SOC_UNKNOWN, device.cycle(at(3, 30)).state());
+		// The next night's hold is reported again.
+		device.walk(at(3, 31), at(NIGHT.plusDays(1), 0, 0));
+		device.enable = 0;
+		device.sut.onSocRead(null);
+		var messages = 0;
+		for (var minute = 1; minute <= NightChargeStop.HELD_CONFIRM_CYCLES + 5; minute++) {
+			var step = device.cycle(at(NIGHT.plusDays(1), 0, minute));
+			if (step.message() != null && step.state() == State.HELD_SOC_UNKNOWN) {
+				messages++;
+			}
+		}
+		assertEquals(1, messages);
+	}
+
+	@Test
+	public void testUndecidedRuleLeavesTheWindowUntouched() {
+		// A restart after a stop: the device reads 0 and the time is not known yet.
+		var device = new Device(0);
+		device.soc(48, 3);
+		var step = device.cycles(null, 10);
+		assertEquals(State.WAITING_FOR_DATA, step.state());
+		assertEquals(NightChargeStop.NO_TARGET, step.enable());
+		assertTrue(device.pending());
+		// Once decided it holds the device disarmed; nothing was ever written.
+		assertEquals(State.HELD_DISARMED, device.cycles(at(1, 10), 3).state());
+		assertEquals(0, device.writes);
+		// A later unknown time holds the decision, not NO_TARGET.
+		assertEquals(0, device.cycle(null).enable());
+
+		// A first night after activation with the device armed and the SoC low charges.
+		var first = new Device(1);
+		first.soc(20, 3);
+		assertEquals(NightChargeStop.NO_TARGET, first.cycles(null, 10).enable());
+		var charging = first.cycles(at(1, 10), 3);
+		assertEquals(State.CHARGING, charging.state());
+		assertEquals(1, charging.enable());
+		assertEquals(1, first.enable);
+		assertEquals(0, first.writes);
+		assertFalse(first.pending());
+	}
+
+	@Test
 	public void testLatchLeftFromTheLastNightMovesToThisWindowAtTheStopSoc() {
 		// Stopped at 03:00, then the clock is lost until 00:10 the next night: the
 		// latch

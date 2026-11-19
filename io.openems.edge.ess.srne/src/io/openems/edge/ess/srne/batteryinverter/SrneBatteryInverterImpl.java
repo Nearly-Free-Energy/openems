@@ -616,11 +616,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.retryChargeWindow();
 		// Evaluated here, behind the machine-state gate, right before the window.
 		final var chargeEnable = this.effectiveChargeEnable();
-		this.reconcileWindow(this.chargeWindow, //
-				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
-				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
-				SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, //
-				this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), chargeEnable);
+		// Until the night charge stop has decided after an activation the charge
+		// window is left as the device has it (NightChargeStop.NO_TARGET).
+		if (chargeEnable != NightChargeStop.NO_TARGET || !this.nightChargeStop.isActive()) {
+			this.reconcileWindow(this.chargeWindow, //
+					SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
+					SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
+					SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, //
+					this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), chargeEnable);
+		}
 		this.reconcileWindow(this.dischargeWindow, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
@@ -1147,8 +1151,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	/**
-	 * The enable target handed to the charge window: the configured value, or 0
-	 * while the night charge stop holds the charge ended. Called only behind the
+	 * The enable target handed to the charge window: the configured value, 0 while
+	 * the night charge stop holds the charge ended, or
+	 * {@link NightChargeStop#NO_TARGET} (the window is not reconciled) until the
+	 * night charge stop has decided after an activation. Called only behind the
 	 * verified machine-state gate, right before the window is reconciled.
 	 *
 	 * @return the enable target for the charge window
