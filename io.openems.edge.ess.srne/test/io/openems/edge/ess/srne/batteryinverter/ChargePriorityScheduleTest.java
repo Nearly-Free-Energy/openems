@@ -1015,4 +1015,81 @@ public class ChargePriorityScheduleTest {
 				ModeScheduleState.IN_SYNC, PV_ONLY, null);
 		assertEquals(SafeWriteHandler.State.VERIFIED, sut.handlerState());
 	}
+
+	@Test
+	public void testRejectedDayWritesAfterTheStopStayBounded() {
+		// A device that rejects every day write after the stop: retried, never latched,
+		// and bounded by the capped backoff (the latch does not refill the budget).
+		var sut = shortNight();
+		nightUntilTheStop(sut);
+		var t = nextNight(1, 1, 5);
+		var maxBackoff = ModeSchedule.backoffCycles(ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS, COOLDOWN);
+		var horizon = 30 * maxBackoff;
+		var writes = 0;
+		for (var i = 0; i < horizon; i++) {
+			var step = stepStop(sut, t, HYBRID, 2, true);
+			assertEquals(PV_ONLY, step.target());
+			assertNotEquals(ModeScheduleState.OVERRIDDEN, step.state());
+			if (step.write() != null) {
+				writes++;
+				assertNotNull(sut.writeElement().getNextWriteValueAndReset());
+				sut.onExecute(new ExecuteState.Error(new Exception("rejected")));
+			}
+		}
+		assertTrue(writes > ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS, "" + writes);
+		assertTrue(writes <= ChargePrioritySchedule.DAY_MAX_BACKOFF_ATTEMPTS + horizon / maxBackoff + 1, "" + writes);
+	}
+
+	@Test
+	public void testStopAfterTheNightWriteTimedOut() {
+		// The bridge took the night write, the read-back timed out (FAILED): the stop
+		// still gets the day value at once, it is another target.
+		var sut = shortNight();
+		assertStep(stepStop(sut, nextNight(1, 0, 0), PV_ONLY, 2, false), ModeScheduleState.WRITE_PENDING, HYBRID,
+				HYBRID);
+		assertNotNull(sut.writeElement().getNextWriteValueAndReset());
+		sut.onExecute(ExecuteState.OK);
+		for (var i = 0; i <= TIMEOUT; i++) {
+			stepStop(sut, nextNight(1, 0, 1), PV_ONLY, 2, false);
+		}
+		assertEquals(SafeWriteHandler.State.FAILED, sut.handlerState());
+		assertStep(stepStop(sut, nextNight(1, 0, 6), PV_ONLY, 2, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		assertStep(stepStop(sut, nextNight(1, 0, 7), HYBRID, 2, true), ModeScheduleState.WRITE_PENDING, PV_ONLY,
+				PV_ONLY);
+	}
+
+	@Test
+	public void testChargeWindowStartingBeforeNightFrom() {
+		// Night 22:00-06:00, charge timer 21:00-23:00 (it starts before nightFrom).
+		var sut = ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, "22:00", "06:00");
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			stepStop(sut, at(DAY), PV_ONLY, 2, false);
+		}
+		// A stop at 21:30, before the night: the day value is due anyway.
+		var t = nextNight(0, 21, 30);
+		assertStep(stepStop(sut, t, PV_ONLY, 2, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		assertFalse(sut.isNightEnded(t));
+		// From 22:00 the stop still ends its window: the night never gets hybrid.
+		for (t = nextNight(0, 21, 31); t.isBefore(nextNight(0, 23, 0)); t = t.plusMinutes(1)) {
+			assertStep(stepStop(sut, t, PV_ONLY, 2, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		}
+		// The timer is over (the stop re-arms); across midnight until 06:00: day value.
+		for (; t.isBefore(nextNight(1, 6, 0)); t = t.plusMinutes(1)) {
+			assertStep(stepStop(sut, t, PV_ONLY, 2, false), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+			assertTrue(sut.isNightEnded(t), t.toString());
+		}
+		assertFalse(sut.isNightEnded(nextNight(1, 6, 0)));
+		// The next night starts with the night value at 22:00.
+		for (; t.isBefore(nextNight(1, 22, 0)); t = t.plusMinutes(1)) {
+			assertStep(stepStop(sut, t, PV_ONLY, 2, false), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		}
+		assertStep(stepStop(sut, t, PV_ONLY, 2, false), ModeScheduleState.WRITE_PENDING, HYBRID, HYBRID);
+	}
+
+	@Test
+	public void testInactiveScheduleIsNeverNightEnded() {
+		var sut = ChargePrioritySchedule.fromConfig(false, HYBRID, PV_ONLY, "00:00", "06:00");
+		assertStep(stepStop(sut, nextNight(1, 1, 5), PV_ONLY, 2, true), ModeScheduleState.DISABLED, PV_ONLY, null);
+		assertFalse(sut.isNightEnded(nextNight(1, 1, 5)));
+	}
 }

@@ -206,10 +206,12 @@ resuming the charge.
   only after 30 evaluations inside the window with the last 3 SoC reads at or above
   `nightChargeStopSoc - 5`; with an unknown or clearly lower SoC it does not count. A
   latch left over from an earlier night (e.g. the re-arm was delayed by a grid outage)
-  never ends the next night. The charge-priority schedule then treats the night window
+  never ends the next night by itself; the stop SoC confirmed in the new window latches
+  it for that window. The charge-priority schedule then treats the night window
   as over and writes the day value (`3`, PV only) right away instead of at
   `nightChargeTo`, through its normal day-value path (machine state `2` or `3`,
-  verified read-back, retried with backoff and never latched on failure; `0xE20F` has
+  verified read-back, retried with the capped backoff and never latched on failure,
+  the failure budget is not refilled at the stop; `0xE20F` has
   its own write handler and does not affect `SafeWriteState` or the SBU
   preconditions). The night value is not written again in that window, even if the SoC
   falls far below the stop; a backward clock step to before the stop forgets it. The

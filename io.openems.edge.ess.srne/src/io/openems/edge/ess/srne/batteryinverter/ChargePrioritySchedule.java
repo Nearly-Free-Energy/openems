@@ -392,7 +392,7 @@ final class ChargePrioritySchedule {
 	 * @return true from the stop until nightTo of that night
 	 */
 	boolean isNightEnded(LocalDateTime now) {
-		return this.nightEndedUntil != null && now != null && !now.isBefore(this.nightEndedFrom)
+		return this.isActive() && this.nightEndedUntil != null && now != null && !now.isBefore(this.nightEndedFrom)
 				&& now.isBefore(this.nightEndedUntil) && this.isNight(now.toLocalTime());
 	}
 
@@ -586,13 +586,12 @@ final class ChargePrioritySchedule {
 		}
 		if (nightStop == NightStop.ENDED && this.isActive() && now != null && this.isNight(now.toLocalTime())
 				&& !this.isNightEnded(now)) {
-			// The night ends here for this window, like at nightTo: a fresh failure budget
-			// for the day value.
+			// The night ends here for this window. The failure budget is not refilled: the
+			// day value never latches, and its capped backoff bounds the writes.
 			this.nightEndedFrom = now;
 			this.nightEndedUntil = this.nightEndAfter(now);
-			this.failures = 0;
 		}
-		final var nightEnded = this.isActive() && this.isNightEnded(now);
+		final var nightEnded = this.isNightEnded(now);
 		var target = this.holdValue != null ? this.holdValue : this.targetAt(now == null ? null : now.toLocalTime());
 		if (nightEnded) {
 			target = this.dayPriority;

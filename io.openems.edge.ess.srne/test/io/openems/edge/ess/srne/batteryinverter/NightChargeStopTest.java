@@ -556,7 +556,9 @@ public class NightChargeStopTest {
 		assertTrue(device.sut.hasEndedCharge());
 		// Grid down from the morning, the clock jumps (no small steps) into the next
 		// night: the latch still holds until the re-arm confirmation, but it belongs
-		// to the last window.
+		// to the last window. (At the stop SoC it would latch this window again, see
+		// testLatchLeftFromTheLastNightMovesToThisWindowAtTheStopSoc.)
+		device.soc(30, 3);
 		var step = device.cycles(at(NIGHT.plusDays(1), 0, 30), 3);
 		assertEquals(State.STOPPED, step.state());
 		assertFalse(device.sut.hasEndedCharge());
@@ -595,5 +597,25 @@ public class NightChargeStopTest {
 		assertEquals(State.HELD_DISARMED, after.cycles(at(6, 5), NightChargeStop.HELD_CONFIRM_CYCLES).state());
 		assertFalse(after.sut.hasEndedCharge());
 		assertFalse(after.sut.isNightChargePending());
+	}
+
+	@Test
+	public void testLatchLeftFromTheLastNightMovesToThisWindowAtTheStopSoc() {
+		// Stopped at 03:00, then the clock is lost until 00:10 the next night: the
+		// latch
+		// needs REARM_CONFIRM and is still set, but does not end this night.
+		var device = new Device(1);
+		device.soc(60, 3);
+		assertEquals(State.STOPPED, device.cycles(at(3, 0), 3).state());
+		device.soc(30, 3);
+		var next = NIGHT.plusDays(1);
+		assertEquals(State.STOPPED, device.walk(at(next, 0, 10), at(next, 1, 0)).state());
+		assertFalse(device.sut.hasEndedCharge());
+		// The stop SoC confirmed in this window: latched for this window.
+		device.soc(60, 3);
+		assertEquals(State.STOPPED, device.cycle(at(next, 1, 1)).state());
+		assertTrue(device.sut.hasEndedCharge());
+		assertEquals(State.STOPPED, device.walk(at(next, 1, 2), at(next, 6, 14)).state());
+		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(next, 6, 15)).state());
 	}
 }

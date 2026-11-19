@@ -425,7 +425,11 @@ final class NightChargeStop {
 		var inside = this.isInsideWindow(now.toLocalTime());
 		var deviceDisarmed = Integer.valueOf(0).equals(deviceEnable);
 		var limit = false;
-		if (this.latchedOn == null && inside && this.aboveReads >= CONFIRM_READS) {
+		var latchedBefore = this.latchedOn != null && this.latchedOn.isBefore(now.toLocalDate());
+		if ((this.latchedOn == null || latchedBefore) && inside && this.aboveReads >= CONFIRM_READS) {
+			// A latch of an earlier window that is not released yet (its re-arm delayed by
+			// an outage or a clock step) moves to this window once the stop SoC is
+			// confirmed here, so this night's charge is ended too.
 			if (deviceDisarmed || this.writesOn(now.toLocalDate()) < MAX_DAILY_WRITES) {
 				this.latchedOn = now.toLocalDate();
 				this.latchedThisActivation = true;
