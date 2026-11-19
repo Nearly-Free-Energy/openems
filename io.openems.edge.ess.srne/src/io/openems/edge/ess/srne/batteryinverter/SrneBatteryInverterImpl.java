@@ -875,9 +875,16 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		final var mains = managed && this.isMachineStateVerified();
 		final var running = managed && this.isMachineStateRunning();
 		// The night charge stop ends the night value too (seen one cycle after it
-		// latches, as it is evaluated later in the cycle, behind the settings gate).
+		// latches, as it is evaluated later in the cycle, behind the settings gate),
+		// and holds it back until it has decided after an activation.
+		var nightStop = ChargePrioritySchedule.NightStop.NONE;
+		if (this.nightChargeStop.hasEndedCharge()) {
+			nightStop = ChargePrioritySchedule.NightStop.ENDED;
+		} else if (this.nightChargeStop.isNightChargePending()) {
+			nightStop = ChargePrioritySchedule.NightStop.PENDING;
+		}
 		var step = this.chargePrioritySchedule.step(now, chargePriority, this.config.controlEnabled(), mains, running,
-				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES, this.nightChargeStop.hasEndedCharge());
+				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES, nightStop);
 		if (step.withdraw()) {
 			this.logInfo(this.log,
 					"Charge-priority schedule: machine-state gate closed, withdrew the queued E20F write");

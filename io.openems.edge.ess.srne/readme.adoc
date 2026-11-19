@@ -201,13 +201,26 @@ resuming the charge.
 * Charge priority: with `0xE20F` at the night value (`2`, hybrid) the unit charges from
   the grid at any hour while on the line, inside the timer or not, so disarming
   `0xE02C` alone does not end the charge. With `chargePrioritySchedule=true` the stop
-  therefore also ends the night charge priority: once the stop has latched (`STOPPED`,
-  or `HELD_DISARMED` inside the window after a restart) the charge-priority schedule
-  treats the night window as over and writes the day value (`3`, PV only) right away
-  instead of at `nightChargeTo`, through its normal day-value path (machine state `2`
-  or `3`, verified read-back). The night value is not written again in that window,
-  even if the SoC falls far below the stop; the next night starts with the night value
-  as usual. With `nightChargeStopSoc=-1` the schedule is unchanged.
+  therefore also ends the night charge priority. The stop counts once it has latched
+  (`STOPPED`) in the current charge window. After a restart, `HELD_DISARMED` counts
+  only after 30 evaluations inside the window with the last 3 SoC reads at or above
+  `nightChargeStopSoc - 5`; with an unknown or clearly lower SoC it does not count. A
+  latch left over from an earlier night (e.g. the re-arm was delayed by a grid outage)
+  never ends the next night. The charge-priority schedule then treats the night window
+  as over and writes the day value (`3`, PV only) right away instead of at
+  `nightChargeTo`, through its normal day-value path (machine state `2` or `3`,
+  verified read-back, retried with backoff and never latched on failure; `0xE20F` has
+  its own write handler and does not affect `SafeWriteState` or the SBU
+  preconditions). The night value is not written again in that window, even if the SoC
+  falls far below the stop; a backward clock step to before the stop forgets it. The
+  next night starts with the night value as usual. Until the stop has evaluated a
+  known time since activation, and while a held device does not count yet, the
+  schedule does not raise the night value (a device that already reads it is left
+  alone), so a restart in the window cannot flap `0xE20F` 3 -> 2 -> 3. With
+  `nightChargeStopSoc=-1` the schedule is unchanged.
+* Commissioning: switching `0xE20F` from 2 to 3 during an active grid charge has not
+  been tried on a unit. Keep `nightChargeStopSoc=-1` on production gateways until one
+  supervised night has shown the charge current stop within a minute of `STOPPED`.
 
 * Path: both writes go through the charge `ScheduleWindow`, the same verified path as
   the configured enable: one single-register FC16 to `0xE02C`, read-back verified,
@@ -696,7 +709,8 @@ to the grid at `switchToLineSoc`, but the battery waits for the sun or the night
   then until `nightChargeTo`, written like the day value at the window end (same
   machine-state gates, backoff and read-back), and the night value is not applied
   again in that window. `ChargePriorityNightLate` is not raised for that rest of the
-  window. The next night starts with the night value.
+  window. The next night starts with the night value. Until the stop has decided after
+  an activation, the night value is not raised (state `WAITING_FOR_DATA`).
 * What can still delay a value. The night value waits (`WAITING_FOR_MAINS`) while the
   unit runs on battery (SBU, state `3`) at `nightChargeFrom`, until it is on the line:
   when SoC reaches `switchToLineSoc`, or when the output-priority schedule switches

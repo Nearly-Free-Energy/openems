@@ -3,6 +3,7 @@ package io.openems.edge.ess.srne.batteryinverter;
 import static io.openems.edge.ess.srne.SrneConstants.DEFAULT_UNIT_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -284,13 +285,18 @@ public class SrneBatteryInverterNightChargeStopTest {
 	}
 
 	private static DummyModbusBridge shortNightBridge() {
+		return shortNightBridge(1, 2, 30, MachineState.RUNNING_MAINS_BYPASS);
+	}
+
+	private static DummyModbusBridge shortNightBridge(int chargeEnable, int chargePriority, int soc,
+			MachineState state) {
 		return new DummyModbusBridge("modbus0") //
 				.withRegisters(0xE026, SHORT_START, SHORT_STOP) //
-				.withRegisters(0xE02C, 1, 0, 0) //
-				.withRegisters(0x0100, 30) //
+				.withRegisters(0xE02C, chargeEnable, 0, 0) //
+				.withRegisters(0x0100, soc) //
 				.withRegisters(0x0101, 524, 0) //
-				.withRegister(0xE20F, 2) //
-				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+				.withRegister(0xE20F, chargePriority) //
+				.withRegister(0x0210, state.getValue());
 	}
 
 	// Steady 5-minute steps (a larger step would close the clock gates).
@@ -355,6 +361,60 @@ public class SrneBatteryInverterNightChargeStopTest {
 		leap(clock, test, 5);
 		assertEquals(3, chargePriorityTarget(sut));
 		assertTrue(sut.takeChargePriorityWriteForTest());
+		test.deactivate();
+	}
+
+	@Test
+	public void testRestartAfterTheStopDoesNotRaiseTheNightValue() throws Exception {
+		// Restart at 01:10 local after a stop: E02C reads 0, E20F reads 3, the SoC is
+		// in the hysteresis band just below the stop, and the unit is on battery (the
+		// settings gate is closed).
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var bridge = shortNightBridge(0, 3, 48, MachineState.SOFT_START);
+		final var test = startShortNight(sut, bridge, clock, 50);
+		assertEquals(2, chargePriorityTarget(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+		// Mains returns: the stop holds the device disarmed and is confirmed as a stop;
+		// the night value is never written in between.
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		for (var i = 0; i < NightChargeStop.HELD_CONFIRM_CYCLES + 2 * CYCLES; i++) {
+			test.next(new TestCase());
+			assertFalse(sut.takeChargePriorityWriteForTest(), "cycle " + i);
+		}
+		assertEquals(NightChargeStop.State.HELD_DISARMED, state(sut));
+		assertEquals(3, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testFailedDayWriteAfterTheStopDoesNotBlockTheOtherSettings() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T21:55:00Z");
+		final var bridge = shortNightBridge();
+		final var test = startShortNight(sut, bridge, clock, 50);
+		leap(clock, test, 10);
+		bridge.withRegisters(0x0100, 50);
+		for (var i = 0; i < 4 * CYCLES && state(sut) != NightChargeStop.State.STOPPED; i++) {
+			test.next(new TestCase());
+		}
+		deviceWritesEnable(sut, bridge, test, 0);
+		// The day write fails on the bus.
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(new ExecuteState.Error(new IllegalStateException("test")));
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState());
+		// E20F has its own handler: the shared settings-write state is not FAILED.
+		Channel<SafeWriteHandler.State> writeState = sut.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE);
+		assertNotEquals(SafeWriteHandler.State.FAILED, writeState.value().asEnum());
+		// Retried after the backoff, still the day value.
+		var retried = false;
+		for (var i = 0; i < 600 && !retried; i++) {
+			test.next(new TestCase());
+			retried = sut.takeChargePriorityWriteForTest();
+		}
+		assertTrue(retried);
+		assertEquals(3, chargePriorityTarget(sut));
 		test.deactivate();
 	}
 }

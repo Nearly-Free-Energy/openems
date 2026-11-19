@@ -54,7 +54,8 @@ import io.openems.common.types.OptionsEnum;
  * from mains at any hour on the line, timer or not, so disarming E02C alone
  * does not end the charge. {@link #hasEndedCharge} tells the
  * {@link ChargePrioritySchedule} to end its night value for the rest of that
- * night.</li>
+ * night, and {@link #isNightChargePending} holds the night value back until
+ * this rule has decided after an activation.</li>
  * </ul>
  *
  * <p>
@@ -150,6 +151,11 @@ final class NightChargeStop {
 	 */
 	static final int ARM_HOLD_CYCLES = 1800;
 	private static final Duration MAX_CLOCK_STEP = Duration.ofMinutes(DischargeGuard.CLOCK_STEP_MINUTES);
+	/**
+	 * Evaluations a device must be held disarmed inside the window, with the SoC
+	 * not clearly below the stop, before the hold counts as an ended charge.
+	 */
+	static final int HELD_CONFIRM_CYCLES = 30;
 	/** Failed writes allowed per target change and local day. */
 	static final int MAX_FAILURES = 5;
 	/** Cycles to wait after a failed write before a retry. */
@@ -163,8 +169,11 @@ final class NightChargeStop {
 
 	private volatile int aboveReads;
 	private volatile int belowReads;
+	private volatile int bandReads;
 	private LocalDate latchedOn;
 	private LocalDate heldOn;
+	private int heldCycles;
+	private boolean decided;
 	private Integer applied;
 	private boolean ownWrite;
 	private int failures;
@@ -263,6 +272,8 @@ final class NightChargeStop {
 		var below = usable && soc < this.stopSoc - REARM_HYSTERESIS;
 		this.aboveReads = above ? Math.min(this.aboveReads + 1, CONFIRM_READS) : 0;
 		this.belowReads = below ? Math.min(this.belowReads + 1, CONFIRM_READS) : 0;
+		var inBand = usable && soc >= this.stopSoc - REARM_HYSTERESIS;
+		this.bandReads = inBand ? Math.min(this.bandReads + 1, CONFIRM_READS) : 0;
 	}
 
 	boolean isInsideWindow(LocalTime time) {
@@ -405,6 +416,7 @@ final class NightChargeStop {
 			return new Step(this.applied, failedState != null ? failedState : State.WAITING_FOR_DATA, message);
 		}
 		this.unknownCycles = 0;
+		this.decided = true;
 		var message = this.observe(now);
 		if (message == null) {
 			message = this.pendingMessage;
@@ -424,7 +436,7 @@ final class NightChargeStop {
 		}
 		int target;
 		State state;
-		this.heldOn = null;
+		var heldInside = false;
 		if (this.latchedOn != null) {
 			target = 0;
 			state = State.STOPPED;
@@ -434,10 +446,16 @@ final class NightChargeStop {
 			// not see, and not right after activation, when the clock may still be stale.
 			target = 0;
 			state = State.HELD_DISARMED;
-			this.heldOn = inside ? now.toLocalDate() : null;
+			heldInside = inside;
 		} else {
 			target = 1;
 			state = inside ? State.CHARGING : State.OUTSIDE_WINDOW;
+		}
+		if (heldInside && now.toLocalDate().equals(this.heldOn)) {
+			this.heldCycles = Math.min(this.heldCycles + 1, HELD_CONFIRM_CYCLES);
+		} else {
+			this.heldOn = heldInside ? now.toLocalDate() : null;
+			this.heldCycles = heldInside ? 1 : 0;
 		}
 		if (limit) {
 			state = State.DAILY_WRITE_LIMIT;
@@ -450,22 +468,51 @@ final class NightChargeStop {
 	}
 
 	/**
-	 * Whether this rule has ended the night charge of the current window: the stop
-	 * is latched ({@link State#STOPPED}, until the re-arm), or a device that reads
-	 * disarmed is held disarmed inside the window ({@link State#HELD_DISARMED}, a
-	 * stop seen before a restart). The charge-priority schedule then ends its night
-	 * value too, so the unit does not charge from mains outside the disarmed timer.
-	 * Edge cycle thread only.
+	 * Whether this rule has ended the night charge of the current window: inside
+	 * the charge window, the stop latched in this window ({@link State#STOPPED}),
+	 * or a device that reads disarmed has been held disarmed in this window
+	 * ({@link State#HELD_DISARMED}, a stop seen before a restart) for
+	 * {@link #HELD_CONFIRM_CYCLES} evaluations with the SoC not clearly below the
+	 * stop. A latch left over from an earlier window does not count. The
+	 * charge-priority schedule then ends its night value too, so the unit does not
+	 * charge from mains outside the disarmed timer. Edge cycle thread only.
 	 *
 	 * @return true while the night charge is ended
 	 */
 	boolean hasEndedCharge() {
-		if (this.latchedOn != null) {
+		var now = this.lastNow;
+		if (now == null || !this.isInsideWindow(now.toLocalTime())) {
+			return false;
+		}
+		var date = now.toLocalDate();
+		return date.equals(this.latchedOn) || this.isHeldConfirmed(date);
+	}
+
+	/**
+	 * Whether the charge-priority schedule must not raise its night value yet: the
+	 * rule is active but has not evaluated a known time since activation, or it
+	 * holds a disarmed device inside the window that does not yet count as an ended
+	 * charge ({@link #hasEndedCharge}). Edge cycle thread only.
+	 *
+	 * @return true while the night value is held back
+	 */
+	boolean isNightChargePending() {
+		if (!this.isActive()) {
+			return false;
+		}
+		if (!this.decided) {
 			return true;
 		}
 		var now = this.lastNow;
-		return this.heldOn != null && now != null && this.heldOn.equals(now.toLocalDate())
-				&& this.isInsideWindow(now.toLocalTime());
+		if (now == null || !this.isInsideWindow(now.toLocalTime())) {
+			return false;
+		}
+		var date = now.toLocalDate();
+		return date.equals(this.heldOn) && !date.equals(this.latchedOn) && !this.isHeldConfirmed(date);
+	}
+
+	private boolean isHeldConfirmed(LocalDate date) {
+		return date.equals(this.heldOn) && this.heldCycles >= HELD_CONFIRM_CYCLES && this.bandReads >= CONFIRM_READS;
 	}
 
 	// Moves the target to the window, or retries a failed write of this rule.
