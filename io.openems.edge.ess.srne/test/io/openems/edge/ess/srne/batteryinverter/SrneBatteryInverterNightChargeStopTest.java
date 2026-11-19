@@ -127,6 +127,19 @@ public class SrneBatteryInverterNightChargeStopTest {
 	}
 
 	@Test
+	public void testChargeWindowAcrossMidnightLeavesTheRuleOff() throws Exception {
+		// 22:30-02:00 is rejected: the rule stays off, reads no SoC and writes nothing.
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(99, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T20:00:00Z"),
+				MyConfig.create().setId("batteryInverter0").setModbusId("modbus0").setModbusUnitId(DEFAULT_UNIT_ID)
+						.setMaxApparentPower(12_000).setControlEnabled(true).setChargeWindow1Start(22 * 256 + 30)
+						.setChargeWindow1Stop(2 * 256).setChargeScheduleEnable(1).setNightChargeStopSoc(50).build());
+		assertFalse(sut.nightChargeStopForTest().isActive());
+		assertFalse(hasReadTask(sut, 0x0100));
+		assertNull(sut.chargeWindowForTest().queuedEnable());
+	}
+
+	@Test
 	public void testStopsInTheWindowAndRearmsAfterIt() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var clock = clockAt("2026-11-12T21:30:00Z"); // 00:30 local

@@ -125,6 +125,22 @@ public class NightChargeStopTest {
 	}
 
 	@Test
+	public void testChargeWindowAcrossMidnightIsRejected() {
+		// The latch and the hold are keyed to the calendar date, which is the window
+		// start date only because the charge window never crosses midnight: a
+		// 22:30-02:00 window (and an empty one) leaves the rule off.
+		final var lateStart = 22 * 256 + 30;
+		final var earlyStop = 2 * 256;
+		assertFalse(ScheduleWindow.isValidWindow(lateStart, earlyStop));
+		assertNotNull(NightChargeStop.inertReason(true, 1, lateStart, earlyStop));
+		assertFalse(NightChargeStop.fromConfig(STOP_SOC, true, 1, lateStart, earlyStop).isActive());
+		assertNotNull(NightChargeStop.inertReason(true, 1, lateStart, lateStart));
+		assertFalse(NightChargeStop.fromConfig(STOP_SOC, true, 1, lateStart, lateStart).isActive());
+		// The latest valid window ends at 23:59 the same day.
+		assertTrue(NightChargeStop.fromConfig(STOP_SOC, true, 1, lateStart, 23 * 256 + 59).isActive());
+	}
+
+	@Test
 	public void testWindowBoundaries() {
 		var sut = NightChargeStop.fromConfig(STOP_SOC, true, 1, START, STOP);
 		assertTrue(sut.isInsideWindow(LocalTime.MIDNIGHT));

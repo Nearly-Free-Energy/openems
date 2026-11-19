@@ -170,6 +170,9 @@ final class NightChargeStop {
 	private volatile int aboveReads;
 	private volatile int belowReads;
 	private volatile int bandReads;
+	// The latch and the hold are keyed to the local date. That is the date the
+	// window opened because the charge window never crosses midnight
+	// (ScheduleWindow.isValidWindow rejects start >= stop, see inertReason).
 	private LocalDate latchedOn;
 	private LocalDate heldOn;
 	private int heldCycles;
