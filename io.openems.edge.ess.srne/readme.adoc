@@ -241,6 +241,13 @@ resuming the charge.
   after 3 fresh reads below `nightChargeStopSoc - 5`, otherwise it stays disarmed
   (`HELD_DISARMED`) until the re-arm time. A window rewrite inside the window (config
   change) therefore also stays disarmed until then, unless the battery is clearly low.
+* Relatch, also with `chargePrioritySchedule=false`: a latch left over from an earlier
+  window (its re-arm delayed by a clock step or a gap, see Clock) moves to the current
+  window once the stop SoC is confirmed there. This changes `0xE02C` whether or not the
+  charge-priority schedule runs: the charge schedule then stays disarmed until this
+  window's re-arm time instead of being re-armed inside the window when the old latch
+  is released (2 hours of steady time past the old re-arm time). Below the stop SoC
+  nothing changes: the old latch is released and the charge is re-armed then.
   For the first 1800 evaluations after activation (counted only while the machine state
   is verified; about 30 minutes at the default 1 s cycle) a disarmed device is not armed
   at all unless the battery is clearly low, so a restart on a stale clock (gw-pi2 has no

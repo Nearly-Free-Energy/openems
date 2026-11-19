@@ -266,6 +266,57 @@ public class SrneBatteryInverterNightChargeStopTest {
 		test.deactivate();
 	}
 
+	@Test
+	public void testLatchLeftFromTheLastNightMovesToThisWindowWithTheScheduleOff() throws Exception {
+		// chargePrioritySchedule=false: E20F is not managed, yet the relatch changes
+		// E02C. Stopped at 03:00 local, then the clock is lost until 00:10 the next
+		// night (one step), so the old latch waits REARM_CONFIRM (until about 02:10).
+		for (var stopSocAgain : new boolean[] { false, true }) {
+			var sut = new SrneBatteryInverterImpl();
+			final var clock = clockAt("2026-11-13T00:00:00Z");
+			final var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
+			final var test = start(sut, bridge, clock, config(50));
+			assertFalse(hasReadTask(sut, 0xE20F));
+			assertEquals(NightChargeStop.State.STOPPED, state(sut));
+			deviceWritesEnable(sut, bridge, test, 0);
+			bridge.withRegisters(0x0100, 30);
+			clock.leap(21 * 60 + 10, ChronoUnit.MINUTES);
+			test.next(new TestCase(), SETTLE_CYCLES);
+			leap(clock, test, 50); // 01:00
+			assertEquals(NightChargeStop.State.STOPPED, state(sut));
+			if (stopSocAgain) {
+				bridge.withRegisters(0x0100, 60);
+			}
+			// 01:00 to 02:30 local in 5-minute steps; the device plays any E02C write.
+			Instant armedAt = null;
+			for (var i = 0; i < 18; i++) {
+				leap(clock, test, 5);
+				if (armedAt == null && Integer.valueOf(1).equals(sut.chargeWindowForTest().queuedEnable())) {
+					armedAt = clock.instant();
+					deviceWritesEnable(sut, bridge, test, 1);
+				}
+			}
+			if (!stopSocAgain) {
+				// Below the stop: the old latch is released inside the window, at the end
+				// of REARM_CONFIRM, and E02C is armed again, as before the relatch.
+				assertEquals(Instant.parse("2026-11-13T23:10:00Z"), armedAt);
+				assertEquals(NightChargeStop.State.CHARGING, state(sut));
+			} else {
+				// The stop SoC confirmed in this window: latched for this window, E02C
+				// stays 0 until this window's re-arm time (06:15).
+				assertNull(armedAt);
+				assertEquals(NightChargeStop.State.STOPPED, state(sut));
+				assertNull(sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset());
+				leap(clock, test, 220); // 06:10
+				assertEquals(NightChargeStop.State.STOPPED, state(sut));
+				leap(clock, test, 5); // 06:15
+				assertEquals(NightChargeStop.State.OUTSIDE_WINDOW, state(sut));
+				assertEquals(1, sut.chargeWindowForTest().queuedEnable());
+			}
+			test.deactivate();
+		}
+	}
+
 	// Charge timer 00:05-01:30 inside the charge-priority night 00:00-01:35.
 	private static final int SHORT_START = 5; // 00:05
 	private static final int SHORT_STOP = 286; // 01:30
