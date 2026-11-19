@@ -204,7 +204,11 @@ resuming the charge.
   therefore also ends the night charge priority. The stop counts once it has latched
   (`STOPPED`) in the current charge window. After a restart, `HELD_DISARMED` counts
   only after 30 evaluations inside the window with the last 3 SoC reads at or above
-  `nightChargeStopSoc - 5`; with an unknown or clearly lower SoC it does not count. A
+  `nightChargeStopSoc - 5`; with an unknown or clearly lower SoC it does not count.
+  With an unknown SoC (`0x0100` unreadable) the device stays disarmed and the night
+  value is held back, so the night charge is blocked; after 30 evaluations inside the
+  window this is reported as `HELD_SOC_UNKNOWN` with one warning, until the SoC reads
+  again or the re-arm time. A
   latch left over from an earlier night (e.g. the re-arm was delayed by a grid outage)
   never ends the next night by itself; the stop SoC confirmed in the new window latches
   it for that window. The charge-priority schedule then treats the night window
@@ -267,7 +271,7 @@ resuming the charge.
   about 1 %/min the charge ends a few percent above `nightChargeStopSoc`.
 * Channel `NightChargeStopState` (`OFF` while configured but inert or invalid): `OFF`, `OUTSIDE_WINDOW`, `CHARGING`, `STOPPED`,
   `HELD_DISARMED`, `WAITING_FOR_DATA`, `WAITING_FOR_MAINS`, `DAILY_WRITE_LIMIT`,
-  `WRITE_FAILED`.
+  `WRITE_FAILED`, `HELD_SOC_UNKNOWN`.
 * Commissioning: it is not yet proven on the unit that writing `0xE02C` = 0 ends a timed
   charge already in progress. Prove it first under a short window (e.g. `00:00-00:40`)
   with a stop SoC the charge reaches before the window ends (e.g. `30` from a start near

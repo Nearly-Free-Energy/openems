@@ -95,7 +95,13 @@ final class NightChargeStop {
 		/** The daily write ceiling is reached: the charge is not ended. */
 		DAILY_WRITE_LIMIT(7), //
 		/** The enable write failed. */
-		WRITE_FAILED(8);
+		WRITE_FAILED(8), //
+		/**
+		 * Held disarmed inside the window for {@link #HELD_CONFIRM_CYCLES} evaluations
+		 * with the SoC unknown: the night charge is blocked (E02C held at 0, the night
+		 * charge priority held back) until the SoC reads again or the re-arm time.
+		 */
+		HELD_SOC_UNKNOWN(9);
 
 		private final int value;
 
@@ -170,6 +176,7 @@ final class NightChargeStop {
 	private volatile int aboveReads;
 	private volatile int belowReads;
 	private volatile int bandReads;
+	private volatile boolean socKnown;
 	// The latch and the hold are keyed to the local date. That is the date the
 	// window opened because the charge window never crosses midnight
 	// (ScheduleWindow.isValidWindow rejects start >= stop, see inertReason).
@@ -189,6 +196,7 @@ final class NightChargeStop {
 	private int unknownCycles;
 	private int evaluations;
 	private boolean latchedThisActivation;
+	private boolean socUnknownReported;
 	private String pendingMessage;
 	private Instant lastInstant;
 	private int steadyClockCycles;
@@ -271,6 +279,7 @@ final class NightChargeStop {
 			return;
 		}
 		var usable = soc != null && soc >= 0 && soc <= 100;
+		this.socKnown = usable;
 		var above = usable && soc >= this.stopSoc;
 		var below = usable && soc < this.stopSoc - REARM_HYSTERESIS;
 		this.aboveReads = above ? Math.min(this.aboveReads + 1, CONFIRM_READS) : 0;
@@ -463,6 +472,17 @@ final class NightChargeStop {
 		} else {
 			this.heldOn = heldInside ? now.toLocalDate() : null;
 			this.heldCycles = heldInside ? 1 : 0;
+		}
+		var socUnknownHeld = heldInside && !this.socKnown && this.heldCycles >= HELD_CONFIRM_CYCLES;
+		if (socUnknownHeld) {
+			state = State.HELD_SOC_UNKNOWN;
+			if (!this.socUnknownReported && message == null) {
+				message = "Night charge stop: the device reads disarmed in the window and the SoC is unknown;"
+						+ " the night charge is blocked until the SoC reads again or the re-arm time";
+				this.socUnknownReported = true;
+			}
+		} else {
+			this.socUnknownReported = false;
 		}
 		if (limit) {
 			state = State.DAILY_WRITE_LIMIT;

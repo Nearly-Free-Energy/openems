@@ -1159,7 +1159,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		var step = this.nightChargeStop.step(this.nightChargeNow,
 				this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE), this.chargeWindow);
-		if (step.message() != null) {
+		if (step.message() != null && step.state() == NightChargeStop.State.HELD_SOC_UNKNOWN) {
+			this.logWarn(this.log, step.message());
+		} else if (step.message() != null) {
 			this.logInfo(this.log, step.message());
 		}
 		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE, step.state());

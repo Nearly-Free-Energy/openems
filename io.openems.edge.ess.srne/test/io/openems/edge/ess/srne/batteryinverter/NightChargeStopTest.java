@@ -621,11 +621,29 @@ public class NightChargeStopTest {
 		assertTrue(inBand.ended());
 		assertFalse(inBand.pending());
 
-		// SoC unknown: held, never counted as a stop, the night value stays back.
+		// SoC unknown: held, never counted as a stop, the night value stays back. Once
+		// held for HELD_CONFIRM_CYCLES the blocked night charge is reported, with one
+		// message.
 		var unknown = new Device(0);
-		assertEquals(State.HELD_DISARMED, unknown.cycles(at(3, 0), 2 * NightChargeStop.HELD_CONFIRM_CYCLES).state());
+		assertEquals(State.HELD_DISARMED, unknown.cycles(at(3, 0), NightChargeStop.HELD_CONFIRM_CYCLES - 1).state());
+		var blocked = unknown.cycle(at(3, 1));
+		assertEquals(State.HELD_SOC_UNKNOWN, blocked.state());
+		assertNotNull(blocked.message());
+		assertEquals(0, blocked.enable());
+		var later = unknown.cycles(at(3, 2), NightChargeStop.HELD_CONFIRM_CYCLES);
+		assertEquals(State.HELD_SOC_UNKNOWN, later.state());
+		assertNull(later.message());
 		assertFalse(unknown.ended());
 		assertTrue(unknown.pending());
+		// An unreadable SoC read keeps it reported; a usable read clears it.
+		unknown.sut.onSocRead(null);
+		assertEquals(State.HELD_SOC_UNKNOWN, unknown.cycle(at(3, 3)).state());
+		unknown.soc(48, 3);
+		assertEquals(State.HELD_DISARMED, unknown.cycle(at(3, 4)).state());
+		assertTrue(unknown.ended());
+		// After the window (the re-arm delay) it is no longer reported.
+		unknown.sut.onSocRead(null);
+		assertEquals(State.HELD_DISARMED, unknown.cycles(at(6, 5), NightChargeStop.HELD_CONFIRM_CYCLES).state());
 
 		// SoC clearly low (a restart at 15 % after an earlier stop): re-armed, the
 		// night charge goes on.

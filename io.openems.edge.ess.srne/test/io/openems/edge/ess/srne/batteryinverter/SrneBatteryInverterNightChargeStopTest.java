@@ -403,6 +403,32 @@ public class SrneBatteryInverterNightChargeStopTest {
 	}
 
 	@Test
+	public void testRestartWithUnknownSocReportsTheBlockedNightCharge() throws Exception {
+		// Restart at 01:10 local with E02C reading 0 and the SoC register unreadable:
+		// the stop holds the device disarmed and the night value back, which is
+		// reported as HELD_SOC_UNKNOWN instead of a silent HELD_DISARMED.
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE026, SHORT_START, SHORT_STOP) //
+				.withRegisters(0xE02C, 0, 0, 0) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0xE20F, 3) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var test = startShortNight(sut, bridge, clock, 50);
+		for (var i = 0; i < NightChargeStop.HELD_CONFIRM_CYCLES + CYCLES; i++) {
+			test.next(new TestCase());
+			assertFalse(sut.takeChargePriorityWriteForTest(), "cycle " + i);
+		}
+		assertEquals(NightChargeStop.State.HELD_SOC_UNKNOWN, state(sut));
+		// The night value is the target but held back: never written (checked above).
+		assertTrue(sut.nightChargeStopForTest()
+				.isNightChargePending(LocalDateTime.ofInstant(clock.instant(), ZoneId.of("Africa/Kampala"))));
+		assertEquals(2, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	@Test
 	public void testFailedDayWriteAfterTheStopDoesNotBlockTheOtherSettings() throws Exception {
 		var sut = new SrneBatteryInverterImpl();
 		final var clock = clockAt("2026-11-12T21:55:00Z");
