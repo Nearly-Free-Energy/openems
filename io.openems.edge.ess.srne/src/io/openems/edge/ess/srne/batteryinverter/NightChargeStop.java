@@ -50,6 +50,11 @@ import io.openems.common.types.OptionsEnum;
  * clock crossed the re-arm time forward in small steps; after a clock step or a
  * gap it needs {@link #REARM_CONFIRM} of steady time past the re-arm time, so
  * an NTP or manual step cannot re-arm inside the real window.</li>
+ * <li>Charge priority: with E20F at the night value (hybrid) the unit charges
+ * from mains at any hour on the line, timer or not, so disarming E02C alone
+ * does not end the charge. {@link #hasEndedCharge} tells the
+ * {@link ChargePrioritySchedule} to end its night value for the rest of that
+ * night.</li>
  * </ul>
  *
  * <p>
@@ -159,6 +164,7 @@ final class NightChargeStop {
 	private volatile int aboveReads;
 	private volatile int belowReads;
 	private LocalDate latchedOn;
+	private LocalDate heldOn;
 	private Integer applied;
 	private boolean ownWrite;
 	private int failures;
@@ -418,6 +424,7 @@ final class NightChargeStop {
 		}
 		int target;
 		State state;
+		this.heldOn = null;
 		if (this.latchedOn != null) {
 			target = 0;
 			state = State.STOPPED;
@@ -427,6 +434,7 @@ final class NightChargeStop {
 			// not see, and not right after activation, when the clock may still be stale.
 			target = 0;
 			state = State.HELD_DISARMED;
+			this.heldOn = inside ? now.toLocalDate() : null;
 		} else {
 			target = 1;
 			state = inside ? State.CHARGING : State.OUTSIDE_WINDOW;
@@ -439,6 +447,25 @@ final class NightChargeStop {
 			state = failedState;
 		}
 		return new Step(this.applied, state, message);
+	}
+
+	/**
+	 * Whether this rule has ended the night charge of the current window: the stop
+	 * is latched ({@link State#STOPPED}, until the re-arm), or a device that reads
+	 * disarmed is held disarmed inside the window ({@link State#HELD_DISARMED}, a
+	 * stop seen before a restart). The charge-priority schedule then ends its night
+	 * value too, so the unit does not charge from mains outside the disarmed timer.
+	 * Edge cycle thread only.
+	 *
+	 * @return true while the night charge is ended
+	 */
+	boolean hasEndedCharge() {
+		if (this.latchedOn != null) {
+			return true;
+		}
+		var now = this.lastNow;
+		return this.heldOn != null && now != null && this.heldOn.equals(now.toLocalDate())
+				&& this.isInsideWindow(now.toLocalTime());
 	}
 
 	// Moves the target to the window, or retries a failed write of this rule.

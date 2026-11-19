@@ -249,4 +249,112 @@ public class SrneBatteryInverterNightChargeStopTest {
 		assertEquals(1, sut.chargeWindowForTest().queuedEnable());
 		test.deactivate();
 	}
+
+	// Charge timer 00:05-01:30 inside the charge-priority night 00:00-01:35.
+	private static final int SHORT_START = 5; // 00:05
+	private static final int SHORT_STOP = 286; // 01:30
+
+	private static Integer chargePriorityTarget(SrneBatteryInverterImpl sut) {
+		Channel<Integer> channel = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET);
+		return channel.value().get();
+	}
+
+	// 00:55 local (21:55Z), SoC 30 %, hybrid on the device, past the startup holds.
+	private static ComponentTest startShortNight(SrneBatteryInverterImpl sut, DummyModbusBridge bridge,
+			TimeLeapClock clock, int nightChargeStopSoc) throws Exception {
+		return new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setChargeWindow1Start(SHORT_START) //
+						.setChargeWindow1Stop(SHORT_STOP) //
+						.setChargeScheduleEnable(1) //
+						.setNightChargeStopSoc(nightChargeStopSoc) //
+						.setChargePrioritySchedule(true) //
+						.setChargePriorityRestoreWhenOff(true) //
+						.setNightChargeFrom("00:00") //
+						.setNightChargeTo("01:35") //
+						.build()) //
+				.next(new TestCase(), ModeSchedule.STARTUP_HOLD_CYCLES + CYCLES);
+	}
+
+	private static DummyModbusBridge shortNightBridge() {
+		return new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE026, SHORT_START, SHORT_STOP) //
+				.withRegisters(0xE02C, 1, 0, 0) //
+				.withRegisters(0x0100, 30) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0xE20F, 2) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+	}
+
+	// Steady 5-minute steps (a larger step would close the clock gates).
+	private static void leap(TimeLeapClock clock, ComponentTest test, int minutes) throws Exception {
+		for (var i = 0; i < minutes / 5; i++) {
+			clock.leap(5, ChronoUnit.MINUTES);
+			test.next(new TestCase(), CYCLES);
+		}
+	}
+
+	@Test
+	public void testStopEndsTheNightChargePriority() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T21:55:00Z");
+		final var bridge = shortNightBridge();
+		final var test = startShortNight(sut, bridge, clock, 50);
+		assertEquals(NightChargeStop.State.CHARGING, state(sut));
+		assertEquals(2, chargePriorityTarget(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+
+		// 01:05 local, SoC at the stop: E02C is disarmed and E20F goes to PV only now.
+		leap(clock, test, 10);
+		bridge.withRegisters(0x0100, 50);
+		for (var i = 0; i < 4 * CYCLES && state(sut) != NightChargeStop.State.STOPPED; i++) {
+			test.next(new TestCase());
+		}
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		assertEquals(3, chargePriorityTarget(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, 3);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.chargePriorityScheduleForTest().handlerState());
+
+		// SoC far below the stop until the night window ends: no hybrid again.
+		bridge.withRegisters(0x0100, 20);
+		for (var i = 0; i < 6; i++) {
+			leap(clock, test, 5);
+			assertEquals(3, chargePriorityTarget(sut));
+			assertFalse(sut.takeChargePriorityWriteForTest());
+		}
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testStopOffKeepsTheNightChargePriorityUntilTheWindowEnd() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T21:55:00Z");
+		final var bridge = shortNightBridge();
+		final var test = startShortNight(sut, bridge, clock, -1);
+		bridge.withRegisters(0x0100, 99);
+		// 00:55 to 01:30 local: hybrid stays, nothing is written.
+		for (var i = 0; i < 7; i++) {
+			leap(clock, test, 5);
+			assertEquals(2, chargePriorityTarget(sut));
+			assertFalse(sut.takeChargePriorityWriteForTest());
+		}
+		// 01:35: the day value at the normal window end.
+		leap(clock, test, 5);
+		assertEquals(3, chargePriorityTarget(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		test.deactivate();
+	}
 }

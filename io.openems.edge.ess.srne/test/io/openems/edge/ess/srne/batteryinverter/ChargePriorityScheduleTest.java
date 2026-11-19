@@ -757,4 +757,141 @@ public class ChargePriorityScheduleTest {
 		assertFalse(sut.coversTimer(LocalTime.of(5, 0), LocalTime.of(1, 0)));
 		assertFalse(sut.coversTimer(LocalTime.of(18, 0), LocalTime.of(22, 0)));
 	}
+
+	// Night 00:00-01:35, past the startup hold and in sync by day on DATE.
+	private static ChargePrioritySchedule shortNight() {
+		var sut = ChargePrioritySchedule.fromConfig(true, HYBRID, PV_ONLY, "00:00", "01:35");
+		for (var i = 0; i < ModeSchedule.STARTUP_HOLD_CYCLES; i++) {
+			assertEquals(ModeScheduleState.IN_SYNC, step(sut, at(DAY), PV_ONLY, true).state());
+		}
+		return sut;
+	}
+
+	private static LocalDateTime nextNight(int days, int hour, int minute) {
+		return LocalDateTime.of(DATE.plusDays(days), LocalTime.of(hour, minute));
+	}
+
+	// One cycle with the night charge stop state and one fresh machine-state read.
+	private static ChargePrioritySchedule.Step stepStop(ChargePrioritySchedule sut, LocalDateTime now, Integer e20f,
+			int machineState, boolean stopped) {
+		sut.onMachineStateRead(machineState);
+		return sut.step(now, e20f, true, machineState == 2, ChargePrioritySchedule.isRunningState(machineState),
+				TIMEOUT, COOLDOWN, stopped);
+	}
+
+	// The night value in place at 00:00 and kept until 01:04, the stop not latched.
+	private static void nightUntilTheStop(ChargePrioritySchedule sut) {
+		assertStep(stepStop(sut, nextNight(1, 0, 0), PV_ONLY, 2, false), ModeScheduleState.WRITE_PENDING, HYBRID,
+				HYBRID);
+		device(sut, HYBRID);
+		for (var t = nextNight(1, 0, 1); t.isBefore(nextNight(1, 1, 5)); t = t.plusMinutes(1)) {
+			assertStep(stepStop(sut, t, HYBRID, 2, false), ModeScheduleState.IN_SYNC, HYBRID, null);
+		}
+	}
+
+	@Test
+	public void testNightChargeStopEndsTheNightValueAtTheLatch() {
+		var sut = shortNight();
+		nightUntilTheStop(sut);
+		// 01:05: the stop latched, the day value goes out now, not at 01:35.
+		assertStep(stepStop(sut, nextNight(1, 1, 5), HYBRID, 2, true), ModeScheduleState.WRITE_PENDING, PV_ONLY,
+				PV_ONLY);
+		assertTrue(sut.isNightEnded(nextNight(1, 1, 5)));
+		device(sut, PV_ONLY);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.handlerState());
+		assertStep(stepStop(sut, nextNight(1, 1, 6), PV_ONLY, 2, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		// Counted as a day write, not against the night ceiling.
+		assertEquals(1, sut.dayWritesTodayForTest(DATE.plusDays(1)));
+		assertEquals(1, sut.writesTodayForTest(DATE.plusDays(1)));
+	}
+
+	@Test
+	public void testNoNightValueAgainInTheWindowAfterTheStop() {
+		var sut = shortNight();
+		nightUntilTheStop(sut);
+		stepStop(sut, nextNight(1, 1, 5), HYBRID, 2, true);
+		device(sut, PV_ONLY);
+		// The stop no longer reported (e.g. the SoC dropped below the hysteresis and
+		// the rule re-armed): the day value stays until the window end, no flapping.
+		for (var t = nextNight(1, 1, 6); t.isBefore(nextNight(1, 1, 35)); t = t.plusMinutes(1)) {
+			assertStep(stepStop(sut, t, PV_ONLY, 2, false), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+			assertFalse(sut.isNightLate(), t.toString());
+		}
+		// An override back to hybrid in the window is corrected to the day value.
+		ChargePrioritySchedule.Step step = null;
+		for (var i = 0; i < 1000 && (step == null || step.write() == null); i++) {
+			step = stepStop(sut, nextNight(1, 1, 34), HYBRID, 2, false);
+			assertEquals(PV_ONLY, step.target());
+		}
+		assertEquals(PV_ONLY, step.write());
+		device(sut, PV_ONLY);
+		assertStep(stepStop(sut, nextNight(1, 1, 35), PV_ONLY, 2, false), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+	}
+
+	@Test
+	public void testNextNightStartsWithTheNightValueAfterAStop() {
+		var sut = shortNight();
+		nightUntilTheStop(sut);
+		stepStop(sut, nextNight(1, 1, 5), HYBRID, 2, true);
+		device(sut, PV_ONLY);
+		for (var t = nextNight(1, 1, 6); t.isBefore(nextNight(1, 23, 59)); t = t.plusMinutes(1)) {
+			assertNull(stepStop(sut, t, PV_ONLY, 2, false).write());
+		}
+		assertFalse(sut.isNightEnded(nextNight(2, 0, 0)));
+		assertStep(stepStop(sut, nextNight(2, 0, 0), PV_ONLY, 2, false), ModeScheduleState.WRITE_PENDING, HYBRID,
+				HYBRID);
+		device(sut, HYBRID);
+		assertStep(stepStop(sut, nextNight(2, 0, 1), HYBRID, 2, false), ModeScheduleState.IN_SYNC, HYBRID, null);
+	}
+
+	@Test
+	public void testNightChargeStopOffIsUnchanged() {
+		// Without the stop (false) the schedule acts exactly as the plain step,
+		// through two days in one-minute steps with a device that takes each write.
+		var plain = shortNight();
+		var withStop = shortNight();
+		Integer e20f = PV_ONLY;
+		for (var t = nextNight(1, 0, 0); t.isBefore(nextNight(3, 0, 0)); t = t.plusMinutes(1)) {
+			plain.onMachineStateRead(2);
+			var expected = plain.step(t, e20f, true, true, true, TIMEOUT, COOLDOWN);
+			var actual = stepStop(withStop, t, e20f, 2, false);
+			assertEquals(expected, actual, t.toString());
+			assertFalse(withStop.isNightEnded(t));
+			if (actual.write() != null) {
+				device(plain, actual.write());
+				device(withStop, actual.write());
+				e20f = actual.write();
+			}
+		}
+		// A stop reported outside the night window changes nothing.
+		var day = shortNight();
+		assertStep(stepStop(day, at(DAY), PV_ONLY, 2, true), ModeScheduleState.IN_SYNC, PV_ONLY, null);
+		assertFalse(day.isNightEnded(at(DAY)));
+	}
+
+	@Test
+	public void testNightChargeStopKeepsTheMachineStateGates() {
+		var sut = shortNight();
+		nightUntilTheStop(sut);
+		// Fault (10) or standby (1): no E20F write, the day value waits.
+		for (var state : new int[] { 10, 1 }) {
+			for (var i = 0; i < ModeSchedule.MAINS_CONFIRM_READS + 5; i++) {
+				assertStep(stepIn8(sut, nextNight(1, 1, 5), HYBRID, state), ModeScheduleState.WAITING_FOR_MAINS,
+						PV_ONLY, null);
+			}
+		}
+		assertNull(sut.writeElement().getNextWriteValueAndReset());
+		// On battery (state 3): the day value goes out once confirmed, as by day.
+		ChargePrioritySchedule.Step step = null;
+		for (var i = 0; i < ModeSchedule.MAINS_CONFIRM_READS; i++) {
+			step = stepIn8(sut, nextNight(1, 1, 6), HYBRID, ModeSchedule.ON_BATTERY_STATE);
+		}
+		assertStep(step, ModeScheduleState.WRITE_PENDING, PV_ONLY, PV_ONLY);
+		device(sut, PV_ONLY);
+	}
+
+	private static ChargePrioritySchedule.Step stepIn8(ChargePrioritySchedule sut, LocalDateTime now, Integer e20f,
+			int machineState) {
+		return stepStop(sut, now, e20f, machineState, true);
+	}
 }

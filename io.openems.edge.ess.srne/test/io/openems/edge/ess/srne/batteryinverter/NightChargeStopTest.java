@@ -519,4 +519,40 @@ public class NightChargeStopTest {
 		assertEquals(State.CHARGING, step.state());
 		assertEquals(1, device.enable);
 	}
+
+	@Test
+	public void testHasEndedChargeFromTheStopUntilTheRearm() {
+		var device = new Device(1);
+		assertFalse(NightChargeStop.OFF.hasEndedCharge());
+		device.soc(30, 3);
+		device.cycles(at(1, 0), 3);
+		assertFalse(device.sut.hasEndedCharge());
+		device.soc(50, 3);
+		assertEquals(State.STOPPED, device.cycle(at(1, 5)).state());
+		assertTrue(device.sut.hasEndedCharge());
+		// Below the stop minus the hysteresis: still ended for this window.
+		device.soc(STOP_SOC - NightChargeStop.REARM_HYSTERESIS - 10, 3);
+		assertEquals(State.STOPPED, device.walk(at(1, 6), at(6, 14)).state());
+		assertTrue(device.sut.hasEndedCharge());
+		// Re-armed after the window: the next night is not ended.
+		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(6, 15)).state());
+		assertFalse(device.sut.hasEndedCharge());
+		device.soc(30, 3);
+		assertEquals(State.CHARGING, device.cycles(at(NIGHT.plusDays(1), 0, 30), 3).state());
+		assertFalse(device.sut.hasEndedCharge());
+	}
+
+	@Test
+	public void testHasEndedChargeWhenHeldDisarmedInsideTheWindowOnly() {
+		// Restart inside the window after a stop: held disarmed, the charge is ended.
+		var inside = new Device(0);
+		inside.soc(48, 3);
+		assertEquals(State.HELD_DISARMED, inside.cycles(at(3, 0), 3).state());
+		assertTrue(inside.sut.hasEndedCharge());
+		// Held after the window (re-arm delay): no night charge left to end.
+		var after = new Device(0);
+		after.soc(60, 3);
+		assertEquals(State.HELD_DISARMED, after.cycles(at(6, 5), 3).state());
+		assertFalse(after.sut.hasEndedCharge());
+	}
 }
