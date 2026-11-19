@@ -466,7 +466,8 @@ public class SrneBatteryInverterNightChargeStopTest {
 		// 17 Nov: a FAILED E20F handler must not hold the mode schedule's SBU gate
 		// (ModeScheduleState 7). Night 22:00-06:00 with the mode schedule (SBU from
 		// 18:00), charge timer 22:30-23:30; at 23:00 local the SoC is above the stop
-		// and the device rejects the day value.
+		// and the device rejects the day value and every retry of it. Only the E01F,
+		// E020 and E215 prerequisite handlers may gate SBU.
 		var sut = new SrneBatteryInverterImpl();
 		final var clock = clockAt("2026-11-12T20:00:00Z");
 		final var bridge = new DummyModbusBridge("modbus0") //
@@ -501,36 +502,42 @@ public class SrneBatteryInverterNightChargeStopTest {
 						.setNightChargeFrom("22:00") //
 						.setNightChargeTo("06:00") //
 						.build());
+		var cycles = 0;
 		Integer write = null;
 		for (var i = 0; i < 4 * SETTLE_CYCLES && write == null; i++) {
 			test.next(new TestCase());
+			cycles++;
 			write = takeE20fWrite(sut);
 		}
 		assertEquals(3, write);
 		assertEquals(NightChargeStop.State.STOPPED, state(sut));
 		sut.chargePriorityScheduleForTest().onExecute(new ExecuteState.Error(new Exception("rejected")));
-		test.next(new TestCase());
+		// The device rejects every day-write retry, so E20F never leaves FAILED. Run
+		// the mode schedule past its startup hold, in its SBU window: SBU goes out and
+		// state 7 is never reported.
+		var rejectedRetries = 0;
+		Integer sbu = null;
+		for (var i = 0; i < 4 * ModeSchedule.STARTUP_HOLD_CYCLES && sbu == null; i++) {
+			test.next(new TestCase());
+			cycles++;
+			assertNotEquals(ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, modeScheduleState(sut), "cycle " + cycles);
+			var retry = takeE20fWrite(sut);
+			if (retry != null) {
+				assertEquals(3, retry);
+				sut.chargePriorityScheduleForTest().onExecute(new ExecuteState.Error(new Exception("rejected")));
+				rejectedRetries++;
+			}
+			assertEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState(),
+					"cycle " + cycles);
+			var queued = sut.modeScheduleForTest().writeElement().getNextWriteValueAndReset();
+			sbu = queued == null ? null : queued[0].getValue();
+		}
+		assertEquals(ModeSchedule.SBU, sbu);
+		assertEquals(2, sbu);
+		assertTrue(cycles >= ModeSchedule.STARTUP_HOLD_CYCLES, "SBU after the startup hold, cycle " + cycles);
+		assertTrue(rejectedRetries >= 1, "retries rejected: " + rejectedRetries);
 		assertEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState());
-		// Leaves FAILED after the cooldown (retried); the SBU gate is never held.
-		write = null;
-		for (var i = 0; i < 4 * ModeSchedule.STARTUP_HOLD_CYCLES && write == null; i++) {
-			test.next(new TestCase());
-			assertNotEquals(ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, modeScheduleState(sut), "cycle " + i);
-			write = takeE20fWrite(sut);
-		}
-		assertEquals(3, write);
-		assertNotEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState());
-		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
-		bridge.withRegister(0xE20F, 3);
-		// The mode schedule writes SBU once out of its startup hold.
-		var sbu = false;
-		for (var i = 0; i < 2 * ModeSchedule.STARTUP_HOLD_CYCLES && !sbu; i++) {
-			test.next(new TestCase());
-			assertNotEquals(ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, modeScheduleState(sut));
-			sbu = sut.takeModeScheduleWriteForTest();
-		}
-		assertTrue(sbu);
-		assertEquals(SafeWriteHandler.State.VERIFIED, sut.chargePriorityScheduleForTest().handlerState());
+		assertEquals(3, chargePriorityTarget(sut));
 		test.deactivate();
 	}
 
