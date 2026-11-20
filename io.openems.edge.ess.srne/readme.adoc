@@ -229,6 +229,23 @@ resuming the charge.
   resumes by design: `0xE02C` is armed, the night value is written and the stop
   latches again at `nightChargeStopSoc`. With `nightChargeStopSoc=-1` the schedule is
   unchanged.
+* One-night override (`NightChargeStopSocTonight`, ADR-017): a write of `30..90` to
+  this channel replaces `nightChargeStopSoc` for the next charge window only. It writes
+  no register; it only changes the SoC at which the stop latches. The stop SoC of a
+  window is chosen once, at its first known time: the override is used if it was
+  written after the previous window ended (its re-arm time) and before this window
+  started, otherwise `nightChargeStopSoc` applies. An override outside `30..90` is
+  rejected for that window: one warning, `NightChargeStopOverrideRejected` set until
+  the window ends. When the window ends (the re-arm path) the override is cleared. A
+  write inside the window (or its re-arm delay) is ignored with a warning, so it cannot
+  change the running window. A taken write (or a cancel, `null` or negative) is
+  persisted to the component configuration (`nightChargeStopSocTonight`,
+  `nightChargeStopSocTonightWrittenAt`; this replaces the component instance once,
+  outside the window), so a restart inside the window keeps the applied value and a
+  restart after it drops the expired override. `NightChargeStopSocApplied` and
+  `NightChargeStopSocSource` (`CONFIG` or `OVERRIDE`) show the stop SoC in effect.
+  Not yet proven on a unit that the override is honoured (ADR-017 row N6): test it in
+  daylight before relying on it at night.
 * Commissioning: switching `0xE20F` from 2 to 3 during an active grid charge has not
   been tried on a unit. Keep `nightChargeStopSoc=-1` on production gateways until one
   supervised night has shown the charge current stop within a minute of `STOPPED`.

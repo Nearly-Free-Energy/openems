@@ -46,6 +46,8 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 		private String daytimeSocRuleFrom = "";
 		private boolean eveningReserveHold = false;
 		private int nightChargeStopSoc = -1;
+		private int nightChargeStopSocTonight = -1;
+		private String nightChargeStopSocTonightWrittenAt = "";
 		private boolean chargePrioritySchedule = false;
 		private boolean chargePriorityRestoreWhenOff = false;
 		private int nightChargePriority = 2;
@@ -231,6 +233,12 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 
 		public Builder setNightChargeStopSoc(int value) {
 			this.nightChargeStopSoc = value;
+			return this;
+		}
+
+		public Builder setNightChargeStopSocTonight(int value, String writtenAt) {
+			this.nightChargeStopSocTonight = value;
+			this.nightChargeStopSocTonightWrittenAt = writtenAt;
 			return this;
 		}
 
@@ -481,6 +489,16 @@ public class MyConfig extends AbstractComponentConfig implements Config {
 	@Override
 	public int nightChargeStopSoc() {
 		return this.builder.nightChargeStopSoc;
+	}
+
+	@Override
+	public int nightChargeStopSocTonight() {
+		return this.builder.nightChargeStopSocTonight;
+	}
+
+	@Override
+	public String nightChargeStopSocTonightWrittenAt() {
+		return this.builder.nightChargeStopSocTonightWrittenAt;
 	}
 
 	@Override

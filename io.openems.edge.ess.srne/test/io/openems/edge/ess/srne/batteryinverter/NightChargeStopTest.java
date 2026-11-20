@@ -737,4 +737,179 @@ public class NightChargeStopTest {
 		assertEquals(State.STOPPED, device.walk(at(next, 1, 2), at(next, 6, 14)).state());
 		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(next, 6, 15)).state());
 	}
+
+	// One-night override (ADR-017). Written in the afternoon before the night.
+	private static final LocalDateTime AFTERNOON = at(NIGHT.minusDays(1), 14, 0);
+
+	private static void assertApplied(NightChargeStop sut, int soc, NightChargeStop.SocSource source) {
+		assertEquals(soc, sut.getAppliedStopSoc());
+		assertEquals(source, sut.getStopSocSource());
+	}
+
+	@Test
+	public void testOverrideIsUsedForTheNextWindow() {
+		var device = new Device(1);
+		assertNull(device.sut.writeOverride(40, AFTERNOON));
+		assertEquals(40, device.sut.getOverride().soc());
+		device.soc(20, 3);
+		// Before the window the configured stop SoC is in effect.
+		assertEquals(State.OUTSIDE_WINDOW, device.cycle(at(NIGHT.minusDays(1), 23, 59)).state());
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		var step = device.cycle(at(0, 0));
+		assertEquals(State.CHARGING, step.state());
+		assertNotNull(step.message());
+		assertNull(step.warning());
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		assertFalse(device.sut.isOverrideRejected());
+		// 40 % ends the charge, ten points below the configured 50 %.
+		device.soc(40, 3);
+		step = device.cycle(at(2, 0));
+		assertEquals(State.STOPPED, step.state());
+		assertEquals(0, step.enable());
+		device.cycles(at(2, 1), 3);
+		assertEquals(0, device.enable);
+		assertEquals(1, device.writes);
+	}
+
+	@Test
+	public void testNoOverrideUsesTheConfiguredStopSoc() {
+		var device = new Device(1);
+		device.soc(40, 3);
+		assertEquals(State.CHARGING, device.cycles(at(0, 0), 3).state());
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		assertNull(device.sut.getOverride());
+		device.soc(49, 3);
+		assertEquals(State.CHARGING, device.cycle(at(2, 0)).state());
+		device.soc(50, 3);
+		assertEquals(State.STOPPED, device.cycle(at(2, 1)).state());
+	}
+
+	@Test
+	public void testOutOfRangeOverrideIsRejectedForTheWindow() {
+		for (var soc : new int[] { NightChargeStop.OVERRIDE_MIN_SOC - 1, NightChargeStop.OVERRIDE_MAX_SOC + 1 }) {
+			var device = new Device(1);
+			assertNull(device.sut.writeOverride(soc, AFTERNOON));
+			device.soc(20, 3);
+			var step = device.cycle(at(0, 0));
+			assertNotNull(step.warning(), "" + soc);
+			assertTrue(device.sut.isOverrideRejected());
+			assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+			// Warned once; the flag stays for the window.
+			assertNull(device.walk(at(0, 1), at(1, 0)).warning());
+			assertTrue(device.sut.isOverrideRejected());
+			device.soc(soc, 3);
+			assertEquals(soc < STOP_SOC ? State.CHARGING : State.STOPPED, device.cycle(at(1, 1)).state());
+			// The window ends: the flag and the override are cleared.
+			device.walk(at(1, 2), at(6, 15));
+			assertFalse(device.sut.isOverrideRejected());
+			assertNull(device.sut.getOverride());
+		}
+		// The bounds themselves are accepted.
+		for (var soc : new int[] { NightChargeStop.OVERRIDE_MIN_SOC, NightChargeStop.OVERRIDE_MAX_SOC }) {
+			var device = new Device(1);
+			device.sut.writeOverride(soc, AFTERNOON);
+			assertNull(device.cycle(at(0, 0)).warning());
+			assertApplied(device.sut, soc, NightChargeStop.SocSource.OVERRIDE);
+		}
+	}
+
+	@Test
+	public void testOverrideIsClearedWhenTheWindowEnds() {
+		var device = new Device(1);
+		device.sut.writeOverride(40, AFTERNOON);
+		device.cycle(at(0, 59));
+		// Reads counted for another stop SoC do not count: fresh reads at 40 %.
+		device.soc(40, 3);
+		assertEquals(State.STOPPED, device.cycles(at(1, 0), 3).state());
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		// Kept through the re-arm delay; cleared with the re-arm.
+		device.walk(at(1, 1), at(6, 14));
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		var step = device.cycle(at(6, 15));
+		assertEquals(State.OUTSIDE_WINDOW, step.state());
+		assertTrue(step.message().contains("cleared"), step.message());
+		assertNull(device.sut.getOverride());
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		// The next night runs on the configured stop SoC again.
+		var next = NIGHT.plusDays(1);
+		device.soc(45, 3);
+		assertEquals(State.CHARGING, device.cycles(at(next, 1, 0), 3).state());
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+
+		// A window that never reached the override is cleared at its end too.
+		var other = new Device(1);
+		other.sut.writeOverride(80, AFTERNOON);
+		other.soc(40, 3);
+		other.walk(at(0, 0), at(6, 15));
+		assertNull(other.sut.getOverride());
+		assertApplied(other.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+	}
+
+	@Test
+	public void testWriteInsideTheWindowDoesNotChangeTheWindow() {
+		var device = new Device(1);
+		device.sut.writeOverride(40, AFTERNOON);
+		device.soc(20, 3);
+		device.cycle(at(0, 30));
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		assertNotNull(device.sut.writeOverride(70, at(2, 0)));
+		assertNotNull(device.sut.writeOverride(null, at(2, 0)));
+		device.cycle(at(2, 0));
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		assertEquals(40, device.sut.getOverride().soc());
+		// Also during the re-arm delay.
+		device.walk(at(2, 1), at(6, 5));
+		assertNotNull(device.sut.writeOverride(70, at(6, 5)));
+
+		// Without an override, a write inside the window leaves the config in effect.
+		var plain = new Device(1);
+		plain.soc(20, 3);
+		plain.cycle(at(0, 30));
+		assertNotNull(plain.sut.writeOverride(40, at(1, 0)));
+		plain.cycle(at(1, 0));
+		assertApplied(plain.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		assertNull(plain.sut.getOverride());
+		// After the window a write is taken for the next night.
+		plain.walk(at(1, 1), at(6, 15));
+		assertNull(plain.sut.writeOverride(40, at(6, 16)));
+		plain.cycle(at(6, 16));
+		assertApplied(plain.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		plain.cycle(at(NIGHT.plusDays(1), 0, 0));
+		assertApplied(plain.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+	}
+
+	@Test
+	public void testRestartInTheWindowKeepsTheAppliedOverride() {
+		// Stopped at the override (40 %), then a restart at 03:00 with the persisted
+		// override: the device reads disarmed and the SoC is 38 %, clearly below the
+		// configured 50 % but inside the override's hysteresis band (35..39).
+		var device = new Device(0);
+		device.sut.restoreOverride(40, AFTERNOON);
+		device.cycle(at(3, 0));
+		device.soc(38, 3);
+		var step = device.cycles(at(3, 1), 3);
+		assertEquals(State.HELD_DISARMED, step.state());
+		assertEquals(0, step.enable());
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		assertEquals(0, device.writes);
+		// Clearly below the override: armed again, as for the configured stop SoC.
+		device.soc(34, 3);
+		assertEquals(State.CHARGING, device.cycles(at(3, 5), 3).state());
+		assertEquals(1, device.enable);
+
+		// The same restart without the override would resume the charge at once.
+		var configOnly = new Device(0);
+		configOnly.soc(38, 3);
+		assertEquals(State.CHARGING, configOnly.cycles(at(3, 0), 3).state());
+
+		// A restart after the window never applies the cleared override: the
+		// persisted one has expired and is dropped at the first known time.
+		var after = new Device(1);
+		after.sut.restoreOverride(40, AFTERNOON);
+		after.cycle(at(7, 0));
+		assertNull(after.sut.getOverride());
+		after.soc(20, 3);
+		after.cycle(at(NIGHT.plusDays(1), 0, 0));
+		assertApplied(after.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+	}
 }

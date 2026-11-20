@@ -60,6 +60,19 @@ import io.openems.common.types.OptionsEnum;
  * {@link ChargePrioritySchedule} to end its night value for the rest of that
  * night, and {@link #isNightChargePending} holds the night value back until
  * this rule has decided after an activation.</li>
+ * <li>One-night override ({@link #writeOverride}, ADR-017): the stop SoC of a
+ * window is chosen once, at the first known time inside that window or its
+ * re-arm delay. An override written after the previous window ended (re-arm
+ * time) and before this window started is used if it is within
+ * {@link #OVERRIDE_MIN_SOC}..{@link #OVERRIDE_MAX_SOC}; otherwise the
+ * configured stop SoC applies, and an out-of-range override is rejected for
+ * that window. The choice holds until the window ends (the latch released),
+ * then the override is cleared. The choice depends only on the override and the
+ * time it was written, both persisted by the caller, so a restart inside the
+ * window re-derives the same value, and a restart after the window never
+ * applies an override that was already cleared. A write inside the window
+ * changes nothing and is ignored. The override changes only the SoC at which
+ * the stop latches; it writes no register.</li>
  * </ul>
  *
  * <p>
@@ -129,6 +142,36 @@ final class NightChargeStop {
 		}
 	}
 
+	/** Where the stop SoC in effect comes from. */
+	public enum SocSource implements OptionsEnum {
+		UNDEFINED(-1), //
+		/** The configured nightChargeStopSoc. */
+		CONFIG(0), //
+		/** The one-night override (NightChargeStopSocTonight). */
+		OVERRIDE(1);
+
+		private final int value;
+
+		private SocSource(int value) {
+			this.value = value;
+		}
+
+		@Override
+		public int getValue() {
+			return this.value;
+		}
+
+		@Override
+		public String getName() {
+			return this.name();
+		}
+
+		@Override
+		public OptionsEnum getUndefined() {
+			return UNDEFINED;
+		}
+	}
+
 	/**
 	 * One evaluation result.
 	 *
@@ -136,8 +179,22 @@ final class NightChargeStop {
 	 *                or {@link #NO_TARGET} to leave the window untouched
 	 * @param state   the rule state for this cycle
 	 * @param message a one-shot audit message, or null
+	 * @param warning a one-shot warning (a rejected override), or null
 	 */
-	record Step(int enable, State state, String message) {
+	record Step(int enable, State state, String message, String warning) {
+
+		Step(int enable, State state, String message) {
+			this(enable, state, message, null);
+		}
+	}
+
+	/**
+	 * A one-night override of the stop SoC.
+	 *
+	 * @param soc       the written stop SoC in percent
+	 * @param writtenAt the local time it was written (schedule time zone)
+	 */
+	record SocOverride(int soc, LocalDateTime writtenAt) {
 	}
 
 	/**
@@ -177,13 +234,22 @@ final class NightChargeStop {
 	static final int MAX_FAILURES = 5;
 	/** Cycles to wait after a failed write before a retry. */
 	static final int RETRY_COOLDOWN_CYCLES = 60;
+	/** Lowest accepted one-night override of the stop SoC. */
+	static final int OVERRIDE_MIN_SOC = 30;
+	/** Highest accepted one-night override of the stop SoC. */
+	static final int OVERRIDE_MAX_SOC = 90;
 
 	static final NightChargeStop OFF = new NightChargeStop(-1, null, null);
 
-	private final int stopSoc;
+	private final int configStopSoc;
 	private final LocalTime windowStart;
 	private final LocalTime windowStop;
 
+	// The stop SoC in effect: written by the cycle thread, read by the bridge
+	// thread. The read counters are kept for countedFor only; a change of the stop
+	// SoC restarts them (bridge thread) and makes them count as zero until then.
+	private volatile int stopSoc;
+	private volatile int countedFor;
 	private volatile int aboveReads;
 	private volatile int belowReads;
 	private volatile int bandReads;
@@ -211,9 +277,17 @@ final class NightChargeStop {
 	private String pendingMessage;
 	private Instant lastInstant;
 	private int steadyClockCycles;
+	private SocOverride override;
+	// The window whose stop SoC is chosen, keyed to its start date like the latch.
+	private LocalDate socWindow;
+	private SocSource socSource = SocSource.CONFIG;
+	private boolean overrideRejected;
+	private String pendingWarning;
 
 	private NightChargeStop(int stopSoc, LocalTime windowStart, LocalTime windowStop) {
+		this.configStopSoc = stopSoc;
 		this.stopSoc = stopSoc;
+		this.countedFor = stopSoc;
 		this.windowStart = windowStart;
 		this.windowStop = windowStop;
 	}
@@ -277,7 +351,7 @@ final class NightChargeStop {
 	}
 
 	boolean isActive() {
-		return this.stopSoc >= 0;
+		return this.configStopSoc >= 0;
 	}
 
 	/**
@@ -289,14 +363,34 @@ final class NightChargeStop {
 		if (!this.isActive()) {
 			return;
 		}
+		var stop = this.stopSoc;
+		if (stop != this.countedFor) {
+			this.aboveReads = 0;
+			this.belowReads = 0;
+			this.bandReads = 0;
+			this.countedFor = stop;
+		}
 		var usable = soc != null && soc >= 0 && soc <= 100;
 		this.socKnown = usable;
-		var above = usable && soc >= this.stopSoc;
-		var below = usable && soc < this.stopSoc - REARM_HYSTERESIS;
+		var above = usable && soc >= stop;
+		var below = usable && soc < stop - REARM_HYSTERESIS;
 		this.aboveReads = above ? Math.min(this.aboveReads + 1, CONFIRM_READS) : 0;
 		this.belowReads = below ? Math.min(this.belowReads + 1, CONFIRM_READS) : 0;
-		var inBand = usable && soc >= this.stopSoc - REARM_HYSTERESIS;
+		var inBand = usable && soc >= stop - REARM_HYSTERESIS;
 		this.bandReads = inBand ? Math.min(this.bandReads + 1, CONFIRM_READS) : 0;
+	}
+
+	// The read counters, zero while they were counted for another stop SoC.
+	private int aboveReads() {
+		return this.countedFor == this.stopSoc ? this.aboveReads : 0;
+	}
+
+	private int belowReads() {
+		return this.countedFor == this.stopSoc ? this.belowReads : 0;
+	}
+
+	private int bandReads() {
+		return this.countedFor == this.stopSoc ? this.bandReads : 0;
 	}
 
 	boolean isInsideWindow(LocalTime time) {
@@ -306,12 +400,17 @@ final class NightChargeStop {
 	// The window plus the re-arm delay, today's or yesterday's (the delay may cross
 	// midnight for a window that ends late).
 	private boolean isInHoldSpan(LocalDateTime now) {
+		return this.holdSpanDate(now) != null;
+	}
+
+	// The start date of the window whose hold span contains the time, or null.
+	private LocalDate holdSpanDate(LocalDateTime now) {
 		for (var date : new LocalDate[] { now.toLocalDate(), now.toLocalDate().minusDays(1) }) {
 			if (!now.isBefore(date.atTime(this.windowStart)) && now.isBefore(this.rearmAt(date))) {
-				return true;
+				return date;
 			}
 		}
-		return false;
+		return null;
 	}
 
 	private LocalDateTime rearmAt(LocalDate date) {
@@ -448,18 +547,22 @@ final class NightChargeStop {
 			message = this.pendingMessage;
 		}
 		this.pendingMessage = null;
+		message = join(message, this.updateWindowSoc(now));
+		final var warning = this.pendingWarning;
+		this.pendingWarning = null;
 		var inside = this.isInsideWindow(now.toLocalTime());
 		var deviceDisarmed = Integer.valueOf(0).equals(deviceEnable);
 		var limit = false;
 		var latchedBefore = this.latchedOn != null && this.latchedOn.isBefore(now.toLocalDate());
-		if ((this.latchedOn == null || latchedBefore) && inside && this.aboveReads >= CONFIRM_READS) {
+		if ((this.latchedOn == null || latchedBefore) && inside && this.aboveReads() >= CONFIRM_READS) {
 			// A latch of an earlier window that is not released yet (its re-arm delayed by
 			// an outage or a clock step) moves to this window once the stop SoC is
 			// confirmed here, so this night's charge is ended too.
 			if (deviceDisarmed || this.writesOn(now.toLocalDate()) < MAX_DAILY_WRITES) {
 				this.latchedOn = now.toLocalDate();
 				this.latchedThisActivation = true;
-				message = "Night charge stop SoC [" + this.stopSoc + "] reached; ending the charge for this window";
+				message = "Night charge stop SoC [" + this.stopSoc + "] (" + this.socSource
+						+ ") reached; ending the charge for this window";
 			} else {
 				limit = true;
 			}
@@ -470,7 +573,7 @@ final class NightChargeStop {
 		if (this.latchedOn != null) {
 			target = 0;
 			state = State.STOPPED;
-		} else if (deviceDisarmed && this.belowReads < CONFIRM_READS
+		} else if (deviceDisarmed && this.belowReads() < CONFIRM_READS
 				&& (this.isInHoldSpan(now) || !this.latchedThisActivation && this.evaluations < ARM_HOLD_CYCLES)) {
 			// Never re-armed in the window (plus the delay) after a stop this instance did
 			// not see, and not right after activation, when the clock may still be stale.
@@ -508,7 +611,154 @@ final class NightChargeStop {
 		if (failedState != null) {
 			state = failedState;
 		}
-		return new Step(this.applied, state, message);
+		return new Step(this.applied, state, message, warning);
+	}
+
+	/**
+	 * Writes the one-night override of the stop SoC (Edge cycle thread). It is
+	 * taken by the next window; inside a window (or its re-arm delay, or while a
+	 * stop is latched) it is ignored, because it would neither change the running
+	 * window nor outlive it.
+	 *
+	 * @param soc the stop SoC in percent, or null (or negative) to cancel
+	 * @param now the plausible local date-time of the write, not null
+	 * @return null if taken (the caller persists it with {@code now}), otherwise
+	 *         why it was ignored
+	 */
+	String writeOverride(Integer soc, LocalDateTime now) {
+		if (!this.isActive()) {
+			return "the night charge stop is off";
+		}
+		if (this.socWindow != null || this.latchedOn != null || this.isInHoldSpan(now)) {
+			return "written during the night charge window; write it after the window is over";
+		}
+		this.override = soc == null || soc < 0 ? null : new SocOverride(soc, now);
+		return null;
+	}
+
+	/**
+	 * Restores a persisted override after an activation, before the first
+	 * evaluation. One that already expired is cleared at the first known time and
+	 * never applied.
+	 *
+	 * @param soc       the persisted stop SoC, or negative for none
+	 * @param writtenAt the local time it was written, or null for none
+	 */
+	void restoreOverride(int soc, LocalDateTime writtenAt) {
+		if (this.isActive() && soc >= 0 && writtenAt != null) {
+			this.override = new SocOverride(soc, writtenAt);
+		}
+	}
+
+	// Ends the stop SoC choice of a window once it is over (the re-arm time passed
+	// and the latch released), clears an override whose night is over, and
+	// chooses the stop SoC for the window that holds the time.
+	private String updateWindowSoc(LocalDateTime now) {
+		String message = null;
+		if (this.socWindow != null && !now.isBefore(this.rearmAt(this.socWindow))
+				&& !this.socWindow.equals(this.latchedOn)) {
+			this.socWindow = null;
+			this.stopSoc = this.configStopSoc;
+			this.socSource = SocSource.CONFIG;
+			this.overrideRejected = false;
+		}
+		if (this.socWindow == null && this.override != null && !now.isBefore(this.expiry(this.override))) {
+			this.override = null;
+			message = "Night charge stop: the one-night stop SoC override is cleared";
+		}
+		var date = this.socWindow == null ? this.holdSpanDate(now) : null;
+		if (date != null) {
+			message = join(message, this.chooseWindowSoc(date));
+		}
+		return message;
+	}
+
+	// Returns an audit message for an override taken, or null.
+	private String chooseWindowSoc(LocalDate date) {
+		this.socWindow = date;
+		var candidate = this.override != null && date.equals(this.targetDate(this.override.writtenAt()))
+				? this.override.soc()
+				: null;
+		if (candidate != null && candidate >= OVERRIDE_MIN_SOC && candidate <= OVERRIDE_MAX_SOC) {
+			this.stopSoc = candidate;
+			this.socSource = SocSource.OVERRIDE;
+			this.overrideRejected = false;
+			return "Night charge stop: using the one-night stop SoC override [" + candidate
+					+ "] for this window (config [" + this.configStopSoc + "])";
+		}
+		this.stopSoc = this.configStopSoc;
+		this.socSource = SocSource.CONFIG;
+		this.overrideRejected = candidate != null;
+		if (candidate != null) {
+			this.pendingWarning = "Night charge stop: one-night stop SoC override [" + candidate + "] is outside "
+					+ OVERRIDE_MIN_SOC + ".." + OVERRIDE_MAX_SOC + "; using the configured [" + this.configStopSoc
+					+ "] for this window";
+		}
+		return null;
+	}
+
+	// The start date of the window an override written at this time is for: the
+	// first window that starts after it. Null if it was written inside a window
+	// (or its re-arm delay): that window was already chosen and it ends the
+	// override.
+	private LocalDate targetDate(LocalDateTime writtenAt) {
+		if (this.holdSpanDate(writtenAt) != null) {
+			return null;
+		}
+		var date = writtenAt.toLocalDate();
+		return writtenAt.toLocalTime().isBefore(this.windowStart) ? date : date.plusDays(1);
+	}
+
+	// When the override's night is over: the re-arm time of its window, or of the
+	// window it was written in.
+	private LocalDateTime expiry(SocOverride override) {
+		var date = this.targetDate(override.writtenAt());
+		return this.rearmAt(date != null ? date : this.holdSpanDate(override.writtenAt()));
+	}
+
+	private static String join(String first, String second) {
+		if (first == null) {
+			return second;
+		}
+		return second == null ? first : first + "; " + second;
+	}
+
+	/**
+	 * The stop SoC in effect: the one chosen for the current window, otherwise the
+	 * configured one. Edge cycle thread only.
+	 *
+	 * @return the stop SoC in percent, or -1 if the rule is off
+	 */
+	int getAppliedStopSoc() {
+		return this.isActive() ? this.stopSoc : -1;
+	}
+
+	/**
+	 * Where {@link #getAppliedStopSoc} comes from. Edge cycle thread only.
+	 *
+	 * @return the source
+	 */
+	SocSource getStopSocSource() {
+		return this.socSource;
+	}
+
+	/**
+	 * Whether the override was rejected (out of range) for the current window. Edge
+	 * cycle thread only.
+	 *
+	 * @return true while the window runs on the configured stop SoC instead
+	 */
+	boolean isOverrideRejected() {
+		return this.overrideRejected;
+	}
+
+	/**
+	 * The pending or running one-night override. Edge cycle thread only.
+	 *
+	 * @return the override, or null if none (or cleared)
+	 */
+	SocOverride getOverride() {
+		return this.override;
 	}
 
 	/**
@@ -558,7 +808,7 @@ final class NightChargeStop {
 	}
 
 	private boolean isHeldConfirmed(LocalDate date) {
-		return date.equals(this.heldOn) && this.heldCycles >= HELD_CONFIRM_CYCLES && this.bandReads >= CONFIRM_READS;
+		return date.equals(this.heldOn) && this.heldCycles >= HELD_CONFIRM_CYCLES && this.bandReads() >= CONFIRM_READS;
 	}
 
 	// Moves the target to the window, or retries a failed write of this rule.
