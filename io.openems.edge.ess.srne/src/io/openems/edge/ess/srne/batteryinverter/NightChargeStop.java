@@ -443,9 +443,12 @@ final class NightChargeStop {
 			this.lastNow = null;
 			this.beyondSince = null;
 		} else {
-			var message = this.observe(now);
+			// The window's stop SoC choice follows the time here too, so a closed gate
+			// neither keeps a stale choice (channels, a write after the re-arm) nor
+			// delays the clear of an override whose night is over.
+			var message = join(this.observe(now), this.updateWindowSoc(now));
 			if (message != null) {
-				this.pendingMessage = message;
+				this.pendingMessage = join(this.pendingMessage, message);
 			}
 		}
 		return now;
@@ -622,8 +625,9 @@ final class NightChargeStop {
 	/**
 	 * Writes the one-night override of the stop SoC (Edge cycle thread). It is
 	 * taken by the next window; inside a window (or its re-arm delay) it is
-	 * ignored, because it would neither change the running window nor outlive it. A
-	 * latch that is not released yet after the window does not block it.
+	 * ignored, because it would neither change the running window nor outlive it.
+	 * Decided from the time alone: a latch that is not released yet, or a choice
+	 * that a closed machine-state gate kept, does not block it.
 	 *
 	 * @param soc the stop SoC in percent, or null (or negative) to cancel
 	 * @param now the plausible local date-time of the write, not null
@@ -634,7 +638,7 @@ final class NightChargeStop {
 		if (!this.isActive()) {
 			return "the night charge stop is off";
 		}
-		if (this.socWindow != null || this.isInHoldSpan(now)) {
+		if (this.isInHoldSpan(now)) {
 			return "written during the night charge window; write it after the window is over";
 		}
 		this.override = soc == null || soc < 0 ? null : new SocOverride(soc, now);

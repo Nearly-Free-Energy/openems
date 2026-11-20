@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneOffset;
 
 import org.junit.jupiter.api.Test;
 
@@ -979,5 +980,54 @@ public class NightChargeStopTest {
 		assertTrue(sut.isUnchangedOverride(40));
 		assertFalse(sut.isUnchangedOverride(45));
 		assertFalse(sut.isUnchangedOverride(-1));
+	}
+
+	@Test
+	public void testClosedGateThroughTheRearmDoesNotBlockTheNextOverride() {
+		// The override is used on this night; from 05:00 the machine-state gate keeps
+		// step() from running, so only the clock gate sees the time.
+		var device = new Device(1);
+		device.sut.writeOverride(40, AFTERNOON);
+		device.soc(20, 3);
+		device.walk(at(0, 0), at(5, 0));
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		for (var t = at(5, 1); !t.isAfter(at(14, 0)); t = t.plusMinutes(1)) {
+			device.sut.plausibleTime(t.toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
+		}
+		// The window's choice and the override ended at the re-arm time.
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		assertNull(device.sut.getOverride());
+		assertTrue(device.sut.takeOverrideCleared());
+		// A write at 14:00 is taken for the next night.
+		assertNull(device.sut.writeOverride(70, at(14, 0)));
+		device.cycle(at(NIGHT.plusDays(1), 0, 0));
+		assertApplied(device.sut, 70, NightChargeStop.SocSource.OVERRIDE);
+	}
+
+	@Test
+	public void testWriteInTheFirstCycleAfterTheRearmIsTaken() {
+		var device = new Device(1);
+		device.sut.writeOverride(40, AFTERNOON);
+		device.walk(at(0, 0), at(6, 14));
+		// The clock gate runs first in the cycle, then the write, then step().
+		device.sut.plausibleTime(at(6, 15).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
+		assertNull(device.sut.writeOverride(70, at(6, 15)));
+		device.cycle(at(6, 15));
+		assertEquals(70, device.sut.getOverride().soc());
+	}
+
+	@Test
+	public void testRestartBeforeTheWindowKeepsThePendingOverride() {
+		// Written in the afternoon, restarted at 23:00: the override waits for the
+		// window and is used there.
+		var device = new Device(1);
+		device.sut.restoreOverride(40, AFTERNOON);
+		device.soc(20, 3);
+		device.walk(at(NIGHT.minusDays(1), 23, 0), at(NIGHT.minusDays(1), 23, 59));
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		assertEquals(40, device.sut.getOverride().soc());
+		assertFalse(device.sut.takeOverrideCleared());
+		device.cycle(at(0, 0));
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
 	}
 }

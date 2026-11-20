@@ -1197,9 +1197,6 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.logWarn(this.log, step.warning());
 		}
 		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE, step.state());
-		if (this.nightChargeStop.takeOverrideCleared()) {
-			this.deletePersistedNightChargeOverride();
-		}
 		this.updateNightChargeOverrideChannels();
 		return step.enable();
 	}
@@ -1291,11 +1288,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	// The clock gate is fed every cycle, also while the machine-state gate is
-	// closed, so a clock step is seen whenever it happens. A configured rule that
-	// cannot act reports OFF.
+	// closed, so a clock step is seen whenever it happens; the one-night override
+	// (window choice, clear, writes, channels) follows the time here too. A
+	// configured rule that cannot act reports OFF.
 	private void updateNightChargeClock() {
 		if (this.nightChargeStop.isActive()) {
 			this.nightChargeNow = this.nightChargeStop.plausibleTime(this.instantOrNull(), this.scheduleZone);
+			if (this.nightChargeStop.takeOverrideCleared()) {
+				this.deletePersistedNightChargeOverride();
+			}
 			this.takeNightChargeOverrideWrite();
 			this.updateNightChargeOverrideChannels();
 		} else if (this.config != null && this.config.nightChargeStopSoc() != -1) {
