@@ -238,7 +238,9 @@ resuming the charge.
   re-arm time even if the stop's latch is not released yet (outage, clock step), so a
   stuck latch never carries an override into the next night, and a write after the
   re-arm time is taken even while such a latch is held. An override whose write time
-  lies after the current time (written while the clock ran ahead) is dropped. An override outside `30..90` is
+  lies more than 1 hour after the current time (written while the clock ran ahead)
+  is dropped; one less far ahead (gw-pi2 has no RTC and may reboot on a
+  fake-hwclock time behind the write) is kept and waits for its window. An override outside `30..90` is
   rejected for that window: one warning, `NightChargeStopOverrideRejected` set until
   the window ends. When the window ends (the re-arm path) the override is cleared. A
   write inside the window (or its re-arm delay) is ignored with a warning, so it cannot

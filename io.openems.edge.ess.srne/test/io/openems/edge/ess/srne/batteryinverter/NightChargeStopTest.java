@@ -1030,4 +1030,24 @@ public class NightChargeStopTest {
 		device.cycle(at(0, 0));
 		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
 	}
+
+	@Test
+	public void testRebootOnAClockBehindTheWriteKeepsTheOverride() {
+		// Written at 23:30, then a reboot comes back on a fake-hwclock time of 23:10:
+		// the write time lies 20 minutes ahead, within the tolerance.
+		var device = new Device(1);
+		device.sut.restoreOverride(40, at(NIGHT.minusDays(1), 23, 30));
+		device.soc(20, 3);
+		var step = device.cycle(at(NIGHT.minusDays(1), 23, 10));
+		assertNull(step.warning());
+		assertEquals(40, device.sut.getOverride().soc());
+		assertFalse(device.sut.takeOverrideCleared());
+		device.walk(at(NIGHT.minusDays(1), 23, 11), at(0, 0));
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		// Beyond the tolerance it is dropped.
+		var ahead = new Device(1);
+		ahead.sut.restoreOverride(40, at(NIGHT.minusDays(1), 23, 30));
+		assertNotNull(ahead.cycle(at(NIGHT.minusDays(1), 22, 29)).warning());
+		assertNull(ahead.sut.getOverride());
+	}
 }

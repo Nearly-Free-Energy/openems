@@ -812,4 +812,30 @@ public class SrneBatteryInverterNightChargeStopTest {
 		assertEquals(70, store.load().stored().soc());
 		assertEquals(70, sut.nightChargeStopForTest().getOverride().soc());
 	}
+
+	@Test
+	public void testIgnoredWriteWarnsOncePerWindow(@TempDir Path dir) throws Exception {
+		// 00:30 local: a write inside the window, re-applied every cycle, warns once.
+		final var clock = clockAt("2026-11-12T21:30:00Z");
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		var test = start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clock, config(50));
+		IntegerWriteChannel channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT);
+		for (var i = 0; i < 5; i++) {
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(1, sut.nightChargeIgnoredWarningsForTest());
+		// After the window the same ignored value warns again the next night.
+		clock.leap(13, ChronoUnit.HOURS); // 13:30 local
+		test.next(new TestCase(), SETTLE_CYCLES);
+		clock.leap(11, ChronoUnit.HOURS); // 00:30 local, the next night
+		test.next(new TestCase(), SETTLE_CYCLES);
+		for (var i = 0; i < 5; i++) {
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(2, sut.nightChargeIgnoredWarningsForTest());
+		assertNull(sut.nightChargeStopForTest().getOverride());
+	}
 }

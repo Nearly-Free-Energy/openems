@@ -70,13 +70,14 @@ import io.openems.common.types.OptionsEnum;
  * the latch is not released yet (an outage or a clock step), and is made again
  * for every new window, so a stuck latch never carries an override into the
  * next night; then the override is cleared. An override whose write time lies
- * after the current time (written on a clock that ran ahead) is dropped. The
- * choice depends only on the override and the time it was written, both
- * persisted by the caller, so a restart inside the window re-derives the same
- * value, and a restart after the window never applies an override that was
- * already cleared. A write inside the window changes nothing and is ignored.
- * The override changes only the SoC at which the stop latches; it writes no
- * register.</li>
+ * more than {@link #FUTURE_WRITE_TOLERANCE} after the current time (written on
+ * a clock that ran ahead) is dropped; one less far ahead (a reboot on a clock
+ * behind the write) is kept and waits for its window. The choice depends only
+ * on the override and the time it was written, both persisted by the caller, so
+ * a restart inside the window re-derives the same value, and a restart after
+ * the window never applies an override that was already cleared. A write inside
+ * the window changes nothing and is ignored. The override changes only the SoC
+ * at which the stop latches; it writes no register.</li>
  * </ul>
  *
  * <p>
@@ -242,6 +243,13 @@ final class NightChargeStop {
 	static final int OVERRIDE_MIN_SOC = 30;
 	/** Highest accepted one-night override of the stop SoC. */
 	static final int OVERRIDE_MAX_SOC = 90;
+	/**
+	 * How far an override's write time may lie after the current time before it is
+	 * dropped (written on a clock that ran ahead). Within it the override is kept
+	 * and simply waits: gw-pi2 has no RTC and may come back from a reboot on a
+	 * fake-hwclock time somewhat behind the write.
+	 */
+	static final Duration FUTURE_WRITE_TOLERANCE = Duration.ofHours(1);
 
 	static final NightChargeStop OFF = new NightChargeStop(-1, null, null);
 
@@ -404,7 +412,7 @@ final class NightChargeStop {
 
 	// The window plus the re-arm delay, today's or yesterday's (the delay may cross
 	// midnight for a window that ends late).
-	private boolean isInHoldSpan(LocalDateTime now) {
+	boolean isInHoldSpan(LocalDateTime now) {
 		return this.holdSpanDate(now) != null;
 	}
 
@@ -676,10 +684,11 @@ final class NightChargeStop {
 			this.overrideRejected = false;
 		}
 		if (this.socWindow == null && this.override != null) {
-			if (this.override.writtenAt().isAfter(now)) {
+			if (this.override.writtenAt().isAfter(now.plus(FUTURE_WRITE_TOLERANCE))) {
 				this.pendingWarning = "Night charge stop: the one-night stop SoC override [" + this.override.soc()
-						+ "] was written at " + this.override.writtenAt()
-						+ ", after the current time (clock ahead at the write); dropped";
+						+ "] was written at " + this.override.writtenAt() + ", more than "
+						+ FUTURE_WRITE_TOLERANCE.toMinutes()
+						+ " minutes after the current time (clock ahead at the write); dropped";
 				this.override = null;
 				this.overrideCleared = true;
 			} else if (!now.isBefore(this.expiry(this.override))) {

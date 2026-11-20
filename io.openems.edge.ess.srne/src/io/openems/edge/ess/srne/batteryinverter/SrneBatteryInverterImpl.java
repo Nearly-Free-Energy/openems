@@ -143,6 +143,8 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// Test seam: the directory of the override file, or null for the data dir.
 	private Path nightChargeOverrideDir;
 	private Integer lastIgnoredOverride;
+	// Log counter, for tests of the rate limiting.
+	private long nightChargeIgnoredWarnings;
 
 	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null, null,
 			-1);
@@ -1231,6 +1233,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	// the rule is off, or inside the window, is ignored with a warning.
 	private void takeNightChargeOverrideWrite() {
 		final var now = this.nightChargeNow;
+		if (now != null && !this.nightChargeStop.isInHoldSpan(now)) {
+			// Outside the window: the next night's ignored write warns again.
+			this.lastIgnoredOverride = null;
+		}
 		if (now == null || this.nightChargeOverrideWrite.get() == null) {
 			return;
 		}
@@ -1246,6 +1252,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			if (!Objects.equals(write.soc(), this.lastIgnoredOverride)) {
 				this.logWarn(this.log, "NightChargeStopSocTonight [" + write.soc() + "] ignored: " + ignored);
 				this.lastIgnoredOverride = write.soc();
+				this.nightChargeIgnoredWarnings++;
 			}
 			return;
 		}
@@ -1280,6 +1287,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.nightChargeStop.restoreOverride(stored.soc(),
 					LocalDateTime.ofInstant(stored.writtenAt(), this.scheduleZone));
 		}
+	}
+
+	long nightChargeIgnoredWarningsForTest() {
+		return this.nightChargeIgnoredWarnings;
 	}
 
 	// Package-private for tests: must be called before activation.
