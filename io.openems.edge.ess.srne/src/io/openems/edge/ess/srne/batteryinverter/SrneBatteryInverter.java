@@ -121,7 +121,7 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 		NIGHT_CHARGE_STOP_SOC_TONIGHT(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
 				.accessMode(AccessMode.READ_WRITE) //
 				.text("One-night override of the night charge stop SoC (30..90), taken by the next charge window; "
-						+ "null or negative cancels; ignored inside the window")), //
+						+ "a negative value (-1) cancels; ignored inside the window")), //
 		NIGHT_CHARGE_STOP_SOC_APPLIED(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
 				.text("Night charge stop SoC in effect (the window's choice, otherwise nightChargeStopSoc)")), //
 		NIGHT_CHARGE_STOP_SOC_SOURCE(Doc.of(NightChargeStop.SocSource.values()) //

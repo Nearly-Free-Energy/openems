@@ -14,6 +14,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -141,6 +142,7 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private NightChargeOverrideStore nightChargeOverrideStore;
 	// Test seam: the directory of the override file, or null for the data dir.
 	private Path nightChargeOverrideDir;
+	private Integer lastIgnoredOverride;
 
 	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null, null,
 			-1);
@@ -1195,8 +1197,22 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.logWarn(this.log, step.warning());
 		}
 		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE, step.state());
+		if (this.nightChargeStop.takeOverrideCleared()) {
+			this.deletePersistedNightChargeOverride();
+		}
 		this.updateNightChargeOverrideChannels();
 		return step.enable();
+	}
+
+	// The override's night is over (or it was dropped): the persisted copy goes
+	// too, so a restart neither reads it back nor logs its clear again.
+	private void deletePersistedNightChargeOverride() {
+		try {
+			this.nightChargeOverrideStore.save(null);
+		} catch (IOException | RuntimeException e) {
+			this.logWarn(this.log, "Expired night charge stop override file " + this.nightChargeOverrideStore.file()
+					+ " not deleted: " + e.getMessage() + "; it is ignored on restart");
+		}
 	}
 
 	// The stop SoC in effect, its source, the rejection flag and the pending or
@@ -1222,11 +1238,21 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			return;
 		}
 		var write = this.nightChargeOverrideWrite.getAndSet(null);
-		var ignored = this.nightChargeStop.writeOverride(write.soc(), now);
-		if (ignored != null) {
-			this.logWarn(this.log, "NightChargeStopSocTonight [" + write.soc() + "] ignored: " + ignored);
+		// API writes are re-applied every cycle until they time out: an unchanged one
+		// is skipped (no log, no file write, the write time stays), and an ignored
+		// one is reported once per value.
+		if (this.nightChargeStop.isUnchangedOverride(write.soc())) {
 			return;
 		}
+		var ignored = this.nightChargeStop.writeOverride(write.soc(), now);
+		if (ignored != null) {
+			if (!Objects.equals(write.soc(), this.lastIgnoredOverride)) {
+				this.logWarn(this.log, "NightChargeStopSocTonight [" + write.soc() + "] ignored: " + ignored);
+				this.lastIgnoredOverride = write.soc();
+			}
+			return;
+		}
+		this.lastIgnoredOverride = null;
 		this.logInfo(this.log,
 				"NightChargeStopSocTonight [" + write.soc() + "] taken for the next night charge window");
 		var override = this.nightChargeStop.getOverride();

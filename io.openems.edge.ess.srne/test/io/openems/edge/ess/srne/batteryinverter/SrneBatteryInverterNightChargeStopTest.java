@@ -25,6 +25,7 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 import io.openems.edge.bridge.modbus.api.task.WriteTask;
 import io.openems.edge.bridge.modbus.test.DummyModbusBridge;
 import io.openems.edge.common.channel.Channel;
+import io.openems.edge.common.channel.IntegerWriteChannel;
 import io.openems.edge.common.test.AbstractComponentTest.TestCase;
 import io.openems.edge.common.test.ComponentTest;
 import io.openems.edge.common.test.DummyComponentManager;
@@ -733,5 +734,49 @@ public class SrneBatteryInverterNightChargeStopTest {
 		assertEquals(NightChargeStop.SocSource.OVERRIDE.getValue(),
 				channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_SOURCE));
 		assertEquals(40, channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT));
+	}
+
+	@Test
+	public void testExpiredOverrideFileIsDeleted(@TempDir Path dir) throws Exception {
+		// Written two days before the restart at 00:30 local: its night is over.
+		var store = NightChargeOverrideStore.inDirectory(dir, "batteryInverter0");
+		store.save(new NightChargeOverrideStore.Stored(40, Instant.parse("2026-11-10T11:00:00Z")));
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T21:30:00Z"), config(50)) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.nightChargeStopForTest().getOverride());
+		assertFalse(Files.exists(store.file()));
+		assertEquals(NightChargeStop.SocSource.CONFIG.getValue(),
+				channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_SOURCE));
+	}
+
+	@Test
+	public void testRepeatedApiWriteDoesNotMoveTheWriteTime(@TempDir Path dir) throws Exception {
+		// 14:00 local: an API write re-applied every cycle is taken once.
+		final var clock = clockAt("2026-11-12T11:00:00Z");
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		var test = start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clock, config(50));
+		var store = NightChargeOverrideStore.inDirectory(dir, "batteryInverter0");
+		IntegerWriteChannel channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT);
+		channel.setNextWriteValue(40);
+		test.next(new TestCase(), 1);
+		var first = store.load().stored();
+		assertEquals(40, first.soc());
+		for (var i = 0; i < 5; i++) {
+			clock.leap(1, ChronoUnit.MINUTES);
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(first, store.load().stored());
+		// A new value is taken; a negative value cancels and deletes the file.
+		channel.setNextWriteValue(45);
+		test.next(new TestCase(), 1);
+		assertEquals(45, store.load().stored().soc());
+		channel.setNextWriteValue(-1);
+		test.next(new TestCase(), 1);
+		assertFalse(Files.exists(store.file()));
+		assertNull(sut.nightChargeStopForTest().getOverride());
 	}
 }

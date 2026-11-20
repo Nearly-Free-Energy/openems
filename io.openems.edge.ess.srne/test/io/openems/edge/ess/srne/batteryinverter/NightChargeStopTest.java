@@ -829,6 +829,8 @@ public class NightChargeStopTest {
 		assertEquals(State.OUTSIDE_WINDOW, step.state());
 		assertTrue(step.message().contains("cleared"), step.message());
 		assertNull(device.sut.getOverride());
+		assertTrue(device.sut.takeOverrideCleared());
+		assertFalse(device.sut.takeOverrideCleared());
 		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
 		// The next night runs on the configured stop SoC again.
 		var next = NIGHT.plusDays(1);
@@ -911,5 +913,71 @@ public class NightChargeStopTest {
 		after.soc(20, 3);
 		after.cycle(at(NIGHT.plusDays(1), 0, 0));
 		assertApplied(after.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+	}
+
+	@Test
+	public void testStuckLatchDoesNotCarryTheOverrideIntoTheNextWindow() {
+		// Stopped at the override (40 %), then the clock is lost until 00:10 the next
+		// night: the latch needs REARM_CONFIRM and is still held.
+		var device = new Device(1);
+		device.sut.writeOverride(40, AFTERNOON);
+		device.cycle(at(0, 59));
+		device.soc(40, 3);
+		assertEquals(State.STOPPED, device.cycles(at(1, 0), 3).state());
+		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
+		var next = NIGHT.plusDays(1);
+		assertEquals(State.STOPPED, device.cycle(at(next, 0, 10)).state());
+		// The new window has no override: it runs on the configured stop SoC.
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+		assertNull(device.sut.getOverride());
+		assertTrue(device.sut.takeOverrideCleared());
+		// 42 % is above last night's 40 % but below 50 %: the latch does not move to
+		// this window.
+		device.soc(42, 3);
+		device.walk(at(next, 0, 11), at(next, 1, 0));
+		assertFalse(device.ended());
+		device.soc(50, 3);
+		device.cycle(at(next, 1, 1));
+		assertTrue(device.ended());
+	}
+
+	@Test
+	public void testWriteWhileTheLatchIsStuckIsTakenForTheNextWindow() {
+		var device = new Device(1);
+		device.soc(60, 3);
+		assertEquals(State.STOPPED, device.cycles(at(3, 0), 3).state());
+		// A clock step to 14:00: the latch is held until REARM_CONFIRM, but a write
+		// outside the window is taken.
+		assertEquals(State.STOPPED, device.cycle(at(14, 0)).state());
+		assertNull(device.sut.writeOverride(70, at(14, 0)));
+		device.walk(at(14, 1), at(23, 59));
+		device.soc(20, 3);
+		assertEquals(State.CHARGING, device.cycle(at(NIGHT.plusDays(1), 0, 0)).state());
+		assertApplied(device.sut, 70, NightChargeStop.SocSource.OVERRIDE);
+	}
+
+	@Test
+	public void testOverrideWrittenOnAClockAheadIsDropped() {
+		// Written at "14:00 tomorrow" on a clock a day ahead, restored after the clock
+		// was corrected: it would target the night after the intended one.
+		var device = new Device(1);
+		device.sut.restoreOverride(40, at(NIGHT.plusDays(1), 14, 0));
+		var step = device.cycle(at(0, 30));
+		assertNotNull(step.warning());
+		assertNull(device.sut.getOverride());
+		assertTrue(device.sut.takeOverrideCleared());
+		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
+	}
+
+	@Test
+	public void testUnchangedOverrideWrite() {
+		var sut = NightChargeStop.fromConfig(STOP_SOC, true, 1, START, STOP);
+		assertTrue(sut.isUnchangedOverride(null));
+		assertTrue(sut.isUnchangedOverride(-1));
+		assertFalse(sut.isUnchangedOverride(40));
+		assertNull(sut.writeOverride(40, AFTERNOON));
+		assertTrue(sut.isUnchangedOverride(40));
+		assertFalse(sut.isUnchangedOverride(45));
+		assertFalse(sut.isUnchangedOverride(-1));
 	}
 }

@@ -66,13 +66,17 @@ import io.openems.common.types.OptionsEnum;
  * time) and before this window started is used if it is within
  * {@link #OVERRIDE_MIN_SOC}..{@link #OVERRIDE_MAX_SOC}; otherwise the
  * configured stop SoC applies, and an out-of-range override is rejected for
- * that window. The choice holds until the window ends (the latch released),
- * then the override is cleared. The choice depends only on the override and the
- * time it was written, both persisted by the caller, so a restart inside the
- * window re-derives the same value, and a restart after the window never
- * applies an override that was already cleared. A write inside the window
- * changes nothing and is ignored. The override changes only the SoC at which
- * the stop latches; it writes no register.</li>
+ * that window. The choice holds until the re-arm time of its window, even if
+ * the latch is not released yet (an outage or a clock step), and is made again
+ * for every new window, so a stuck latch never carries an override into the
+ * next night; then the override is cleared. An override whose write time lies
+ * after the current time (written on a clock that ran ahead) is dropped. The
+ * choice depends only on the override and the time it was written, both
+ * persisted by the caller, so a restart inside the window re-derives the same
+ * value, and a restart after the window never applies an override that was
+ * already cleared. A write inside the window changes nothing and is ignored.
+ * The override changes only the SoC at which the stop latches; it writes no
+ * register.</li>
  * </ul>
  *
  * <p>
@@ -283,6 +287,7 @@ final class NightChargeStop {
 	private SocSource socSource = SocSource.CONFIG;
 	private boolean overrideRejected;
 	private String pendingWarning;
+	private boolean overrideCleared;
 
 	private NightChargeStop(int stopSoc, LocalTime windowStart, LocalTime windowStop) {
 		this.configStopSoc = stopSoc;
@@ -616,9 +621,9 @@ final class NightChargeStop {
 
 	/**
 	 * Writes the one-night override of the stop SoC (Edge cycle thread). It is
-	 * taken by the next window; inside a window (or its re-arm delay, or while a
-	 * stop is latched) it is ignored, because it would neither change the running
-	 * window nor outlive it.
+	 * taken by the next window; inside a window (or its re-arm delay) it is
+	 * ignored, because it would neither change the running window nor outlive it. A
+	 * latch that is not released yet after the window does not block it.
 	 *
 	 * @param soc the stop SoC in percent, or null (or negative) to cancel
 	 * @param now the plausible local date-time of the write, not null
@@ -629,7 +634,7 @@ final class NightChargeStop {
 		if (!this.isActive()) {
 			return "the night charge stop is off";
 		}
-		if (this.socWindow != null || this.latchedOn != null || this.isInHoldSpan(now)) {
+		if (this.socWindow != null || this.isInHoldSpan(now)) {
 			return "written during the night charge window; write it after the window is over";
 		}
 		this.override = soc == null || soc < 0 ? null : new SocOverride(soc, now);
@@ -650,23 +655,36 @@ final class NightChargeStop {
 		}
 	}
 
-	// Ends the stop SoC choice of a window once it is over (the re-arm time passed
-	// and the latch released), clears an override whose night is over, and
-	// chooses the stop SoC for the window that holds the time.
+	// Ends the stop SoC choice of a window once its re-arm time has passed or the
+	// time is in another window, whether or not the latch is released (a stuck
+	// latch moves to the new window only at the new window's stop SoC), clears an
+	// override whose night is over or whose write time lies in the future, and
+	// chooses the stop SoC for the window that holds the time. Runs before the
+	// latch check.
 	private String updateWindowSoc(LocalDateTime now) {
 		String message = null;
-		if (this.socWindow != null && !now.isBefore(this.rearmAt(this.socWindow))
-				&& !this.socWindow.equals(this.latchedOn)) {
+		var holdDate = this.holdSpanDate(now);
+		if (this.socWindow != null && (!now.isBefore(this.rearmAt(this.socWindow))
+				|| holdDate != null && !holdDate.equals(this.socWindow))) {
 			this.socWindow = null;
 			this.stopSoc = this.configStopSoc;
 			this.socSource = SocSource.CONFIG;
 			this.overrideRejected = false;
 		}
-		if (this.socWindow == null && this.override != null && !now.isBefore(this.expiry(this.override))) {
-			this.override = null;
-			message = "Night charge stop: the one-night stop SoC override is cleared";
+		if (this.socWindow == null && this.override != null) {
+			if (this.override.writtenAt().isAfter(now)) {
+				this.pendingWarning = "Night charge stop: the one-night stop SoC override [" + this.override.soc()
+						+ "] was written at " + this.override.writtenAt()
+						+ ", after the current time (clock ahead at the write); dropped";
+				this.override = null;
+				this.overrideCleared = true;
+			} else if (!now.isBefore(this.expiry(this.override))) {
+				this.override = null;
+				this.overrideCleared = true;
+				message = "Night charge stop: the one-night stop SoC override is cleared";
+			}
 		}
-		var date = this.socWindow == null ? this.holdSpanDate(now) : null;
+		var date = this.socWindow == null ? holdDate : null;
 		if (date != null) {
 			message = join(message, this.chooseWindowSoc(date));
 		}
@@ -750,6 +768,33 @@ final class NightChargeStop {
 	 */
 	boolean isOverrideRejected() {
 		return this.overrideRejected;
+	}
+
+	/**
+	 * Whether the override was cleared (its night over, or dropped) since the last
+	 * call, so the caller deletes its persisted copy. Edge cycle thread only.
+	 *
+	 * @return true once per clear
+	 */
+	boolean takeOverrideCleared() {
+		var cleared = this.overrideCleared;
+		this.overrideCleared = false;
+		return cleared;
+	}
+
+	/**
+	 * Whether a write of this value would change nothing: the same stop SoC as the
+	 * pending or running override, or a cancel without one. A repeated API write is
+	 * skipped, so its write time does not move. Edge cycle thread only.
+	 *
+	 * @param soc the written stop SoC, or null (or negative) to cancel
+	 * @return true if the write changes nothing
+	 */
+	boolean isUnchangedOverride(Integer soc) {
+		if (soc == null || soc < 0) {
+			return this.override == null;
+		}
+		return this.override != null && this.override.soc() == soc;
 	}
 
 	/**

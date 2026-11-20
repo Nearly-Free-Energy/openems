@@ -1,12 +1,15 @@
 package io.openems.edge.ess.srne.batteryinverter;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 
 import io.openems.common.OpenemsConstants;
@@ -18,7 +21,7 @@ import io.openems.common.utils.JsonUtils;
  * file in the OpenEMS data directory, outside the component configuration, so
  * saving it never replaces the driver component. The file holds the stop SoC
  * and the instant it was written; it is replaced atomically (temporary file,
- * then rename) and deleted on a cancel.
+ * flushed, then renamed) and deleted on a cancel or once its night is over.
  */
 final class NightChargeOverrideStore {
 
@@ -115,7 +118,16 @@ final class NightChargeOverrideStore {
 				.build();
 		Files.createDirectories(this.file.getParent());
 		var temp = this.file.resolveSibling(this.file.getFileName() + ".tmp");
-		Files.writeString(temp, json.toString(), StandardCharsets.UTF_8);
+		// Flushed to the device before the rename, so a power loss cannot leave an
+		// empty file under the final name.
+		try (var channel = FileChannel.open(temp, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+				StandardOpenOption.TRUNCATE_EXISTING)) {
+			var buffer = ByteBuffer.wrap(json.toString().getBytes(StandardCharsets.UTF_8));
+			while (buffer.hasRemaining()) {
+				channel.write(buffer);
+			}
+			channel.force(true);
+		}
 		try {
 			Files.move(temp, this.file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
 		} catch (AtomicMoveNotSupportedException e) {
