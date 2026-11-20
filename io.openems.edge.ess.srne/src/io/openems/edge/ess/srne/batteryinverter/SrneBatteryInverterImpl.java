@@ -6,6 +6,7 @@ import static org.osgi.service.component.annotations.ReferencePolicy.STATIC;
 import static org.osgi.service.component.annotations.ReferencePolicyOption.GREEDY;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
@@ -13,11 +14,9 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
-import java.time.format.DateTimeParseException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-import org.osgi.service.cm.ConfigurationAdmin;
 import org.osgi.service.component.ComponentContext;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
@@ -138,6 +137,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private record OverrideWrite(Integer soc) {
 	}
 
+	// Persists the one-night override outside the component configuration.
+	private NightChargeOverrideStore nightChargeOverrideStore;
+	// Test seam: the directory of the override file, or null for the data dir.
+	private Path nightChargeOverrideDir;
+
 	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null, null,
 			-1);
 	private ModeScheduleState lastModeScheduleState;
@@ -187,10 +191,6 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 
 	@Reference
 	private ComponentManager componentManager;
-
-	// Persists the night charge stop's one-night override across a restart.
-	@Reference
-	private ConfigurationAdmin cm;
 
 	// Deliberately not a ClockProvider: OSGi would register this component as the
 	// edge's clock source and the component manager would call back into it
@@ -272,7 +272,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.modeSchedule.onMachineStateRead(raw);
 			this.chargePrioritySchedule.onMachineStateRead(raw);
 		});
-		this.restoreNightChargeOverride(config);
+		this.nightChargeOverrideStore = this.nightChargeOverrideDir == null
+				? NightChargeOverrideStore.inDataDir(config.id())
+				: NightChargeOverrideStore.inDirectory(this.nightChargeOverrideDir, config.id());
+		this.restoreNightChargeOverride();
 		((IntegerWriteChannel) this.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT))
 				.onSetNextWrite(value -> this.nightChargeOverrideWrite.set(new OverrideWrite(value)));
 		// Fresh SoC reads for the night charge stop confirmation.
@@ -1227,41 +1230,38 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.logInfo(this.log,
 				"NightChargeStopSocTonight [" + write.soc() + "] taken for the next night charge window");
 		var override = this.nightChargeStop.getOverride();
-		this.persistNightChargeOverride(override == null ? -1 : override.soc(),
-				override == null ? "" : now.atZone(this.scheduleZone).toInstant().toString());
-	}
-
-	// Both properties in one configuration update. The update replaces this
-	// instance (no @Modified method); the new one restores the override.
-	private void persistNightChargeOverride(int soc, String writtenAt) {
-		if (this.cm == null) {
-			this.logWarn(this.log, "NightChargeStopSocTonight is not persisted: no ConfigurationAdmin");
-			return;
-		}
 		try {
-			var configuration = this.cm.getConfiguration(this.servicePid(), "?");
-			var properties = configuration.getProperties();
-			properties.put("nightChargeStopSocTonight", soc);
-			properties.put("nightChargeStopSocTonightWrittenAt", writtenAt);
-			configuration.update(properties);
-		} catch (IOException | SecurityException e) {
-			this.logError(this.log, "NightChargeStopSocTonight is not persisted: " + e.getMessage());
+			this.nightChargeOverrideStore.save(override == null ? null
+					: new NightChargeOverrideStore.Stored(override.soc(), now.atZone(this.scheduleZone).toInstant()));
+		} catch (IOException | RuntimeException e) {
+			this.logError(this.log, "NightChargeStopSocTonight is not persisted to "
+					+ this.nightChargeOverrideStore.file() + ": " + e.getMessage() + "; a restart loses it");
 		}
 	}
 
-	private void restoreNightChargeOverride(Config config) {
-		var soc = config.nightChargeStopSocTonight();
-		var writtenAt = config.nightChargeStopSocTonightWrittenAt();
-		if (!this.nightChargeStop.isActive() || soc < 0 || writtenAt == null || writtenAt.isBlank()) {
+	// Restores a persisted override on activation. A missing file is no override;
+	// an unreadable or corrupt one is logged once and nightChargeStopSoc applies.
+	// An expired one is cleared by the night charge stop at the first known time.
+	private void restoreNightChargeOverride() {
+		if (!this.nightChargeStop.isActive()) {
 			return;
 		}
-		try {
-			this.nightChargeStop.restoreOverride(soc,
-					LocalDateTime.ofInstant(Instant.parse(writtenAt), this.scheduleZone));
-		} catch (DateTimeParseException e) {
-			this.logWarn(this.log, "nightChargeStopSocTonightWrittenAt [" + writtenAt + "] is not an instant; "
-					+ "the one-night override is dropped");
+		var loaded = this.nightChargeOverrideStore.load();
+		if (loaded.problem() != null) {
+			this.logWarn(this.log, "Night charge stop override not restored (" + loaded.problem()
+					+ "); using nightChargeStopSoc [" + this.config.nightChargeStopSoc() + "]");
+			return;
 		}
+		var stored = loaded.stored();
+		if (stored != null) {
+			this.nightChargeStop.restoreOverride(stored.soc(),
+					LocalDateTime.ofInstant(stored.writtenAt(), this.scheduleZone));
+		}
+	}
+
+	// Package-private for tests: must be called before activation.
+	void setNightChargeOverrideDirForTest(Path dir) {
+		this.nightChargeOverrideDir = dir;
 	}
 
 	// The clock gate is fed every cycle, also while the machine-state gate is

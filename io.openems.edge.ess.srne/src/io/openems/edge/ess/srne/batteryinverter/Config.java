@@ -91,14 +91,6 @@ import io.openems.edge.ess.srne.SrneConstants;
 	@AttributeDefinition(name = "Night charge stop SoC", description = "End the timed grid charge of charge window 1 once the battery SoC is at or above this percent (3 fresh reads): the charge schedule (E02C) is disarmed for the rest of that window and re-armed 15 minutes after the window stop time. Needs controlEnabled, chargeScheduleEnable=1 and charge window 1; range 10..100; -1 = off.")
 	int nightChargeStopSoc() default -1;
 
-	// Written by the driver when NightChargeStopSocTonight is written, so a restart
-	// keeps the one-night override (ADR-017). Not meant to be set by hand.
-	@AttributeDefinition(name = "Night charge stop SoC tonight (driver-managed)", description = "One-night override of nightChargeStopSoc, persisted by the driver on a write to the NightChargeStopSocTonight channel; -1 = none.")
-	int nightChargeStopSocTonight() default -1;
-
-	@AttributeDefinition(name = "Night charge stop SoC tonight written at (driver-managed)", description = "Instant (ISO-8601) the override was written, persisted by the driver; empty = none.")
-	String nightChargeStopSocTonightWrittenAt() default "";
-
 	@AttributeDefinition(name = "Discharge window 1 start", description = "Target for E02D, encoded hour*256+min; -1 leaves unchanged.")
 	int dischargeWindow1Start() default -1;
 
