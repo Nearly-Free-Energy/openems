@@ -958,15 +958,17 @@ public class NightChargeStopTest {
 	}
 
 	@Test
-	public void testOverrideWrittenOnAClockAheadIsDropped() {
-		// Written at "14:00 tomorrow" on a clock a day ahead, restored after the clock
-		// was corrected: it would target the night after the intended one.
+	public void testOverrideFarAheadOfTheClockIsKeptUnused() {
+		// The write time lies a day after the current time: reported once, not applied
+		// to this window and not deleted.
 		var device = new Device(1);
 		device.sut.restoreOverride(40, at(NIGHT.plusDays(1), 14, 0));
 		var step = device.cycle(at(0, 30));
 		assertNotNull(step.warning());
-		assertNull(device.sut.getOverride());
-		assertTrue(device.sut.takeOverrideCleared());
+		assertNull(device.cycle(at(0, 31)).warning());
+		device.walk(at(0, 32), at(6, 30));
+		assertEquals(40, device.sut.getOverride().soc());
+		assertFalse(device.sut.takeOverrideCleared());
 		assertApplied(device.sut, STOP_SOC, NightChargeStop.SocSource.CONFIG);
 	}
 
@@ -1044,10 +1046,16 @@ public class NightChargeStopTest {
 		assertFalse(device.sut.takeOverrideCleared());
 		device.walk(at(NIGHT.minusDays(1), 23, 11), at(0, 0));
 		assertApplied(device.sut, 40, NightChargeStop.SocSource.OVERRIDE);
-		// Beyond the tolerance it is dropped.
-		var ahead = new Device(1);
-		ahead.sut.restoreOverride(40, at(NIGHT.minusDays(1), 23, 30));
-		assertNotNull(ahead.cycle(at(NIGHT.minusDays(1), 22, 29)).warning());
-		assertNull(ahead.sut.getOverride());
+		// A power cut boots on fake-hwclock (saved hourly) at 22:25, 65 minutes behind
+		// the write: reported, kept and not deleted; once the clock is synced the
+		// override applies to tonight's window.
+		var behind = new Device(1);
+		behind.sut.restoreOverride(40, at(NIGHT.minusDays(1), 23, 30));
+		behind.soc(20, 3);
+		assertNotNull(behind.cycle(at(NIGHT.minusDays(1), 22, 25)).warning());
+		assertEquals(40, behind.sut.getOverride().soc());
+		assertFalse(behind.sut.takeOverrideCleared());
+		behind.walk(at(NIGHT.minusDays(1), 23, 40), at(0, 0));
+		assertApplied(behind.sut, 40, NightChargeStop.SocSource.OVERRIDE);
 	}
 }

@@ -838,4 +838,22 @@ public class SrneBatteryInverterNightChargeStopTest {
 		assertEquals(2, sut.nightChargeIgnoredWarningsForTest());
 		assertNull(sut.nightChargeStopForTest().getOverride());
 	}
+
+	@Test
+	public void testWriteWhileTheRuleIsOffWarnsOncePerValue(@TempDir Path dir) throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		var test = start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T11:00:00Z"),
+				config(-1));
+		IntegerWriteChannel channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT);
+		for (var i = 0; i < 5; i++) {
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(1, sut.nightChargeIgnoredWarningsForTest());
+		channel.setNextWriteValue(45);
+		test.next(new TestCase(), 1);
+		assertEquals(2, sut.nightChargeIgnoredWarningsForTest());
+		assertFalse(Files.exists(NightChargeOverrideStore.inDirectory(dir, "batteryInverter0").file()));
+	}
 }

@@ -1310,10 +1310,27 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			}
 			this.takeNightChargeOverrideWrite();
 			this.updateNightChargeOverrideChannels();
-		} else if (this.config != null && this.config.nightChargeStopSoc() != -1) {
-			ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE,
-					NightChargeStop.State.OFF);
+		} else {
+			if (this.config != null && this.config.nightChargeStopSoc() != -1) {
+				ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE,
+						NightChargeStop.State.OFF);
+			}
+			this.ignoreNightChargeOverrideWriteWhileOff();
 		}
+	}
+
+	// A write while the night charge stop is off (nightChargeStopSoc=-1, invalid or
+	// inert) has nothing to act on: it is dropped with one warning per value.
+	private void ignoreNightChargeOverrideWriteWhileOff() {
+		var write = this.nightChargeOverrideWrite.getAndSet(null);
+		if (write == null || write.soc() == null || write.soc() < 0
+				|| Objects.equals(write.soc(), this.lastIgnoredOverride)) {
+			return;
+		}
+		this.logWarn(this.log, "NightChargeStopSocTonight [" + write.soc()
+				+ "] ignored: the night charge stop is off (nightChargeStopSoc=-1, invalid or inert)");
+		this.lastIgnoredOverride = write.soc();
+		this.nightChargeIgnoredWarnings++;
 	}
 
 	// Package-private for tests.
