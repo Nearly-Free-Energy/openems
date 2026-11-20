@@ -1,5 +1,6 @@
 package io.openems.edge.ess.srne.batteryinverter;
 
+import io.openems.common.channel.AccessMode;
 import io.openems.common.channel.Level;
 import io.openems.common.channel.Unit;
 import io.openems.common.types.OpenemsType;
@@ -115,6 +116,19 @@ public interface SrneBatteryInverter extends Srne, OffGridBatteryInverter, Opene
 				.text("Why the daily schedule wants its target: WINDOW, HIGH_SOC, LOW_SOC, EVENING_RESERVE or EVENING_RESERVE_HOLD")), //
 		NIGHT_CHARGE_STOP_STATE(Doc.of(NightChargeStop.State.values()) //
 				.text("State of the night charge stop (nightChargeStopSoc) on the charge schedule enable (0xE02C)")), //
+		// One-night override of nightChargeStopSoc (ADR-017): taken by the next charge
+		// window if 30..90, cleared when that window ends. Writes no register.
+		NIGHT_CHARGE_STOP_SOC_TONIGHT(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
+				.accessMode(AccessMode.READ_WRITE) //
+				.text("One-night override of the night charge stop SoC (30..90), taken by the next charge window; "
+						+ "a negative value (-1) cancels; ignored inside the window")), //
+		NIGHT_CHARGE_STOP_SOC_APPLIED(Doc.of(OpenemsType.INTEGER).unit(Unit.PERCENT) //
+				.text("Night charge stop SoC in effect (the window's choice, otherwise nightChargeStopSoc)")), //
+		NIGHT_CHARGE_STOP_SOC_SOURCE(Doc.of(NightChargeStop.SocSource.values()) //
+				.text("Source of the night charge stop SoC in effect: CONFIG or OVERRIDE")), //
+		NIGHT_CHARGE_STOP_OVERRIDE_REJECTED(Doc.of(Level.WARNING) //
+				.text("The one-night night charge stop SoC override is outside 30..90: "
+						+ "this window uses nightChargeStopSoc")), //
 		// Charge priority (E20F): 0 PV preferred, 1 mains preferred, 2 hybrid, 3 PV
 		// only. Read only while the charge-priority schedule is active.
 		CHARGE_PRIORITY(Doc.of(OpenemsType.INTEGER) //

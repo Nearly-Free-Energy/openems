@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -14,6 +16,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.ghgande.j2mod.modbus.procimg.Register;
 
@@ -22,6 +25,7 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
 import io.openems.edge.bridge.modbus.api.task.WriteTask;
 import io.openems.edge.bridge.modbus.test.DummyModbusBridge;
 import io.openems.edge.common.channel.Channel;
+import io.openems.edge.common.channel.IntegerWriteChannel;
 import io.openems.edge.common.test.AbstractComponentTest.TestCase;
 import io.openems.edge.common.test.ComponentTest;
 import io.openems.edge.common.test.DummyComponentManager;
@@ -691,5 +695,165 @@ public class SrneBatteryInverterNightChargeStopTest {
 	private static ModeScheduleState modeScheduleState(SrneBatteryInverterImpl sut) {
 		Channel<ModeScheduleState> channel = sut.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_STATE);
 		return channel.value().asEnum();
+	}
+
+	private static Object channelValue(SrneBatteryInverterImpl sut, SrneBatteryInverter.ChannelId channelId) {
+		Channel<?> channel = sut.channel(channelId);
+		return channel.value().get();
+	}
+
+	@Test
+	public void testCorruptOverrideFileFallsBackToTheConfig(@TempDir Path dir) throws Exception {
+		// Inside the window (00:30 local): an unreadable override file is logged and
+		// the configured stop SoC applies; activation does not throw.
+		for (var content : new String[] { "{not json", "{\"soc\":40}", "{\"soc\":40,\"writtenAt\":\"yesterday\"}" }) {
+			var sut = new SrneBatteryInverterImpl();
+			sut.setNightChargeOverrideDirForTest(dir);
+			var store = NightChargeOverrideStore.inDirectory(dir, "batteryInverter0");
+			Files.writeString(store.file(), content);
+			start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T21:30:00Z"), config(50)) //
+					.next(new TestCase(), CYCLES);
+			assertTrue(sut.nightChargeStopForTest().isActive(), content);
+			assertNull(sut.nightChargeStopForTest().getOverride(), content);
+			assertEquals(50, channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_APPLIED), content);
+			assertEquals(NightChargeStop.SocSource.CONFIG.getValue(),
+					channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_SOURCE), content);
+		}
+	}
+
+	@Test
+	public void testPersistedOverrideIsRestoredInTheWindow(@TempDir Path dir) throws Exception {
+		// Written at 14:00 local the day before, restarted at 00:30 local.
+		NightChargeOverrideStore.inDirectory(dir, "batteryInverter0")
+				.save(new NightChargeOverrideStore.Stored(40, Instant.parse("2026-11-12T11:00:00Z")));
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T21:30:00Z"), config(50)) //
+				.next(new TestCase(), CYCLES);
+		assertEquals(40, channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_APPLIED));
+		assertEquals(NightChargeStop.SocSource.OVERRIDE.getValue(),
+				channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_SOURCE));
+		assertEquals(40, channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT));
+	}
+
+	@Test
+	public void testExpiredOverrideFileIsDeleted(@TempDir Path dir) throws Exception {
+		// Written two days before the restart at 00:30 local: its night is over.
+		var store = NightChargeOverrideStore.inDirectory(dir, "batteryInverter0");
+		store.save(new NightChargeOverrideStore.Stored(40, Instant.parse("2026-11-10T11:00:00Z")));
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T21:30:00Z"), config(50)) //
+				.next(new TestCase(), CYCLES);
+		assertNull(sut.nightChargeStopForTest().getOverride());
+		assertFalse(Files.exists(store.file()));
+		assertEquals(NightChargeStop.SocSource.CONFIG.getValue(),
+				channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_SOURCE));
+	}
+
+	@Test
+	public void testRepeatedApiWriteDoesNotMoveTheWriteTime(@TempDir Path dir) throws Exception {
+		// 14:00 local: an API write re-applied every cycle is taken once.
+		final var clock = clockAt("2026-11-12T11:00:00Z");
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		var test = start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clock, config(50));
+		var store = NightChargeOverrideStore.inDirectory(dir, "batteryInverter0");
+		IntegerWriteChannel channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT);
+		channel.setNextWriteValue(40);
+		test.next(new TestCase(), 1);
+		var first = store.load().stored();
+		assertEquals(40, first.soc());
+		for (var i = 0; i < 5; i++) {
+			clock.leap(1, ChronoUnit.MINUTES);
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(first, store.load().stored());
+		// A new value is taken; a negative value cancels and deletes the file.
+		channel.setNextWriteValue(45);
+		test.next(new TestCase(), 1);
+		assertEquals(45, store.load().stored().soc());
+		channel.setNextWriteValue(-1);
+		test.next(new TestCase(), 1);
+		assertFalse(Files.exists(store.file()));
+		assertNull(sut.nightChargeStopForTest().getOverride());
+	}
+
+	@Test
+	public void testWriteAfterAGatedRearmIsTaken(@TempDir Path dir) throws Exception {
+		// The override is used on this night (04:00 local, mains). From then on the
+		// machine state is not verified, so step() does not run through the re-arm
+		// (06:15) until 14:00 local, when the operator writes 70 for the next night.
+		var store = NightChargeOverrideStore.inDirectory(dir, "batteryInverter0");
+		store.save(new NightChargeOverrideStore.Stored(40, Instant.parse("2026-11-12T11:00:00Z")));
+		final var clock = clockAt("2026-11-13T01:00:00Z");
+		final var bridge = bridge(20, MachineState.RUNNING_MAINS_BYPASS);
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		var test = start(sut, bridge, clock, config(50)).next(new TestCase(), CYCLES);
+		assertEquals(40, channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_APPLIED));
+
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		test.next(new TestCase(), CYCLES);
+		while (clock.instant().isBefore(Instant.parse("2026-11-13T11:00:00Z"))) {
+			clock.leap(5, ChronoUnit.MINUTES);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(NightChargeStop.State.WAITING_FOR_MAINS, state(sut));
+		assertEquals(50, channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_APPLIED));
+		assertEquals(NightChargeStop.SocSource.CONFIG.getValue(),
+				channelValue(sut, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_SOURCE));
+		assertFalse(Files.exists(store.file()));
+
+		IntegerWriteChannel channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT);
+		channel.setNextWriteValue(70);
+		test.next(new TestCase(), 1);
+		assertEquals(70, store.load().stored().soc());
+		assertEquals(70, sut.nightChargeStopForTest().getOverride().soc());
+	}
+
+	@Test
+	public void testIgnoredWriteWarnsOncePerWindow(@TempDir Path dir) throws Exception {
+		// 00:30 local: a write inside the window, re-applied every cycle, warns once.
+		final var clock = clockAt("2026-11-12T21:30:00Z");
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		var test = start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clock, config(50));
+		IntegerWriteChannel channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT);
+		for (var i = 0; i < 5; i++) {
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(1, sut.nightChargeIgnoredWarningsForTest());
+		// After the window the same ignored value warns again the next night.
+		clock.leap(13, ChronoUnit.HOURS); // 13:30 local
+		test.next(new TestCase(), SETTLE_CYCLES);
+		clock.leap(11, ChronoUnit.HOURS); // 00:30 local, the next night
+		test.next(new TestCase(), SETTLE_CYCLES);
+		for (var i = 0; i < 5; i++) {
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(2, sut.nightChargeIgnoredWarningsForTest());
+		assertNull(sut.nightChargeStopForTest().getOverride());
+	}
+
+	@Test
+	public void testWriteWhileTheRuleIsOffWarnsOncePerValue(@TempDir Path dir) throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		sut.setNightChargeOverrideDirForTest(dir);
+		var test = start(sut, bridge(20, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T11:00:00Z"),
+				config(-1));
+		IntegerWriteChannel channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT);
+		for (var i = 0; i < 5; i++) {
+			channel.setNextWriteValue(40);
+			test.next(new TestCase(), 1);
+		}
+		assertEquals(1, sut.nightChargeIgnoredWarningsForTest());
+		channel.setNextWriteValue(45);
+		test.next(new TestCase(), 1);
+		assertEquals(2, sut.nightChargeIgnoredWarningsForTest());
+		assertFalse(Files.exists(NightChargeOverrideStore.inDirectory(dir, "batteryInverter0").file()));
 	}
 }

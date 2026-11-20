@@ -5,6 +5,8 @@ import static org.osgi.service.component.annotations.ReferenceCardinality.MANDAT
 import static org.osgi.service.component.annotations.ReferencePolicy.STATIC;
 import static org.osgi.service.component.annotations.ReferencePolicyOption.GREEDY;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
@@ -12,6 +14,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -45,6 +48,7 @@ import io.openems.edge.bridge.modbus.api.task.FC3ReadRegistersTask;
 import io.openems.edge.bridge.modbus.api.task.FC16WriteRegistersTask;
 import io.openems.edge.common.channel.ChannelUtils;
 import io.openems.edge.common.channel.IntegerReadChannel;
+import io.openems.edge.common.channel.IntegerWriteChannel;
 import io.openems.edge.common.channel.value.Value;
 import io.openems.edge.common.component.ComponentManager;
 import io.openems.edge.common.component.OpenemsComponent;
@@ -127,6 +131,21 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	private DischargeGuard dischargeGuard = new DischargeGuard(-1, -1);
 	private NightChargeStop nightChargeStop = NightChargeStop.OFF;
 	private LocalDateTime nightChargeNow;
+	// A write to NightChargeStopSocTonight (any thread), taken on the cycle thread
+	// once the time is known. The record allows a null (cancel) write.
+	private final AtomicReference<OverrideWrite> nightChargeOverrideWrite = new AtomicReference<>();
+
+	private record OverrideWrite(Integer soc) {
+	}
+
+	// Persists the one-night override outside the component configuration.
+	private NightChargeOverrideStore nightChargeOverrideStore;
+	// Test seam: the directory of the override file, or null for the data dir.
+	private Path nightChargeOverrideDir;
+	private Integer lastIgnoredOverride;
+	// Log counter, for tests of the rate limiting.
+	private long nightChargeIgnoredWarnings;
+
 	private ModeSchedule modeSchedule = ModeSchedule.fromConfig(false, ModeSchedule.SUB, ModeSchedule.SBU, null, null,
 			-1);
 	private ModeScheduleState lastModeScheduleState;
@@ -257,6 +276,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 			this.modeSchedule.onMachineStateRead(raw);
 			this.chargePrioritySchedule.onMachineStateRead(raw);
 		});
+		this.nightChargeOverrideStore = this.nightChargeOverrideDir == null
+				? NightChargeOverrideStore.inDataDir(config.id())
+				: NightChargeOverrideStore.inDirectory(this.nightChargeOverrideDir, config.id());
+		this.restoreNightChargeOverride();
+		((IntegerWriteChannel) this.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT))
+				.onSetNextWrite(value -> this.nightChargeOverrideWrite.set(new OverrideWrite(value)));
 		// Fresh SoC reads for the night charge stop confirmation.
 		((IntegerReadChannel) this.channel(SrneBatteryInverter.ChannelId.BATTERY_SOC))
 				.onSetNextValue(value -> this.nightChargeStop.onSocRead(value.get()));
@@ -1170,20 +1195,142 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		} else if (step.message() != null) {
 			this.logInfo(this.log, step.message());
 		}
+		if (step.warning() != null) {
+			this.logWarn(this.log, step.warning());
+		}
 		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE, step.state());
+		this.updateNightChargeOverrideChannels();
 		return step.enable();
 	}
 
+	// The override's night is over (or it was dropped): the persisted copy goes
+	// too, so a restart neither reads it back nor logs its clear again.
+	private void deletePersistedNightChargeOverride() {
+		try {
+			this.nightChargeOverrideStore.save(null);
+		} catch (IOException | RuntimeException e) {
+			this.logWarn(this.log, "Expired night charge stop override file " + this.nightChargeOverrideStore.file()
+					+ " not deleted: " + e.getMessage() + "; it is ignored on restart");
+		}
+	}
+
+	// The stop SoC in effect, its source, the rejection flag and the pending or
+	// running override. Edge cycle thread.
+	private void updateNightChargeOverrideChannels() {
+		var override = this.nightChargeStop.getOverride();
+		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_TONIGHT,
+				override == null ? null : override.soc());
+		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_APPLIED,
+				this.nightChargeStop.getAppliedStopSoc());
+		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_SOC_SOURCE,
+				this.nightChargeStop.getStopSocSource());
+		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_OVERRIDE_REJECTED,
+				this.nightChargeStop.isOverrideRejected());
+	}
+
+	// Hands a written override to the night charge stop once the time is known and
+	// persists a taken one, so a restart re-derives the same choice. A write while
+	// the rule is off, or inside the window, is ignored with a warning.
+	private void takeNightChargeOverrideWrite() {
+		final var now = this.nightChargeNow;
+		if (now != null && !this.nightChargeStop.isInHoldSpan(now)) {
+			// Outside the window: the next night's ignored write warns again.
+			this.lastIgnoredOverride = null;
+		}
+		if (now == null || this.nightChargeOverrideWrite.get() == null) {
+			return;
+		}
+		var write = this.nightChargeOverrideWrite.getAndSet(null);
+		// API writes are re-applied every cycle until they time out: an unchanged one
+		// is skipped (no log, no file write, the write time stays), and an ignored
+		// one is reported once per value.
+		if (this.nightChargeStop.isUnchangedOverride(write.soc())) {
+			return;
+		}
+		var ignored = this.nightChargeStop.writeOverride(write.soc(), now);
+		if (ignored != null) {
+			if (!Objects.equals(write.soc(), this.lastIgnoredOverride)) {
+				this.logWarn(this.log, "NightChargeStopSocTonight [" + write.soc() + "] ignored: " + ignored);
+				this.lastIgnoredOverride = write.soc();
+				this.nightChargeIgnoredWarnings++;
+			}
+			return;
+		}
+		this.lastIgnoredOverride = null;
+		this.logInfo(this.log,
+				"NightChargeStopSocTonight [" + write.soc() + "] taken for the next night charge window");
+		var override = this.nightChargeStop.getOverride();
+		try {
+			this.nightChargeOverrideStore.save(override == null ? null
+					: new NightChargeOverrideStore.Stored(override.soc(), now.atZone(this.scheduleZone).toInstant()));
+		} catch (IOException | RuntimeException e) {
+			this.logError(this.log, "NightChargeStopSocTonight is not persisted to "
+					+ this.nightChargeOverrideStore.file() + ": " + e.getMessage() + "; a restart loses it");
+		}
+	}
+
+	// Restores a persisted override on activation. A missing file is no override;
+	// an unreadable or corrupt one is logged once and nightChargeStopSoc applies.
+	// An expired one is cleared by the night charge stop at the first known time.
+	private void restoreNightChargeOverride() {
+		if (!this.nightChargeStop.isActive()) {
+			return;
+		}
+		var loaded = this.nightChargeOverrideStore.load();
+		if (loaded.problem() != null) {
+			this.logWarn(this.log, "Night charge stop override not restored (" + loaded.problem()
+					+ "); using nightChargeStopSoc [" + this.config.nightChargeStopSoc() + "]");
+			return;
+		}
+		var stored = loaded.stored();
+		if (stored != null) {
+			this.nightChargeStop.restoreOverride(stored.soc(),
+					LocalDateTime.ofInstant(stored.writtenAt(), this.scheduleZone));
+		}
+	}
+
+	long nightChargeIgnoredWarningsForTest() {
+		return this.nightChargeIgnoredWarnings;
+	}
+
+	// Package-private for tests: must be called before activation.
+	void setNightChargeOverrideDirForTest(Path dir) {
+		this.nightChargeOverrideDir = dir;
+	}
+
 	// The clock gate is fed every cycle, also while the machine-state gate is
-	// closed, so a clock step is seen whenever it happens. A configured rule that
-	// cannot act reports OFF.
+	// closed, so a clock step is seen whenever it happens; the one-night override
+	// (window choice, clear, writes, channels) follows the time here too. A
+	// configured rule that cannot act reports OFF.
 	private void updateNightChargeClock() {
 		if (this.nightChargeStop.isActive()) {
 			this.nightChargeNow = this.nightChargeStop.plausibleTime(this.instantOrNull(), this.scheduleZone);
-		} else if (this.config != null && this.config.nightChargeStopSoc() != -1) {
-			ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE,
-					NightChargeStop.State.OFF);
+			if (this.nightChargeStop.takeOverrideCleared()) {
+				this.deletePersistedNightChargeOverride();
+			}
+			this.takeNightChargeOverrideWrite();
+			this.updateNightChargeOverrideChannels();
+		} else {
+			if (this.config != null && this.config.nightChargeStopSoc() != -1) {
+				ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE,
+						NightChargeStop.State.OFF);
+			}
+			this.ignoreNightChargeOverrideWriteWhileOff();
 		}
+	}
+
+	// A write while the night charge stop is off (nightChargeStopSoc=-1, invalid or
+	// inert) has nothing to act on: it is dropped with one warning per value.
+	private void ignoreNightChargeOverrideWriteWhileOff() {
+		var write = this.nightChargeOverrideWrite.getAndSet(null);
+		if (write == null || write.soc() == null || write.soc() < 0
+				|| Objects.equals(write.soc(), this.lastIgnoredOverride)) {
+			return;
+		}
+		this.logWarn(this.log, "NightChargeStopSocTonight [" + write.soc()
+				+ "] ignored: the night charge stop is off (nightChargeStopSoc=-1, invalid or inert)");
+		this.lastIgnoredOverride = write.soc();
+		this.nightChargeIgnoredWarnings++;
 	}
 
 	// Package-private for tests.

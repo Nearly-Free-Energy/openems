@@ -229,6 +229,37 @@ resuming the charge.
   resumes by design: `0xE02C` is armed, the night value is written and the stop
   latches again at `nightChargeStopSoc`. With `nightChargeStopSoc=-1` the schedule is
   unchanged.
+* One-night override (`NightChargeStopSocTonight`, ADR-017): a write of `30..90` to
+  this channel replaces `nightChargeStopSoc` for the next charge window only. It writes
+  no register; it only changes the SoC at which the stop latches. The stop SoC of a
+  window is chosen once, at its first known time: the override is used if it was
+  written after the previous window ended (its re-arm time) and before this window
+  started, otherwise `nightChargeStopSoc` applies. The choice ends at the window's
+  re-arm time even if the stop's latch is not released yet (outage, clock step), so a
+  stuck latch never carries an override into the next night, and a write after the
+  re-arm time is taken even while such a latch is held. An override whose write time
+  lies after the current time (gw-pi2 has no RTC and may reboot on a fake-hwclock
+  time, saved hourly, behind the write) is kept and waits; more than 1 hour ahead it
+  is reported once and stays unused, but is not deleted, until the clock passes its
+  write time. A write while the night charge stop is off (`nightChargeStopSoc=-1`,
+  invalid or inert) is dropped with one warning per value. An override outside `30..90` is
+  rejected for that window: one warning, `NightChargeStopOverrideRejected` set until
+  the window ends. When the window ends (the re-arm path) the override is cleared. A
+  write inside the window (or its re-arm delay) is ignored with a warning, so it cannot
+  change the running window. To cancel a pending override write a negative value
+  (e.g. `-1`); `null` also cancels where the API path delivers it, but some paths
+  treat `null` as no write. Repeated writes of the same value (an API re-applying its
+  write every cycle) change nothing: no log, no file write, the write time stays. A
+  taken write (or a cancel) is persisted to `<openems.data.dir>/srne/<component id>-night-charge-stop-override.json`
+  (stop SoC and write time; the temporary file is flushed, then renamed over it; a
+  cancel deletes it, and so does the clear when its night is over). It is not part
+  of the component configuration, so saving it never restarts the driver. It is read
+  on activation: a restart inside the window keeps the applied value, and a restart
+  after it drops the expired override. A missing, unreadable or corrupt file means no
+  override (`nightChargeStopSoc` applies; an unreadable one is logged once). `NightChargeStopSocApplied` and
+  `NightChargeStopSocSource` (`CONFIG` or `OVERRIDE`) show the stop SoC in effect.
+  Not yet proven on a unit that the override is honoured (ADR-017 row N6): test it in
+  daylight before relying on it at night.
 * Commissioning: switching `0xE20F` from 2 to 3 during an active grid charge has not
   been tried on a unit. Keep `nightChargeStopSoc=-1` on production gateways until one
   supervised night has shown the charge current stop within a minute of `STOPPED`.
