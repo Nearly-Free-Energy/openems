@@ -1503,6 +1503,12 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		return this.writeHandlers[index].getState();
 	}
 
+	// Package-private for tests: the dummy bridge never executes writes, so a test
+	// plays a failed execute through the handler the write task calls back.
+	SafeWriteHandler writeHandlerForTest(int index) {
+		return this.writeHandlers[index];
+	}
+
 	// Package-private for tests: the dummy bridge cannot echo a written register,
 	// so tests pin the enable value that was queued.
 	Integer dischargeQueuedEnableForTest() {
@@ -1563,12 +1569,21 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	/**
 	 * Whether a configured output-priority prerequisite is settled and it is
 	 * therefore safe to arm battery-priority output. Settled means the handler is
-	 * at rest - either IDLE (already correct on the device, so it never queued) or
-	 * VERIFIED (written and confirmed this activation) - AND the device CURRENTLY
-	 * reads the configured target. A queued, awaiting or failed write is never
-	 * settled even if the read momentarily matches, and a verified value that has
-	 * since drifted (or is unknown) is not settled either. Callers guarantee the
-	 * target is configured (&gt;= 0).
+	 * at rest - IDLE (already correct on the device, so it never queued), VERIFIED
+	 * (written and confirmed this activation) or FAILED (the write or its read-back
+	 * failed) - AND the device CURRENTLY reads the configured target. A queued or
+	 * awaiting write is never settled even if the read momentarily matches, and an
+	 * at-rest value that has drifted (or is unknown) is not settled either. Callers
+	 * guarantee the target is configured (&gt;= 0).
+	 *
+	 * <p>
+	 * FAILED counts as at rest because no handler state ever writes again: VERIFIED
+	 * and FAILED both stop the handler, so what makes arming safe is the live read
+	 * matching the target, checked every cycle. Without this, one failed read-back
+	 * (a stale read, a timeout, a Modbus error on a write the device did apply)
+	 * held SBU off until the Edge restarted, even with the band reading correctly
+	 * (gw-pi2, 17 Nov 2026: E01F/E020 read 18/23, ModeSchedule BLOCKED from 14:00).
+	 * A rejected target never reaches here: the arm is refused first.
 	 *
 	 * <p>
 	 * Requires unscaled prerequisites (rawMultiplier 1) so the raw channel read and
@@ -1583,10 +1598,11 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	 * @return true if it is safe to proceed with the output-priority write
 	 */
 	static boolean isPrerequisiteSettled(int configuredTarget, SafeWriteHandler.State state, Integer actual) {
-		if (state != SafeWriteHandler.State.IDLE && state != SafeWriteHandler.State.VERIFIED) {
-			return false;
-		}
-		return actual != null && actual == configuredTarget;
+		var atRest = switch (state) {
+		case IDLE, VERIFIED, FAILED -> true;
+		case QUEUED, AWAITING_READBACK, UNDEFINED -> false;
+		};
+		return atRest && actual != null && actual == configuredTarget;
 	}
 
 	// JUSTIFICATION-A3: guarded reconcile for a coherent TOU schedule window (#67,
