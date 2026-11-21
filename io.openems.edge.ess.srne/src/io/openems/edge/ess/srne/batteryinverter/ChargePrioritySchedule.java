@@ -24,6 +24,14 @@ import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
  * this schedule. Two writes a day while in sync.
  *
  * <p>
+ * Night charge stop: once {@link NightChargeStop} ends the night charge inside
+ * the night window, the night window is over for that night: the day value is
+ * the target from then until {@code nightTo}, through the same day-value write
+ * path, and the night value is not applied again in that window. The next night
+ * starts with the night value as usual. While the stop has not decided yet (see
+ * {@link NightStop#PENDING}) the night value is not written.
+ *
+ * <p>
  * Writes go through a {@link SafeWriteHandler} (one per write) and the same
  * gates as {@link ModeSchedule}:
  * <ul>
@@ -123,6 +131,20 @@ final class ChargePrioritySchedule {
 	 */
 	static final int TIMER_START_MARGIN_MINUTES = 5;
 
+	/** What the night charge stop reports to this schedule. */
+	enum NightStop {
+		/** No restriction (the stop is off, charging, or outside its window). */
+		NONE,
+		/**
+		 * The stop has not decided yet (not evaluated since activation, or a disarmed
+		 * device held in the window that does not count as a stop yet): the night value
+		 * is not written; a device that already reads it is left alone.
+		 */
+		PENDING,
+		/** The stop ended the night charge: the night window ends for this night. */
+		ENDED
+	}
+
 	/**
 	 * One evaluation result.
 	 *
@@ -180,6 +202,10 @@ final class ChargePrioritySchedule {
 	private int safeMismatchCycles;
 	private int cycles;
 	private LocalTime lastNow;
+	// The night window that a night charge stop ended early: from the stop to the
+	// window end, or null.
+	private LocalDateTime nightEndedFrom;
+	private LocalDateTime nightEndedUntil;
 
 	private ChargePrioritySchedule(boolean enabled, String invalidReason, int nightPriority, int dayPriority,
 			LocalTime nightFrom, LocalTime nightTo, Integer holdValue) {
@@ -359,6 +385,24 @@ final class ChargePrioritySchedule {
 	}
 
 	/**
+	 * Whether the night window at a local date-time was ended early by the night
+	 * charge stop, so the day value applies until its normal end.
+	 *
+	 * @param now the local date-time, or null if unknown
+	 * @return true from the stop until nightTo of that night
+	 */
+	boolean isNightEnded(LocalDateTime now) {
+		return this.isActive() && this.nightEndedUntil != null && now != null && !now.isBefore(this.nightEndedFrom)
+				&& now.isBefore(this.nightEndedUntil) && this.isNight(now.toLocalTime());
+	}
+
+	// The end (nightTo) of the night window that contains now.
+	private LocalDateTime nightEndAfter(LocalDateTime now) {
+		var end = now.toLocalDate().atTime(this.nightTo);
+		return end.isAfter(now) ? end : end.plusDays(1);
+	}
+
+	/**
 	 * Whether a charge-timer window lies completely inside the night window, so the
 	 * timer never charges from mains while the day value is set and always has the
 	 * night value while it runs.
@@ -482,6 +526,30 @@ final class ChargePrioritySchedule {
 	 */
 	Step step(LocalDateTime now, Integer chargePriority, boolean controlEnabled, boolean mains, boolean running,
 			int readbackTimeout, int cooldown) {
+		return this.step(now, chargePriority, controlEnabled, mains, running, readbackTimeout, cooldown,
+				NightStop.NONE);
+	}
+
+	/**
+	 * Evaluates one cycle like the step without the night charge stop. Once the
+	 * stop reports {@link NightStop#ENDED} inside the night window, that night
+	 * window ends: the target is the day value until nightTo, also if the stop is
+	 * released earlier (a backward clock step before the stop forgets it). While it
+	 * reports {@link NightStop#PENDING} the night value is not written.
+	 *
+	 * @param now             plausible local date-time, or null if unknown
+	 * @param chargePriority  E20F read-back, or null if unreadable
+	 * @param controlEnabled  the settings-write safety gate
+	 * @param mains           whether the verified machine-state gate (state 2)
+	 *                        holds now
+	 * @param running         whether the machine state is 2 or 3 now
+	 * @param readbackTimeout cycles allowed for a fresh read-back
+	 * @param cooldown        base cycles to wait after a failed or overridden write
+	 * @param nightStop       what the night charge stop reports
+	 * @return the result for this cycle
+	 */
+	Step step(LocalDateTime now, Integer chargePriority, boolean controlEnabled, boolean mains, boolean running,
+			int readbackTimeout, int cooldown, NightStop nightStop) {
 		if (!this.managesRegister()) {
 			return new Step(ModeScheduleState.DISABLED, null, null);
 		}
@@ -510,13 +578,30 @@ final class ChargePrioritySchedule {
 		} else if (this.unknownClockCycles < UNKNOWN_CLOCK_FALLBACK_CYCLES) {
 			this.unknownClockCycles++;
 		}
+		if (this.nightEndedUntil != null && now != null
+				&& (now.isBefore(this.nightEndedFrom) || !now.isBefore(this.nightEndedUntil))) {
+			// That night is over, or the clock stepped back before the stop.
+			this.nightEndedFrom = null;
+			this.nightEndedUntil = null;
+		}
+		if (nightStop == NightStop.ENDED && this.isActive() && now != null && this.isNight(now.toLocalTime())
+				&& !this.isNightEnded(now)) {
+			// The night ends here for this window. The failure budget is not refilled: the
+			// day value never latches, and its capped backoff bounds the writes.
+			this.nightEndedFrom = now;
+			this.nightEndedUntil = this.nightEndAfter(now);
+		}
+		final var nightEnded = this.isNightEnded(now);
 		var target = this.holdValue != null ? this.holdValue : this.targetAt(now == null ? null : now.toLocalTime());
+		if (nightEnded) {
+			target = this.dayPriority;
+		}
 		if (target == null && this.unknownClockCycles >= UNKNOWN_CLOCK_FALLBACK_CYCLES) {
 			// The clock stays unknown (e.g. no NTP after a reboot): fall back to the day
 			// value, so the grid cannot charge at an unknown time of day.
 			target = this.dayPriority;
 		}
-		this.updateNightLate(now, chargePriority);
+		this.updateNightLate(now, chargePriority, nightEnded);
 		this.updateSafeMismatch(target, chargePriority);
 		var crossed = this.isActive() && now != null && this.crossedBoundaryForward(this.lastNow, now.toLocalTime());
 		if (crossed || target != null && !target.equals(this.overrideTarget)) {
@@ -596,6 +681,10 @@ final class ChargePrioritySchedule {
 		if (!day && this.writesOn(date) >= MAX_DAILY_WRITES) {
 			return new Step(ModeScheduleState.DAILY_WRITE_LIMIT, target, null);
 		}
+		if (!day && nightStop == NightStop.PENDING) {
+			// The night charge stop has not decided yet: do not raise the night value.
+			return new Step(ModeScheduleState.WAITING_FOR_DATA, target, null);
+		}
 		var gateConfirmed = day ? running && this.freshRunningReads >= ModeSchedule.MAINS_CONFIRM_READS
 				: mains && this.freshMainsReads >= ModeSchedule.MAINS_CONFIRM_READS;
 		if (!gateConfirmed) {
@@ -649,8 +738,8 @@ final class ChargePrioritySchedule {
 		}
 	}
 
-	private void updateNightLate(LocalDateTime now, Integer chargePriority) {
-		if (!this.isActive() || now == null || !this.isNight(now.toLocalTime()) || chargePriority == null
+	private void updateNightLate(LocalDateTime now, Integer chargePriority, boolean nightEnded) {
+		if (!this.isActive() || now == null || !this.isNight(now.toLocalTime()) || nightEnded || chargePriority == null
 				|| chargePriority == this.nightPriority) {
 			this.nightMismatchSince = null;
 			this.nightLate = false;

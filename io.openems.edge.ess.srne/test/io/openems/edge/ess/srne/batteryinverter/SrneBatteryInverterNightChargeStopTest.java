@@ -3,14 +3,19 @@ package io.openems.edge.ess.srne.batteryinverter;
 import static io.openems.edge.ess.srne.SrneConstants.DEFAULT_UNIT_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 
 import org.junit.jupiter.api.Test;
+
+import com.ghgande.j2mod.modbus.procimg.Register;
 
 import io.openems.common.test.TimeLeapClock;
 import io.openems.edge.bridge.modbus.api.task.Task.ExecuteState;
@@ -123,6 +128,19 @@ public class SrneBatteryInverterNightChargeStopTest {
 						.setMaxApparentPower(12_000).setControlEnabled(true).setChargeWindow1Start(START)
 						.setChargeWindow1Stop(STOP).setNightChargeStopSoc(50).build());
 		assertFalse(sut.nightChargeStopForTest().isActive());
+	}
+
+	@Test
+	public void testChargeWindowAcrossMidnightLeavesTheRuleOff() throws Exception {
+		// 22:30-02:00 is rejected: the rule stays off, reads no SoC and writes nothing.
+		var sut = new SrneBatteryInverterImpl();
+		start(sut, bridge(99, MachineState.RUNNING_MAINS_BYPASS), clockAt("2026-11-12T20:00:00Z"),
+				MyConfig.create().setId("batteryInverter0").setModbusId("modbus0").setModbusUnitId(DEFAULT_UNIT_ID)
+						.setMaxApparentPower(12_000).setControlEnabled(true).setChargeWindow1Start(22 * 256 + 30)
+						.setChargeWindow1Stop(2 * 256).setChargeScheduleEnable(1).setNightChargeStopSoc(50).build());
+		assertFalse(sut.nightChargeStopForTest().isActive());
+		assertFalse(hasReadTask(sut, 0x0100));
+		assertNull(sut.chargeWindowForTest().queuedEnable());
 	}
 
 	@Test
@@ -248,5 +266,430 @@ public class SrneBatteryInverterNightChargeStopTest {
 		assertEquals(NightChargeStop.State.OUTSIDE_WINDOW, state(sut));
 		assertEquals(1, sut.chargeWindowForTest().queuedEnable());
 		test.deactivate();
+	}
+
+	@Test
+	public void testLatchLeftFromTheLastNightMovesToThisWindowWithTheScheduleOff() throws Exception {
+		// chargePrioritySchedule=false: E20F is not managed, yet the relatch changes
+		// E02C. Stopped at 03:00 local, then the clock is lost until 00:10 the next
+		// night (one step), so the old latch waits REARM_CONFIRM (until about 02:10).
+		for (var stopSocAgain : new boolean[] { false, true }) {
+			var sut = new SrneBatteryInverterImpl();
+			final var clock = clockAt("2026-11-13T00:00:00Z");
+			final var bridge = bridge(60, MachineState.RUNNING_MAINS_BYPASS);
+			final var test = start(sut, bridge, clock, config(50));
+			assertFalse(hasReadTask(sut, 0xE20F));
+			assertEquals(NightChargeStop.State.STOPPED, state(sut));
+			deviceWritesEnable(sut, bridge, test, 0);
+			bridge.withRegisters(0x0100, 30);
+			clock.leap(21 * 60 + 10, ChronoUnit.MINUTES);
+			test.next(new TestCase(), SETTLE_CYCLES);
+			leap(clock, test, 50); // 01:00
+			assertEquals(NightChargeStop.State.STOPPED, state(sut));
+			if (stopSocAgain) {
+				bridge.withRegisters(0x0100, 60);
+			}
+			// 01:00 to 02:30 local in 5-minute steps; the device plays any E02C write.
+			Instant armedAt = null;
+			for (var i = 0; i < 18; i++) {
+				leap(clock, test, 5);
+				if (armedAt == null && Integer.valueOf(1).equals(sut.chargeWindowForTest().queuedEnable())) {
+					armedAt = clock.instant();
+					deviceWritesEnable(sut, bridge, test, 1);
+				}
+			}
+			if (!stopSocAgain) {
+				// Below the stop: the old latch is released inside the window, at the end
+				// of REARM_CONFIRM, and E02C is armed again, as before the relatch.
+				assertEquals(Instant.parse("2026-11-13T23:10:00Z"), armedAt);
+				assertEquals(NightChargeStop.State.CHARGING, state(sut));
+			} else {
+				// The stop SoC confirmed in this window: latched for this window, E02C
+				// stays 0 until this window's re-arm time (06:15).
+				assertNull(armedAt);
+				assertEquals(NightChargeStop.State.STOPPED, state(sut));
+				assertNull(sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset());
+				leap(clock, test, 220); // 06:10
+				assertEquals(NightChargeStop.State.STOPPED, state(sut));
+				leap(clock, test, 5); // 06:15
+				assertEquals(NightChargeStop.State.OUTSIDE_WINDOW, state(sut));
+				assertEquals(1, sut.chargeWindowForTest().queuedEnable());
+			}
+			test.deactivate();
+		}
+	}
+
+	// Charge timer 00:05-01:30 inside the charge-priority night 00:00-01:35.
+	private static final int SHORT_START = 5; // 00:05
+	private static final int SHORT_STOP = 286; // 01:30
+
+	private static Integer chargePriorityTarget(SrneBatteryInverterImpl sut) {
+		Channel<Integer> channel = sut.channel(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY_SCHEDULE_TARGET);
+		return channel.value().get();
+	}
+
+	// 00:55 local (21:55Z), SoC 30 %, hybrid on the device, past the startup holds.
+	private static ComponentTest startShortNight(SrneBatteryInverterImpl sut, DummyModbusBridge bridge,
+			TimeLeapClock clock, int nightChargeStopSoc) throws Exception {
+		return activateShortNight(sut, bridge, clock, nightChargeStopSoc) //
+				.next(new TestCase(), ModeSchedule.STARTUP_HOLD_CYCLES + CYCLES);
+	}
+
+	// Activated, no cycle run yet.
+	private static ComponentTest activateShortNight(SrneBatteryInverterImpl sut, DummyModbusBridge bridge,
+			TimeLeapClock clock, int nightChargeStopSoc) throws Exception {
+		return new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setChargeWindow1Start(SHORT_START) //
+						.setChargeWindow1Stop(SHORT_STOP) //
+						.setChargeScheduleEnable(1) //
+						.setNightChargeStopSoc(nightChargeStopSoc) //
+						.setChargePrioritySchedule(true) //
+						.setChargePriorityRestoreWhenOff(true) //
+						.setNightChargeFrom("00:00") //
+						.setNightChargeTo("01:35") //
+						.build());
+	}
+
+	private static DummyModbusBridge shortNightBridge() {
+		return shortNightBridge(1, 2, 30, MachineState.RUNNING_MAINS_BYPASS);
+	}
+
+	private static DummyModbusBridge shortNightBridge(int chargeEnable, int chargePriority, int soc,
+			MachineState state) {
+		return new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE026, SHORT_START, SHORT_STOP) //
+				.withRegisters(0xE02C, chargeEnable, 0, 0) //
+				.withRegisters(0x0100, soc) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0xE20F, chargePriority) //
+				.withRegister(0x0210, state.getValue());
+	}
+
+	// Steady 5-minute steps (a larger step would close the clock gates).
+	private static void leap(TimeLeapClock clock, ComponentTest test, int minutes) throws Exception {
+		for (var i = 0; i < minutes / 5; i++) {
+			clock.leap(5, ChronoUnit.MINUTES);
+			test.next(new TestCase(), CYCLES);
+		}
+	}
+
+	@Test
+	public void testStopEndsTheNightChargePriority() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T21:55:00Z");
+		final var bridge = shortNightBridge();
+		final var test = startShortNight(sut, bridge, clock, 50);
+		assertEquals(NightChargeStop.State.CHARGING, state(sut));
+		assertEquals(2, chargePriorityTarget(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+
+		// 01:05 local, SoC at the stop: E02C is disarmed and E20F goes to PV only now.
+		leap(clock, test, 10);
+		bridge.withRegisters(0x0100, 50);
+		for (var i = 0; i < 4 * CYCLES && state(sut) != NightChargeStop.State.STOPPED; i++) {
+			test.next(new TestCase());
+		}
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		assertEquals(3, chargePriorityTarget(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, 3);
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.VERIFIED, sut.chargePriorityScheduleForTest().handlerState());
+
+		// SoC far below the stop until the night window ends: no hybrid again.
+		bridge.withRegisters(0x0100, 20);
+		for (var i = 0; i < 6; i++) {
+			leap(clock, test, 5);
+			assertEquals(3, chargePriorityTarget(sut));
+			assertFalse(sut.takeChargePriorityWriteForTest());
+		}
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testStopOffKeepsTheNightChargePriorityUntilTheWindowEnd() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T21:55:00Z");
+		final var bridge = shortNightBridge();
+		final var test = startShortNight(sut, bridge, clock, -1);
+		bridge.withRegisters(0x0100, 99);
+		// 00:55 to 01:30 local: hybrid stays, nothing is written.
+		for (var i = 0; i < 7; i++) {
+			leap(clock, test, 5);
+			assertEquals(2, chargePriorityTarget(sut));
+			assertFalse(sut.takeChargePriorityWriteForTest());
+		}
+		// 01:35: the day value at the normal window end.
+		leap(clock, test, 5);
+		assertEquals(3, chargePriorityTarget(sut));
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		test.deactivate();
+	}
+
+	@Test
+	public void testRestartAfterTheStopDoesNotRaiseTheNightValue() throws Exception {
+		// Restart at 01:10 local after a stop: E02C reads 0, E20F reads 3, the SoC is
+		// in the hysteresis band just below the stop, and the unit is on battery (the
+		// settings gate is closed).
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var bridge = shortNightBridge(0, 3, 48, MachineState.SOFT_START);
+		final var test = startShortNight(sut, bridge, clock, 50);
+		assertEquals(2, chargePriorityTarget(sut));
+		assertFalse(sut.takeChargePriorityWriteForTest());
+		// Mains returns: the stop holds the device disarmed and is confirmed as a stop;
+		// the night value is never written in between.
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		for (var i = 0; i < NightChargeStop.HELD_CONFIRM_CYCLES + 2 * CYCLES; i++) {
+			test.next(new TestCase());
+			assertFalse(sut.takeChargePriorityWriteForTest(), "cycle " + i);
+		}
+		assertEquals(NightChargeStop.State.HELD_DISARMED, state(sut));
+		assertEquals(3, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testRestartOnMainsAfterTheStopDoesNotArmBeforeTheRuleDecides() throws Exception {
+		// Restart at 01:10 local on mains after a stop: E02C reads 0, E20F reads 3, the
+		// SoC is in the hysteresis band just below the stop. Neither E02C=1 nor E20F=2
+		// is queued, before or after the rule has decided.
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var bridge = shortNightBridge(0, 3, 48, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = activateShortNight(sut, bridge, clock, 50);
+		for (var i = 0; i < NightChargeStop.HELD_CONFIRM_CYCLES + SETTLE_CYCLES; i++) {
+			test.next(new TestCase());
+			assertNull(sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset(), "cycle " + i);
+			assertFalse(sut.takeChargePriorityWriteForTest(), "cycle " + i);
+		}
+		assertEquals(NightChargeStop.State.HELD_DISARMED, state(sut));
+		assertEquals(3, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testRestartOnMainsWithALowSocArmsOnlyAfterTheRuleDecides() throws Exception {
+		// The same restart with the battery clearly low (SoC 20, stop 50): the rule may
+		// arm once it has decided (its hysteresis lets a clearly low battery charge),
+		// but nothing is queued while it is still waiting for the time.
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var bridge = shortNightBridge(0, 3, 20, MachineState.RUNNING_MAINS_BYPASS);
+		final var test = activateShortNight(sut, bridge, clock, 50);
+		Register[] armed = null;
+		var i = 0;
+		for (; i < NightChargeStop.HELD_CONFIRM_CYCLES + SETTLE_CYCLES && armed == null; i++) {
+			test.next(new TestCase());
+			armed = sut.chargeWindowForTest().enableWriteElement().getNextWriteValueAndReset();
+			if (armed == null) {
+				continue;
+			}
+			// This cycle's rule state (the channel value lags one cycle).
+			Channel<NightChargeStop.State> channel = sut.channel(SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE);
+			assertEquals(NightChargeStop.State.CHARGING, channel.getNextValue().asEnum(), "cycle " + i);
+		}
+		assertTrue(armed != null && armed.length == 1 && Integer.valueOf(1).equals(armed[0].getValue()),
+				"armed after the rule decided");
+		assertTrue(i > ModeSchedule.CLOCK_SETTLE_CYCLES, "not before the clock settled: cycle " + i);
+		test.deactivate();
+	}
+
+	@Test
+	public void testRestartWithUnknownSocReportsTheBlockedNightCharge() throws Exception {
+		// Restart at 01:10 local with E02C reading 0 and the SoC register unreadable:
+		// the stop holds the device disarmed and the night value back, which is
+		// reported as HELD_SOC_UNKNOWN instead of a silent HELD_DISARMED.
+		var sut = new SrneBatteryInverterImpl();
+		final var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE026, SHORT_START, SHORT_STOP) //
+				.withRegisters(0xE02C, 0, 0, 0) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegister(0xE20F, 3) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		final var clock = clockAt("2026-11-12T22:10:00Z");
+		final var test = startShortNight(sut, bridge, clock, 50);
+		for (var i = 0; i < NightChargeStop.HELD_CONFIRM_CYCLES + CYCLES; i++) {
+			test.next(new TestCase());
+			assertFalse(sut.takeChargePriorityWriteForTest(), "cycle " + i);
+		}
+		assertEquals(NightChargeStop.State.HELD_SOC_UNKNOWN, state(sut));
+		// The night value is the target but held back: never written (checked above).
+		assertTrue(sut.nightChargeStopForTest()
+				.isNightChargePending(LocalDateTime.ofInstant(clock.instant(), ZoneId.of("Africa/Kampala"))));
+		assertEquals(2, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testFailedDayWriteAfterTheStopDoesNotBlockTheOtherSettings() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T21:55:00Z");
+		final var bridge = shortNightBridge();
+		final var test = startShortNight(sut, bridge, clock, 50);
+		leap(clock, test, 10);
+		bridge.withRegisters(0x0100, 50);
+		for (var i = 0; i < 4 * CYCLES && state(sut) != NightChargeStop.State.STOPPED; i++) {
+			test.next(new TestCase());
+		}
+		deviceWritesEnable(sut, bridge, test, 0);
+		// The day write fails on the bus.
+		assertTrue(sut.takeChargePriorityWriteForTest());
+		sut.chargePriorityScheduleForTest().onExecute(new ExecuteState.Error(new IllegalStateException("test")));
+		test.next(new TestCase(), CYCLES);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState());
+		// E20F has its own handler: the shared settings-write state is not FAILED.
+		Channel<SafeWriteHandler.State> writeState = sut.channel(SrneBatteryInverter.ChannelId.SAFE_WRITE_STATE);
+		assertNotEquals(SafeWriteHandler.State.FAILED, writeState.value().asEnum());
+		// Retried after the backoff, still the day value.
+		var retried = false;
+		for (var i = 0; i < 600 && !retried; i++) {
+			test.next(new TestCase());
+			retried = sut.takeChargePriorityWriteForTest();
+		}
+		assertTrue(retried);
+		assertEquals(3, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	// The value of a queued E20F write, taken as the bridge does, or null.
+	private static Integer takeE20fWrite(SrneBatteryInverterImpl sut) {
+		var queued = sut.chargePriorityScheduleForTest().writeElement().getNextWriteValueAndReset();
+		return queued == null ? null : queued[0].getValue();
+	}
+
+	@Test
+	public void testOutageIntoTheNextNightGetsTheNightValue() throws Exception {
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T21:55:00Z");
+		final var bridge = shortNightBridge();
+		final var test = startShortNight(sut, bridge, clock, 50);
+		// 01:05 local: the stop latches, E20F goes to PV only.
+		leap(clock, test, 10);
+		bridge.withRegisters(0x0100, 50);
+		for (var i = 0; i < 4 * CYCLES && state(sut) != NightChargeStop.State.STOPPED; i++) {
+			test.next(new TestCase());
+		}
+		deviceWritesEnable(sut, bridge, test, 0);
+		assertEquals(3, takeE20fWrite(sut));
+		sut.chargePriorityScheduleForTest().onExecute(ExecuteState.OK);
+		bridge.withRegister(0xE20F, 3);
+		test.next(new TestCase(), CYCLES);
+
+		// Grid lost from here, and the clock is lost too until 00:10 local the next
+		// night (one step): the latch needs REARM_CONFIRM and is still set.
+		bridge.withRegister(0x0210, MachineState.INVERTER_POWERED.getValue());
+		bridge.withRegisters(0x0100, 30);
+		test.next(new TestCase(), CYCLES);
+		clock.leap(23 * 60 + 5, ChronoUnit.MINUTES);
+		test.next(new TestCase(), SETTLE_CYCLES);
+		assertNull(takeE20fWrite(sut));
+
+		// Mains returns: the stop still holds E02C, but the new night gets hybrid.
+		bridge.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		test.next(new TestCase(), CYCLES);
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		assertFalse(sut.nightChargeStopForTest()
+				.hasEndedCharge(LocalDateTime.ofInstant(clock.instant(), ZoneId.of("Africa/Kampala"))));
+		assertEquals(2, chargePriorityTarget(sut));
+		assertEquals(2, takeE20fWrite(sut));
+		test.deactivate();
+	}
+
+	@Test
+	public void testFailedDayWriteAfterTheStopDoesNotBlockSbu() throws Exception {
+		// 17 Nov: a FAILED E20F handler must not hold the mode schedule's SBU gate
+		// (ModeScheduleState 7). Night 22:00-06:00 with the mode schedule (SBU from
+		// 18:00), charge timer 22:30-23:30; at 23:00 local the SoC is above the stop
+		// and the device rejects the day value and every retry of it. Only the E01F,
+		// E020 and E215 prerequisite handlers may gate SBU.
+		var sut = new SrneBatteryInverterImpl();
+		final var clock = clockAt("2026-11-12T20:00:00Z");
+		final var bridge = new DummyModbusBridge("modbus0") //
+				.withRegisters(0xE01C, 20, 95, 15, 20, 80) //
+				.withRegisters(0xE026, 5662, 5918) //
+				.withRegisters(0xE02C, 1, 0, 0) //
+				.withRegisters(0x0100, 60) //
+				.withRegisters(0x0101, 524, 0) //
+				.withRegisters(0xE204, 3, 200) //
+				.withRegister(0xE215, 1) //
+				.withRegister(0xE20F, 2) //
+				.withRegister(0x0210, MachineState.RUNNING_MAINS_BYPASS.getValue());
+		final var test = new ComponentTest(sut) //
+				.addReference("setModbus", bridge) //
+				.addReference("componentManager", new DummyComponentManager(clock)) //
+				.activate(MyConfig.create() //
+						.setId("batteryInverter0") //
+						.setModbusId("modbus0") //
+						.setModbusUnitId(DEFAULT_UNIT_ID) //
+						.setMaxApparentPower(12_000) //
+						.setControlEnabled(true) //
+						.setSwitchToLineSoc(20) //
+						.setSwitchToBatterySoc(80) //
+						.setBmsCommunication(1) //
+						.setModeScheduleEnabled(true) //
+						.setChargeWindow1Start(5662) // 22:30
+						.setChargeWindow1Stop(5918) // 23:30
+						.setChargeScheduleEnable(1) //
+						.setNightChargeStopSoc(50) //
+						.setChargePrioritySchedule(true) //
+						.setChargePriorityRestoreWhenOff(true) //
+						.setNightChargeFrom("22:00") //
+						.setNightChargeTo("06:00") //
+						.build());
+		var cycles = 0;
+		Integer write = null;
+		for (var i = 0; i < 4 * SETTLE_CYCLES && write == null; i++) {
+			test.next(new TestCase());
+			cycles++;
+			write = takeE20fWrite(sut);
+		}
+		assertEquals(3, write);
+		assertEquals(NightChargeStop.State.STOPPED, state(sut));
+		sut.chargePriorityScheduleForTest().onExecute(new ExecuteState.Error(new Exception("rejected")));
+		// The device rejects every day-write retry, so E20F never leaves FAILED. Run
+		// the mode schedule past its startup hold, in its SBU window: SBU goes out and
+		// state 7 is never reported.
+		var rejectedRetries = 0;
+		Integer sbu = null;
+		for (var i = 0; i < 4 * ModeSchedule.STARTUP_HOLD_CYCLES && sbu == null; i++) {
+			test.next(new TestCase());
+			cycles++;
+			assertNotEquals(ModeScheduleState.BLOCKED_SBU_PRECONDITIONS, modeScheduleState(sut), "cycle " + cycles);
+			var retry = takeE20fWrite(sut);
+			if (retry != null) {
+				assertEquals(3, retry);
+				sut.chargePriorityScheduleForTest().onExecute(new ExecuteState.Error(new Exception("rejected")));
+				rejectedRetries++;
+			}
+			assertEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState(),
+					"cycle " + cycles);
+			var queued = sut.modeScheduleForTest().writeElement().getNextWriteValueAndReset();
+			sbu = queued == null ? null : queued[0].getValue();
+		}
+		assertEquals(ModeSchedule.SBU, sbu);
+		assertEquals(2, sbu);
+		assertTrue(cycles >= ModeSchedule.STARTUP_HOLD_CYCLES, "SBU after the startup hold, cycle " + cycles);
+		assertTrue(rejectedRetries >= 1, "retries rejected: " + rejectedRetries);
+		assertEquals(SafeWriteHandler.State.FAILED, sut.chargePriorityScheduleForTest().handlerState());
+		assertEquals(3, chargePriorityTarget(sut));
+		test.deactivate();
+	}
+
+	private static ModeScheduleState modeScheduleState(SrneBatteryInverterImpl sut) {
+		Channel<ModeScheduleState> channel = sut.channel(SrneBatteryInverter.ChannelId.MODE_SCHEDULE_STATE);
+		return channel.value().asEnum();
 	}
 }
