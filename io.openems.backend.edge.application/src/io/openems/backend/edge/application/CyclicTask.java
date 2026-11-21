@@ -1,8 +1,11 @@
 package io.openems.backend.edge.application;
 
 import static io.openems.common.utils.ThreadPoolUtils.shutdownAndAwaitTermination;
-import static java.util.stream.Collectors.toSet;
+import static java.util.stream.Collectors.toCollection;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -20,12 +23,20 @@ import io.openems.backend.edge.server.WsData;
 
 public class CyclicTask implements Runnable {
 
+	/**
+	 * How long an Edge with an accepted handshake counts as connected before its
+	 * connection is listed by the {@link WebsocketServer}.
+	 */
+	private static final long HANDSHAKE_GRACE_NANOS = TimeUnit.SECONDS.toNanos(10);
+
 	private final Logger log = LoggerFactory.getLogger(CyclicTask.class);
 	private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
 
 	private final WebsocketClient client;
 	private final Supplier<WebsocketServer> server;
 	private final AtomicBoolean connectedEdgesChangedSinceLastRun = new AtomicBoolean(false);
+	/** Edge-ID to time of its accepted handshake; guarded by this. */
+	private final Map<String, Long> acceptedHandshakes = new HashMap<>();
 
 	/**
 	 * Builds and starts the {@link CyclicTask} via a given
@@ -68,6 +79,33 @@ public class CyclicTask implements Runnable {
 		this.connectedEdgesChangedSinceLastRun.set(true);
 	}
 
+	/**
+	 * Announces an Edge to Edge.Manager as soon as its handshake is accepted, i.e.
+	 * before the Edge can send anything.
+	 *
+	 * <p>
+	 * Edge.Manager drops data of Edges it does not know yet, and an Edge sends the
+	 * values of all its Channels only right after connecting and then every few
+	 * minutes. Waiting for the next run would lose that first complete set.
+	 *
+	 * <p>
+	 * Runs on the handshake thread, but never holds up or rejects the Edge:
+	 * sending only queues the message, and if the announcement fails the next run
+	 * sends it.
+	 *
+	 * @param edgeId the Edge-ID
+	 */
+	public synchronized void edgeHandshakeAccepted(String edgeId) {
+		this.acceptedHandshakes.put(edgeId, System.nanoTime());
+		try {
+			this.sendConnectedEdgesNotification(Map.of());
+		} catch (RuntimeException e) {
+			this.connectedEdgesChangedSinceLastRun.set(true);
+			this.log.error("Unable to announce Edge [" + edgeId + "]: " + e.getMessage());
+			this.log.debug("Stacktrace:", e);
+		}
+	}
+
 	private void printDebugLog() {
 		this.log.info(new StringBuilder("[") //
 				.append(this.client.getName()) //
@@ -88,14 +126,35 @@ public class CyclicTask implements Runnable {
 		}
 
 		// connected Edges to Server changed since last run of CyclicTask
+		this.sendConnectedEdgesNotification(server.debugMetrics());
+	}
+
+	private synchronized void sendConnectedEdgesNotification(Map<String, Number> metrics) {
+		var server = this.server.get();
+		if (server == null) {
+			return;
+		}
+
 		// TODO Performance test. How long does this take? Better record/send only diff?
 		var edgeIds = server.getConnections().stream() //
 				.map(ws -> (WsData) ws.getAttachment()) //
 				.map(wsData -> wsData.getEdgeId()) //
 				.filter(Objects::nonNull) //
-				.collect(toSet());
-		var metrics = server.debugMetrics();
-		this.client.sendMessage(new ConnectedEdges.Notification(edgeIds, metrics));
+				.collect(toCollection(HashSet::new));
+
+		// Keep announcing accepted handshakes until their connection is listed
+		final var now = System.nanoTime();
+		this.acceptedHandshakes.entrySet().removeIf(e -> edgeIds.contains(e.getKey()) //
+				|| now - e.getValue() > HANDSHAKE_GRACE_NANOS);
+		edgeIds.addAll(this.acceptedHandshakes.keySet());
+		if (!this.acceptedHandshakes.isEmpty()) {
+			this.connectedEdgesChangedSinceLastRun.set(true);
+		}
+
+		if (!this.client.sendMessage(new ConnectedEdges.Notification(edgeIds, metrics))) {
+			// Not connected to Edge.Manager; send again in the next run
+			this.connectedEdgesChangedSinceLastRun.set(true);
+		}
 	}
 
 }

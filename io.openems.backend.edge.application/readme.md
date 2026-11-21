@@ -37,6 +37,10 @@ OpenEMS Edges
 - **Default Port**: 8081 (configurable)
 - **Thread Pool Size**: 10 threads (configurable)
 - **Configuration**: `port` parameter in Felix console
+- **Authentication**: by the Edge's `Apikey` header. An Edge configured for a direct Edge-Manager connection
+  (Controller.Api.Backend with an Edge-ID) also sends an `id` header. If it does not match the Edge-ID of the Apikey,
+  the handshake is refused and logged as `Handshake rejected. Edge-ID [...] does not match Apikey of [...]`; correct
+  the Edge-ID in the Edge's Controller.Api.Backend.
 
 ### 2. WebSocket Client
 

@@ -2,7 +2,9 @@ ARG JAVA_VERSION=21
 ARG JAVA_PACKAGE=jre
 
 ### Build backend binary
-FROM --platform=$BUILDPLATFORM eclipse-temurin:${JAVA_VERSION}-alpine AS build_backend
+# Base images are pinned by digest: update tag and digest together, and keep
+# this Java version in line with JAVA_VERSION.
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-alpine@sha256:b78a1d385da875588e21207f07dddf9a1418849971ae857fb24c8f3a7d441a72 AS build_backend
 
 RUN apk add --no-cache dos2unix bash
 
@@ -18,7 +20,7 @@ RUN --mount=type=bind,target=.,readwrite \
     ./gradlew --no-build-cache buildBackendEdge
 
 ### Build jar container base
-FROM ghcr.io/linuxserver/baseimage-alpine:edge AS base_container
+FROM ghcr.io/linuxserver/baseimage-alpine:edge@sha256:f825ecd63a48c349bd53b0e39c9428279398f97f23416e473c9f52915e6a4f51 AS base_container
 
 ARG JAVA_VERSION
 ARG JAVA_PACKAGE

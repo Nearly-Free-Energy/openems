@@ -148,7 +148,7 @@ public class BackendEdgeServerApp {
 
 	private synchronized WebsocketServer createServer() {
 		return new WebsocketServer("Backend.Edge.Server", this.config.port(), this.config.serverPoolSize(), this,
-				this.cyclicTask::connectedEdgesChanged);
+				this.cyclicTask::edgeHandshakeAccepted, this.cyclicTask::connectedEdgesChanged);
 	}
 
 	/**
