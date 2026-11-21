@@ -616,11 +616,15 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		this.retryChargeWindow();
 		// Evaluated here, behind the machine-state gate, right before the window.
 		final var chargeEnable = this.effectiveChargeEnable();
-		this.reconcileWindow(this.chargeWindow, //
-				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
-				SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
-				SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, //
-				this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), chargeEnable);
+		// Until the night charge stop has decided after an activation the charge
+		// window is left as the device has it (NightChargeStop.NO_TARGET).
+		if (chargeEnable != NightChargeStop.NO_TARGET || !this.nightChargeStop.isActive()) {
+			this.reconcileWindow(this.chargeWindow, //
+					SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_START, //
+					SrneBatteryInverter.ChannelId.CHARGE_WINDOW_1_STOP, //
+					SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE, //
+					this.config.chargeWindow1Start(), this.config.chargeWindow1Stop(), chargeEnable);
+		}
 		this.reconcileWindow(this.dischargeWindow, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_START, //
 				SrneBatteryInverter.ChannelId.DISCHARGE_WINDOW_1_STOP, //
@@ -874,8 +878,17 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		final var chargePriority = managed ? this.readValue(SrneBatteryInverter.ChannelId.CHARGE_PRIORITY) : null;
 		final var mains = managed && this.isMachineStateVerified();
 		final var running = managed && this.isMachineStateRunning();
+		// The night charge stop ends the night value too (seen one cycle after it
+		// latches, as it is evaluated later in the cycle, behind the settings gate),
+		// and holds it back until it has decided after an activation.
+		var nightStop = ChargePrioritySchedule.NightStop.NONE;
+		if (this.nightChargeStop.hasEndedCharge(now)) {
+			nightStop = ChargePrioritySchedule.NightStop.ENDED;
+		} else if (this.nightChargeStop.isNightChargePending(now)) {
+			nightStop = ChargePrioritySchedule.NightStop.PENDING;
+		}
 		var step = this.chargePrioritySchedule.step(now, chargePriority, this.config.controlEnabled(), mains, running,
-				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES);
+				READBACK_TIMEOUT_CYCLES, FAILED_RETRY_COOLDOWN_CYCLES, nightStop);
 		if (step.withdraw()) {
 			this.logInfo(this.log,
 					"Charge-priority schedule: machine-state gate closed, withdrew the queued E20F write");
@@ -932,6 +945,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		if (now == null) {
 			return "unknown time, fallback";
+		}
+		if (this.chargePrioritySchedule.isNightEnded(now)) {
+			return "night ended by the night charge stop";
 		}
 		return this.chargePrioritySchedule.isNight(now.toLocalTime()) ? "night window" : "day window";
 	}
@@ -1135,8 +1151,10 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 	}
 
 	/**
-	 * The enable target handed to the charge window: the configured value, or 0
-	 * while the night charge stop holds the charge ended. Called only behind the
+	 * The enable target handed to the charge window: the configured value, 0 while
+	 * the night charge stop holds the charge ended, or
+	 * {@link NightChargeStop#NO_TARGET} (the window is not reconciled) until the
+	 * night charge stop has decided after an activation. Called only behind the
 	 * verified machine-state gate, right before the window is reconciled.
 	 *
 	 * @return the enable target for the charge window
@@ -1147,7 +1165,9 @@ public class SrneBatteryInverterImpl extends AbstractOpenemsModbusComponent
 		}
 		var step = this.nightChargeStop.step(this.nightChargeNow,
 				this.readValue(SrneBatteryInverter.ChannelId.CHARGE_SCHEDULE_ENABLE), this.chargeWindow);
-		if (step.message() != null) {
+		if (step.message() != null && step.state() == NightChargeStop.State.HELD_SOC_UNKNOWN) {
+			this.logWarn(this.log, step.message());
+		} else if (step.message() != null) {
 			this.logInfo(this.log, step.message());
 		}
 		ChannelUtils.setValue(this, SrneBatteryInverter.ChannelId.NIGHT_CHARGE_STOP_STATE, step.state());
